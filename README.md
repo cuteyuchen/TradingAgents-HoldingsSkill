@@ -1,19 +1,38 @@
-# Daily Holdings Trading Advisor — 持仓投研决策持久化系统
+# TradingAgents-HoldingsSkill — 以 Skill 为核心的 A 股持仓交易助手
 
-为 [`daily-holdings-trading-advisor` skill](https://github.com/cuteyuchen/daily-holdings-trading-advisor) 配套的决策持久化 + 可视化系统。每次 skill 执行后，把完整决策（8 段辩论 transcript + 持仓快照 + 候选）通过带 Token 的接口上传，系统可视化展示历史决策、持仓盈亏、相对沪深 300 的 Alpha，解决 skill 数据无法持久化、上下文丢失的问题。
+## GitHub 简介
+
+**TradingAgents-HoldingsSkill** 是一个基于 TradingAgents 思路开发的 A 股/ETF 持仓交易 Skill，支持持仓截图解析、实时/最近交易行情采集、多智能体投研辩论、三方风控、今日操作建议、非持仓买入候选、Alpha 记忆与可选的前后端看板持久化。
+
+## 项目定位
+
+这个项目的核心不是前端或后端，而是 `skill/` 下的持仓交易分析能力。它把 TradingAgents 的多智能体投研流程改造成面向真实持仓截图的日内/隔夜操作流程：先解析持仓，再集中采集行情、资金流、板块、新闻和基本面数据，随后通过多空辩论、研究总监裁决、交易员方案、三方风控和组合经理最终决策，输出可执行的当前持仓操作建议与今日非持仓买入/轮动候选。
+
+前后端只是增强层：后端负责保存每次 Skill 执行的完整 transcript、claims、持仓快照、候选和 Alpha；前端负责把这些历史决策用看板方式展示出来，方便复盘和远程访问。
+
+## 基于的 TradingAgents 仓库
+
+本项目参考并融合了以下三个 TradingAgents 系列仓库的设计思想：
+
+- [`TauricResearch/TradingAgents`](https://github.com/TauricResearch/TradingAgents)：多智能体金融研究流程、分析师分工、研究/交易/风控协作框架。
+- [`KylinMountain/TradingAgents-AShare`](https://github.com/KylinMountain/TradingAgents-AShare)：面向 A 股市场的 claim-driven 多空辩论、集中式数据收集、风险修正循环、双周期分析等设计。
+- [`simonlin1212/TradingAgents-astock`](https://github.com/simonlin1212/TradingAgents-astock)：A 股数据源路由、7 类分析师、质量门控、信号数据层、沪深 300 Alpha 记忆等设计。
+
+本项目不是上述仓库的直接 fork，而是在它们的架构思想基础上，把能力收敛到“每日真实持仓操作建议”这个 Skill 场景，并配套了可选的本地持久化和看板。
 
 ## 架构
 
 ```
 ┌──────────────┐   上传 run(Phase 6)    ┌───────────┐   查询    ┌────────────┐
-│   skill      │ ─────────────────────▶ │  backend  │ ◀──────▶ │  frontend  │
-│ (qoderworkcn)│ ◀────拉取历史(Phase 0) │ FastAPI   │           │  Vue3+TS   │
+│ TradingAgents│ ─────────────────────▶ │  backend  │ ◀──────▶ │  frontend  │
+│ HoldingsSkill│ ◀────拉取历史(Phase 0) │ FastAPI   │           │  Vue3+TS   │
 └──────────────┘                        │ + SQLite  │           │ + ECharts  │
                                         │ + AKShare │           └────────────┘
                                         └───────────┘
                                           自动抓沪深300
 ```
 
+- **Skill**：持仓截图解析 + 公共行情/资金流/板块/新闻/基本面采集 + 多空辩论 + 三方风控 + 操作建议
 - **后端**：Python + FastAPI + SQLite（单文件零运维）+ AKShare（沪深300）
 - **前端**：Vue 3 + TypeScript + Vite + Naive UI + TailwindCSS + ECharts（亮/暗主题看板）
 - **鉴权**：单一静态 Bearer Token（单用户场景）；前端登录密码即 `ADVISOR_TOKEN`
@@ -22,7 +41,17 @@
 ## 目录结构
 
 ```
-ZCodeProject/
+TradingAgents-HoldingsSkill/
+├── skill/
+│   ├── SKILL.md                 # Skill 入口与执行流程
+│   ├── data-sources.md          # 数据源路由、行情/资金流/新闻/基本面策略
+│   ├── multi-agent-workflow.md  # 多智能体分析、质量门控、辩论和组合综合
+│   ├── trading-rules.md         # A 股交易约束、仓位和触发规则
+│   ├── debate-reporting.md      # 8 段 transcript 与 claim 输出格式
+│   ├── buy-candidate-selection.md
+│   ├── python-execution.md
+│   ├── persistence.md           # Phase 0/Phase 6 后端集成契约
+│   └── configuration.md
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口 + lifespan + 定时抓沪深300
@@ -99,8 +128,6 @@ cd backend
 
 ## API 概览
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
 除 `/healthz` 外，看板 API 均需要 `Authorization: Bearer <ADVISOR_TOKEN>`。
 
 | 方法 | 路径 | 说明 |
@@ -127,22 +154,22 @@ cd backend
 
 沪深300由后端启动时回填 + 每个交易日 15:35（Asia/Shanghai）定时刷新。
 
-## 与 Skill 集成
+## 使用 Skill
 
-skill 文件夹位于 `C:\Users\yuchen\.qoderworkcn\skills\daily-holdings-trading-advisor`，其中 `persistence.md` 定义了上传/拉取契约。设置环境变量即可启用：
+`skill/` 是本项目主能力目录，可以作为 Codex Skill 安装或复制到本地 Skill 目录使用。其中 `persistence.md` 定义了上传/拉取契约。设置环境变量即可启用可选的后端记忆与看板：
 
 ```
 ADVISOR_API_URL=http://localhost:8000/api/v1
 ADVISOR_TOKEN=adv_xxx
 ```
 
-- **Phase 0**：skill 执行开始时拉取同标的最近 5 次决策 + alpha，注入 trading memory
-- **Phase 6**：skill 执行末尾上传完整 run
-- 未配置时 skill 仍可独立运行（trading memory 回退到对话历史）
+- **Phase 0**：Skill 执行开始时拉取同标的最近 5 次决策 + alpha，注入 trading memory
+- **Phase 6**：Skill 执行末尾上传完整 run
+- 未配置时 Skill 仍可独立运行（trading memory 回退到对话历史）
 
 ## 边界
 
 - 单 Token 单用户（非多用户/JWT）
 - 单一组合（非多组合）
 - 不做行情实时推送、不连券商自动交易
-- skill 不强制依赖系统（未配置仍可独立跑）
+- Skill 不强制依赖前后端系统（未配置仍可独立跑）
