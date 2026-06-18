@@ -1,0 +1,26 @@
+services:
+  backend:
+    build: ./backend
+    container_name: advisor-backend
+    environment:
+      - ADVISOR_TOKEN=${ADVISOR_TOKEN}
+      - ADVISOR_DB_PATH=/app/data/advisor.db
+      - ADVISOR_BENCHMARK_FETCH_ON_START=1
+      - ADVISOR_CORS_ORIGINS=http://localhost:8080,http://localhost:5173
+    volumes:
+      - advisor-data:/app/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: advisor-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  advisor-data:
