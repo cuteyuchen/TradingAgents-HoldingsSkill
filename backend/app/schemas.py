@@ -19,6 +19,9 @@ class QuoteSchema(BaseModel):
     prev_close: float | None = None
     turnover: float | None = None
     volume_ratio: float | None = None
+    source: str | None = None
+    quote_time: str | None = None
+    market_session: str | None = None
 
 
 class TechnicalsSchema(BaseModel):

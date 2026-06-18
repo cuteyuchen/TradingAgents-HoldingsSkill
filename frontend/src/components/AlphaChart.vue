@@ -12,10 +12,11 @@ const option = computed(() => {
   const alpha = props.points.map((p) => (p.alpha != null ? +(p.alpha * 100).toFixed(2) : null))
   return {
     tooltip: { trigger: 'axis', valueFormatter: (v: number) => (v == null ? '—' : v + '%') },
-    legend: { data: ['标的收益', '沪深300', 'Alpha'], top: 0 },
+    textStyle: { color: '#94a3b8' },
+    legend: { data: ['标的收益', '沪深300', 'Alpha'], top: 0, textStyle: { color: '#94a3b8' } },
     grid: { left: 48, right: 16, top: 36, bottom: 28 },
-    xAxis: { type: 'category', data: xs, axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', axisLabel: { formatter: '{value}%', fontSize: 11 } },
+    xAxis: { type: 'category', data: xs, axisLabel: { fontSize: 11 }, axisLine: { lineStyle: { color: '#64748b' } } },
+    yAxis: { type: 'value', axisLabel: { formatter: '{value}%', fontSize: 11 }, splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.22)' } } },
     series: [
       { name: '标的收益', type: 'line', data: raw, smooth: true, itemStyle: { color: '#4e83f0' } },
       { name: '沪深300', type: 'line', data: bench, smooth: true, itemStyle: { color: '#86909c' }, lineStyle: { type: 'dashed' } },

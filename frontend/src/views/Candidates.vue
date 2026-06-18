@@ -6,6 +6,12 @@ import type { Candidate } from '../api/types'
 const list = ref<Candidate[]>([])
 const statusFilter = ref('')
 const err = ref('')
+const statusOptions = [
+  { label: '全部状态', value: '' },
+  { label: '待触发', value: '待触发' },
+  { label: '已命中', value: '已命中' },
+  { label: '已取消', value: '已取消' },
+]
 
 async function load() {
   err.value = ''
@@ -23,29 +29,24 @@ onMounted(load)
   <div class="card">
     <h3>候选跟踪</h3>
     <div class="toolbar">
-      <select v-model="statusFilter" @change="load">
-        <option value="">全部状态</option>
-        <option value="待触发">待触发</option>
-        <option value="已命中">已命中</option>
-        <option value="已取消">已取消</option>
-      </select>
-      <button @click="load">刷新</button>
+      <n-select v-model:value="statusFilter" :options="statusOptions" @update:value="load" />
+      <n-button @click="load">刷新</n-button>
     </div>
-    <div v-if="err" class="err">{{ err }}</div>
-    <table>
+    <n-alert v-if="err" type="error" :show-icon="false" class="mb-3">{{ err }}</n-alert>
+    <table class="data-table">
       <thead>
         <tr><th>候选</th><th>类型</th><th>评分</th><th>入场触发</th><th>仓位</th><th>止盈1/2</th><th>止损</th><th>状态</th></tr>
       </thead>
       <tbody>
         <tr v-for="(c, i) in list" :key="i">
-          <td>{{ c.name }} <code>{{ c.code }}</code></td>
-          <td>{{ c.type || '—' }}</td>
-          <td>{{ c.score ?? '—' }}</td>
-          <td class="muted">{{ c.entry_trigger || '—' }}</td>
-          <td>{{ c.initial_size || '—' }}</td>
-          <td>{{ [c.take_profit_1, c.take_profit_2].filter(Boolean).join(' / ') || '—' }}</td>
-          <td>{{ c.stop_loss || '—' }}</td>
-          <td>{{ c.status }}</td>
+          <td data-label="候选">{{ c.name }} <code>{{ c.code }}</code></td>
+          <td data-label="类型">{{ c.type || '—' }}</td>
+          <td data-label="评分">{{ c.score ?? '—' }}</td>
+          <td data-label="入场触发" class="muted">{{ c.entry_trigger || '—' }}</td>
+          <td data-label="仓位">{{ c.initial_size || '—' }}</td>
+          <td data-label="止盈1/2">{{ [c.take_profit_1, c.take_profit_2].filter(Boolean).join(' / ') || '—' }}</td>
+          <td data-label="止损">{{ c.stop_loss || '—' }}</td>
+          <td data-label="状态">{{ c.status }}</td>
         </tr>
         <tr v-if="!list.length"><td colspan="8" class="muted">暂无候选</td></tr>
       </tbody>
@@ -54,7 +55,9 @@ onMounted(load)
 </template>
 
 <style scoped>
-.toolbar { display: flex; gap: 10px; margin-bottom: 12px; }
-.toolbar select { padding: 6px 10px; border: 1px solid #d9dce0; border-radius: 4px; font-size: 13px; }
-.err { color: #cf1322; font-size: 13px; margin-bottom: 8px; }
+.toolbar :deep(.n-select) { width: 180px; }
+@media (max-width: 640px) {
+  .toolbar :deep(.n-select),
+  .toolbar :deep(.n-button) { width: 100%; }
+}
 </style>

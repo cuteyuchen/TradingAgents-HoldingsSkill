@@ -53,17 +53,26 @@ A skill does not schedule itself. If automatic daily execution is requested, say
 
 ## Fast Workflow
 
+Target routine execution time is about 5 minutes. Use batch public data fetches
+first, then split per-holding work across ticker-worker subagents or Python
+worker bundles when there are multiple holdings. Do not let slow optional data
+sources consume the final synthesis/upload window; mark precise missing fields
+and keep going once the fetch deadline is reached.
+
 0. **Fetch history (Phase 0, if persistence configured)**: If `ADVISOR_API_URL` + `ADVISOR_TOKEN` are set, pull the last 5 same-ticker decisions + cross-ticker lessons for in-scope holdings via `persistence.md`. This seeds trading memory from a real store instead of conversation history. Skip silently if not configured.
 1. **Parse intent**: Identify target tickers, investment horizon, focus areas, risk profile, specific objective from natural language. See `multi-agent-workflow.md` intent parsing section.
 2. **Identify holdings source**: screenshot > typed current holdings > history/memory.
 3. **Extract holdings**: name, code if visible, quantity, available quantity, cost, current price, market value, P/L, total exposure.
-4. **Resolve symbols carefully**: If a broker ETF display name is ambiguous, match by name plus screenshot price; if still uncertain, state the ambiguity. See `data-sources.md` symbol resolution.
-5. **Centralized data collection**: Fetch all data once using the 5-tier source matrix and the source routing decision table. Use `python-execution.md` for batch fetching, dedup/TTL cache, VPA pre-computation, and technical indicator calculation. See `data-sources.md` for the centralized collection principle.
+4. **Resolve symbols carefully**: If a broker display name is ambiguous, first use public symbol/quote sources to match by name plus screenshot price. If there is no unique match within the 2% price tolerance, ask the user to confirm/input the code and do not upload the run until confirmed. See `data-sources.md` symbol resolution.
+5. **Mandatory quote collection**: After codes are confirmed, fetch public market quotes in batch. During trading hours use live quotes; after market close use the latest completed trading session data. If every quote route is unavailable, degrade explicitly, record health failure, and mark the missing quote fields. See `python-execution.md`.
 6. **Two-layer quality gate**: Grade all evidence before debate using the numeric thresholds in `configuration.md` (Layer 1: hard checks, Layer 2: LLM review). See `multi-agent-workflow.md` quality gate section.
 7. **Run the multi-agent reasoning**: Run the full analyst pass for top-risk names, lighter pass for small positions. Apply dual-horizon analysis for core holdings. Apply claim-driven bull/bear debate. See `multi-agent-workflow.md`.
 8. **Apply trading rules**: T+1, daily limits, lot size, time-of-day, total exposure, loser/winner priority, dual-horizon sleeve sizing. Check risk revision loop. See `trading-rules.md`.
 9. **Select 1-2 buy/rotation candidates**: Use the three-layer hot sector scanner and scoring system. If buys are blocked, still output conditional watch-only triggers. See `buy-candidate-selection.md`.
-10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Show unresolved claims explicitly. See `debate-reporting.md`.
+   - Today's buy/rotation candidates must not duplicate current holdings. If a
+     held symbol is a hold/add decision, keep it in the holding action table and
+     choose a different non-held candidate or state that no new buy is allowed.
+10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Investment claims must use `INV-` IDs; three-way risk claims must use `RISK-1/RISK-2/RISK-3` with aggressive/neutral/conservative speakers. Show unresolved claims explicitly. See `debate-reporting.md`.
 11. **Risk Manager review**: Check if Trader proposal needs revision. Apply hard/soft constraints. See `trading-rules.md` risk revision loop.
 12. **Output action-first advice**: Market read, portfolio conclusion, holding table, buy candidate plan, rebalance plan, checkpoint-specific execution rules.
 13. **Trading memory reflection**: If past decisions exist (from Step 0 fetch or conversation history), reference them and compute alpha vs CSI 300. See `trading-rules.md` trading memory section.
@@ -106,15 +115,21 @@ Keep the answer concise and executable. Use the structured output levels (full/c
 - Do not use local project databases or app state as holdings.
 - Do not let Python scripts or installed dependencies query local broker apps, local databases, caches, or development systems for holdings.
 - Do not force-match ambiguous ETFs when live price conflicts with screenshot price.
+- Do not persist a run with `UNKNOWN-*` holdings when public matching cannot confirm the code; ask the user for confirmation first and mark `[未持久化: 待确认代码]`.
+- Do not skip public quote collection for confirmed codes. During market close, use the latest completed trading session data rather than stale intraday assumptions; if all quote sources fail, record `[数据缺失: quote]` and report `/health/outcome`.
 - Do not average down heavy losers without market, sector, and capital-flow confirmation.
 - Do not give generic "observe" answers; include triggers, quantities/percentages, and priority.
 - Do not omit today's buy/rotation candidates; if no buy is allowed, output a conditional watch-only plan with exact triggers.
 - Do not omit the bull/bear and risk debate transcript during execution unless the user asks for a concise answer.
+- Do not upload three-way risk debate only as prose. Persist `RISK-1/RISK-2/RISK-3` claims in the run payload so the dashboard can render them.
 - Do not phrase any recommendation as guaranteed profit.
 - Do not skip the quality gate; always state the data quality grade in the evidence pack.
 - Do not present resolved claims as still uncertain; update claim status explicitly.
 - Do not ignore unresolved claims in the final verdict; the Research Manager must address each one.
 - Do not recommend a buy that violates the risk revision loop's hard constraints.
+- Do not list the same code as a current holding action and as today's
+  buy/rotation candidate. Existing-holding add/hold decisions belong in the
+  holding table; new-buy candidates must be non-held symbols.
 - Do not make more than 5 concurrent Eastmoney requests; follow the rate limiting discipline in `data-sources.md` and the throttling parameters in `configuration.md`.
 - Do not silently swallow a persistence upload failure; if `ADVISOR_API_URL` is configured and the upload fails, mark `[未持久化: 原因]` at the end of the advice.
 - Do not keep grinding after `consecutive_failure_threshold` (default 3) data-fetch failures for a checkpoint; degrade output (Compressed/Minimal) and, if persistence is configured, let the system flag the checkpoint grey.
@@ -126,12 +141,17 @@ Before final advice, verify:
 - Holdings source is explicit (screenshot/typed/history).
 - Intent is parsed and stated (ticker/horizon/focus/objective).
 - Every live quote maps to the correct code or is marked uncertain.
+- Every uncertain code has either a public-source match within tolerance or a user confirmation before upload.
+- Every confirmed holding has a quote source, quote time, and market session in `indicators.quote`, unless all quote routes failed and the run is explicitly degraded.
 - At least one broad index, relevant sector, and capital-flow check was considered.
 - VPA signals were computed for material holdings.
 - Hot sectors/themes were scanned using the three-layer architecture, or source failure was marked and candidate confidence was reduced.
 - News/fundamental/policy red flags were checked for heavy positions.
 - Data quality grade is stated and reflects the two-layer gate results.
 - Debate includes claim IDs with at least the top 2-3 claims per side.
+- Three-way risk debate includes structured `RISK-` claims for aggressive, neutral, and conservative views.
 - Unresolved claims are explicitly listed and addressed in the verdict.
 - Advice contains explicit action, trigger level, risk control, and a buy/rotation candidate plan.
+- Current holding actions and today's new-buy/rotation plan are both present,
+  and candidate codes do not overlap with holding codes.
 - If past decisions exist for any holding, trading memory was checked and alpha referenced.

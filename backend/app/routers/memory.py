@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..auth import require_token
 from ..database import get_db
 
 router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
@@ -14,6 +15,7 @@ def memory_context(
     same_limit: int = Query(5, ge=1, le=50),
     cross_limit: int = Query(3, ge=0, le=20),
     db: Session = Depends(get_db),
+    _: str = Depends(require_token),
 ):
     same = (
         db.query(models.HoldingSnapshot)

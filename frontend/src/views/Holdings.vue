@@ -40,10 +40,10 @@ const pctClass = (v?: number | null): string => (v == null ? '' : v >= 0 ? 'pos'
 </script>
 
 <template>
-  <div v-if="err" class="card"><div class="err">{{ err }}</div></div>
+  <div v-if="err" class="card"><n-alert type="error" :show-icon="false">{{ err }}</n-alert></div>
   <div class="card">
     <h3>当前持仓（{{ portfolio.timestamp ? portfolio.timestamp.slice(0, 16).replace('T', ' ') : '无' }}）</h3>
-    <table>
+    <table class="data-table">
       <thead>
         <tr><th>代码</th><th>名称</th><th>现价</th><th>成本</th><th>盈亏</th><th>Alpha</th></tr>
       </thead>
@@ -52,12 +52,12 @@ const pctClass = (v?: number | null): string => (v == null ? '' : v >= 0 ? 'pos'
             :class="{ active: selectedCode === h.code }"
             class="clickable"
             @click="selectedCode = h.code; loadTimeline(h.code)">
-          <td><code>{{ h.code }}</code></td>
-          <td>{{ h.name || '—' }}</td>
-          <td>{{ h.price ?? '—' }}</td>
-          <td>{{ h.cost ?? '—' }}</td>
-          <td :class="pctClass(h.pnl)">{{ h.pnl != null ? (h.pnl * 100).toFixed(2) + '%' : '—' }}</td>
-          <td :class="pctClass(h.alpha)">{{ fmtPct(h.alpha) }}</td>
+          <td data-label="代码"><code>{{ h.code }}</code></td>
+          <td data-label="名称">{{ h.name || '—' }}</td>
+          <td data-label="现价">{{ h.price ?? '—' }}</td>
+          <td data-label="成本">{{ h.cost ?? '—' }}</td>
+          <td data-label="盈亏" :class="pctClass(h.pnl)">{{ h.pnl != null ? (h.pnl * 100).toFixed(2) + '%' : '—' }}</td>
+          <td data-label="Alpha" :class="pctClass(h.alpha)">{{ fmtPct(h.alpha) }}</td>
         </tr>
         <tr v-if="!portfolio.holdings.length"><td colspan="6" class="muted">暂无持仓</td></tr>
       </tbody>
@@ -79,9 +79,5 @@ const pctClass = (v?: number | null): string => (v == null ? '' : v >= 0 ? 'pos'
 </template>
 
 <style scoped>
-.clickable { cursor: pointer; }
-.clickable:hover { background: #f2f6ff; }
-.active { background: #eef2ff; }
 .kv { display: flex; gap: 18px; font-size: 13px; flex-wrap: wrap; }
-.err { color: #cf1322; font-size: 13px; }
 </style>

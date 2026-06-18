@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import auth
@@ -81,4 +81,9 @@ app.include_router(memory.router)
 
 @app.get("/healthz")
 def healthz() -> dict:
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/auth/verify")
+def verify_auth(_: str = Depends(auth.require_token)) -> dict:
     return {"status": "ok"}

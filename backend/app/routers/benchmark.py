@@ -16,6 +16,7 @@ def benchmark_prices(
     to: str | None = Query(None),
     limit: int = Query(250, ge=1, le=2000),
     db: Session = Depends(get_db),
+    _: str = Depends(require_token),
 ):
     q = db.query(BenchmarkPrice)
     if frm:

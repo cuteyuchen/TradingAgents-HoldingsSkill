@@ -15,8 +15,8 @@
 ```
 
 - **后端**：Python + FastAPI + SQLite（单文件零运维）+ AKShare（沪深300）
-- **前端**：Vue 3 + TypeScript + Vite + ECharts（完整可视化看板）
-- **鉴权**：单一静态 Bearer Token（单用户场景）
+- **前端**：Vue 3 + TypeScript + Vite + Naive UI + TailwindCSS + ECharts（亮/暗主题看板）
+- **鉴权**：单一静态 Bearer Token（单用户场景）；前端登录密码即 `ADVISOR_TOKEN`
 - **部署**：docker-compose 一键起（后端 + 前端 + 数据卷）
 
 ## 目录结构
@@ -69,6 +69,7 @@ docker compose up -d --build
 
 # 后端 http://localhost:8000  (Swagger: /docs)
 # 前端 http://localhost:8080
+# 远程访问: http://<主机IP>:8080，页面输入 ADVISOR_TOKEN 登录
 ```
 
 ### 方式二：本地开发（前后端分离）
@@ -84,7 +85,7 @@ uvicorn app.main:app --reload
 # 前端（另一个终端，vite 代理 /api → :8000）
 cd frontend
 npm install
-npm run dev    # http://localhost:5173
+npm run dev    # http://localhost:5173，也监听 0.0.0.0 支持 http://<主机IP>:5173
 ```
 
 ## 测试
@@ -100,16 +101,21 @@ cd backend
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+除 `/healthz` 外，看板 API 均需要 `Authorization: Bearer <ADVISOR_TOKEN>`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/auth/verify` | 校验前端登录密码（Bearer） |
 | POST | `/api/v1/runs` | 上传完整 run（Bearer） |
-| GET | `/api/v1/runs` | 决策列表（可按 code 筛选） |
-| GET | `/api/v1/runs/{id}` | 单次决策完整详情 |
-| GET | `/api/v1/portfolio/current` | 最新持仓快照 |
-| GET | `/api/v1/holdings/{code}/timeline` | 标的决策序列 + alpha |
-| GET | `/api/v1/memory/context` | Phase 0 同标的记忆 + 跨标的 lessons |
-| GET | `/api/v1/candidates` | 候选跟踪 |
-| GET | `/api/v1/benchmark/hs300` | 沪深300 基准 |
-| GET/POST/DELETE | `/api/v1/watchlist` | 自选股管理 |
-| GET/POST | `/api/v1/health[/outcome]` | 检查点健康度 |
+| GET | `/api/v1/runs` | 决策列表（可按 code 筛选，Bearer） |
+| GET | `/api/v1/runs/{id}` | 单次决策完整详情（Bearer） |
+| GET | `/api/v1/portfolio/current` | 最新持仓快照（Bearer） |
+| GET | `/api/v1/holdings/{code}/timeline` | 标的决策序列 + alpha（Bearer） |
+| GET | `/api/v1/memory/context` | Phase 0 同标的记忆 + 跨标的 lessons（Bearer） |
+| GET | `/api/v1/candidates` | 候选跟踪（Bearer） |
+| GET | `/api/v1/benchmark/hs300` | 沪深300 基准（Bearer） |
+| GET/POST/DELETE | `/api/v1/watchlist` | 自选股管理（Bearer） |
+| GET/POST | `/api/v1/health[/outcome]` | 检查点健康度（Bearer） |
 
 ## Alpha 计算
 

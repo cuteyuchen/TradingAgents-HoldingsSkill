@@ -17,9 +17,9 @@ If either is unset, the skill runs without persistence (trading memory falls bac
 
 Before analysis, fetch prior decisions for in-scope holdings to seed trading memory.
 
-**Preferred request:** `GET {ADVISOR_API_URL}/memory/context?code={code}&same_limit=5&cross_limit=3`
+**Preferred request:** `GET {ADVISOR_API_URL}/memory/context?code={code}&same_limit=5&cross_limit=3` with `Authorization: Bearer {ADVISOR_TOKEN}`
 
-**Backward-compatible request:** `GET {ADVISOR_API_URL}/holdings/{code}/timeline?limit=5` (same-ticker timeline only)
+**Backward-compatible request:** `GET {ADVISOR_API_URL}/holdings/{code}/timeline?limit=5` with `Authorization: Bearer {ADVISOR_TOKEN}` (same-ticker timeline only)
 
 **Response:**
 ```json
@@ -54,7 +54,7 @@ The body is the skill's output contract (see `python-execution.md`) plus the 8-s
   "holdings_source": "screenshot",
   "data_quality_grade": "B",
   "intent": {"tickers": ["600519"], "horizon": "short", "focus": ["技术"], "risk_profile": "稳健"},
-  "evidence_pack": {"code_assumptions": {"600519": "high"}, "missing_fields": []},
+  "evidence_pack": {"code_assumptions": {"600519": "high: public quote matched screenshot price"}, "missing_fields": []},
   "transcript": "完整8段原文 transcript",
   "sections": {
     "evidence": "证据包",
@@ -73,7 +73,11 @@ The body is the skill's output contract (see `python-execution.md`) plus the 8-s
     {"code": "600519", "name": "贵州茅台", "qty": 100, "cost": 1700, "price": 1680,
      "data_quality": "B",
      "indicators": {
-       "quote": {"price": 1680, "pct_change": -1.2, "volume_ratio": 1.3},
+       "quote": {
+         "price": 1680, "pct_change": -1.2, "volume_ratio": 1.3,
+         "source": "Tencent qt.gtimg.cn", "quote_time": "2026-06-18 10:00:03",
+         "market_session": "trading"
+       },
        "technicals": {"rsi_14": 45.2, "macd_signal": "below_zero", "ma_5": 1690, "ma_20": 1710},
        "vpa": {"obv_trend": "down", "bearish_divergence": false},
        "fund_flow": {"super_large_net": -2.1e8},
@@ -82,7 +86,13 @@ The body is the skill's output contract (see `python-execution.md`) plus the 8-s
   ],
   "claims": [
     {"claim_id": "INV-1", "speaker": "bull", "stance": "bullish", "claim": "政策支持",
-     "evidence": ["证据1"], "confidence": 0.8, "status": "open", "round": 1}
+     "evidence": ["证据1"], "confidence": 0.8, "status": "open", "round": 1},
+    {"claim_id": "RISK-1", "speaker": "aggressive", "stance": "risk_accept", "claim": "保留弹性仓",
+     "evidence": ["证据1"], "confidence": 0.6, "status": "addressed", "round": 1},
+    {"claim_id": "RISK-2", "speaker": "neutral", "stance": "risk_balance", "claim": "只做触发式调整",
+     "evidence": ["证据2"], "confidence": 0.7, "status": "addressed", "round": 1},
+    {"claim_id": "RISK-3", "speaker": "conservative", "stance": "risk_avoid", "claim": "暂停新增买入",
+     "evidence": ["证据3"], "confidence": 0.8, "status": "resolved", "round": 1}
   ],
   "research_verdict": {"rating": "Hold", "winner": "bull", "rationale": "...", "confidence": "中"},
   "trader_proposals": [
@@ -144,6 +154,7 @@ def upload_run(payload: dict) -> dict | None:
 
 - Upload failure must **not** block the advice to the user. Finish the advice, then attempt upload.
 - On failure, append a note to the advice: `[未持久化: {reason}]`.
+- If any holding code still needs user confirmation after public matching, do not attempt upload; append `[未持久化: 待确认代码]` and ask the user to provide/choose the code.
 - On success, no extra note is needed (the dashboard is the source of truth).
 - Never retry more than once in a single run.
 

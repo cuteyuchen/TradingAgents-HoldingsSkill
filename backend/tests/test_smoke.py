@@ -43,6 +43,11 @@ def test_upload_and_read():
     client = TestClient(app)
     headers = {"Authorization": "Bearer test_token_xxx"}
 
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/api/v1/auth/verify").status_code == 401
+    assert client.get("/api/v1/auth/verify", headers=headers).status_code == 200
+    assert client.get("/api/v1/runs").status_code == 401
+
     # First run: a holding at price 10.0 (no prior → no alpha yet).
     run1 = {
         "timestamp": "2026-06-17T10:00:00",
@@ -74,13 +79,34 @@ def test_upload_and_read():
         "quality_gates": [
             {"analyst": "技术分析", "hard_check": "fail", "grade": "C", "gaps": "缺少资金流"}
         ],
-        "holdings": [{"code": "600519", "name": "贵州茅台", "price": 11.0}],
+        "holdings": [{
+            "code": "600519",
+            "name": "贵州茅台",
+            "price": 11.0,
+            "indicators": {
+                "quote": {
+                    "price": 11.0,
+                    "source": "Tencent qt.gtimg.cn",
+                    "quote_time": "2026-06-18 10:00:03",
+                    "market_session": "trading",
+                }
+            },
+        }],
         "claims": [
             {"claim_id": "INV-1", "speaker": "bull", "claim": "测试多头",
              "confidence": 0.8, "status": "open", "round": 1},
+            {"claim_id": "RISK-1", "speaker": "aggressive", "stance": "risk_accept",
+             "claim": "测试激进风控", "confidence": 0.6, "status": "addressed", "round": 1},
+            {"claim_id": "RISK-2", "speaker": "neutral", "stance": "risk_balance",
+             "claim": "测试中性风控", "confidence": 0.7, "status": "addressed", "round": 1},
+            {"claim_id": "RISK-3", "speaker": "conservative", "stance": "risk_avoid",
+             "claim": "测试保守风控", "confidence": 0.8, "status": "resolved", "round": 1},
         ],
         "research_verdict": {"rating": "Hold", "winner": "bull", "confidence": "中"},
-        "candidates": [{"code": "512480", "name": "半导体ETF", "score": 7.5, "status": "待触发"}],
+        "candidates": [
+            {"code": "512480", "name": "半导体ETF", "score": 7.5, "status": "待触发"},
+            {"code": "600519", "name": "贵州茅台", "score": 8.0, "status": "待触发"},
+        ],
     }
     r = client.post("/api/v1/runs", json=run2, headers=headers)
     assert r.status_code == 201, r.text
@@ -89,26 +115,34 @@ def test_upload_and_read():
     assert abs(alpha["alpha"] - 0.08) < 1e-6, alpha
 
     # List + detail + new filters.
-    r = client.get("/api/v1/runs?code=600519")
+    r = client.get("/api/v1/runs?code=600519", headers=headers)
     assert r.status_code == 200
     assert len(r.json()) == 2
 
-    r = client.get("/api/v1/runs?code=600519&from=2026-06-18&to=2026-06-18&checkpoint=14:30&grade=C")
+    r = client.get(
+        "/api/v1/runs?code=600519&from=2026-06-18&to=2026-06-18&checkpoint=14:30&grade=C",
+        headers=headers,
+    )
     assert r.status_code == 200
     assert len(r.json()) == 1
     run_id = r.json()[0]["id"]
 
-    r = client.get(f"/api/v1/runs/{run_id}")
+    r = client.get(f"/api/v1/runs/{run_id}", headers=headers)
     assert r.status_code == 200
     detail = r.json()
     assert detail["transcript"] == "完整8段 transcript"
     assert detail["sections"]["risk_debate"] == "风控辩论"
     assert detail["holdings"][0]["alpha"] is not None
-    assert len(detail["claims"]) == 1
+    assert detail["holdings"][0]["indicators"]["quote"]["source"] == "Tencent qt.gtimg.cn"
+    assert len(detail["claims"]) == 4
+    assert len([c for c in detail["claims"] if c["claim_id"].startswith("RISK-")]) == 3
     assert detail["research_verdict"]["rating"] == "Hold"
+    assert [c["code"] for c in detail["candidates"]] == ["512480"]
+    assert detail["evidence_pack"]["candidate_conflicts_removed"][0]["code"] == "600519"
 
     # Holding timeline returns oldest-first with alpha.
-    r = client.get("/api/v1/holdings/600519/timeline?limit=5")
+    assert client.get("/api/v1/holdings/600519/timeline?limit=5").status_code == 401
+    r = client.get("/api/v1/holdings/600519/timeline?limit=5", headers=headers)
     assert r.status_code == 200
     pts = r.json()["points"]
     assert len(pts) == 2
@@ -133,13 +167,25 @@ def test_upload_and_read():
     }
     r = client.post("/api/v1/runs", json=run_cross, headers=headers)
     assert r.status_code == 201, r.text
+    cross_run_id = r.json()["run_id"]
 
-    r = client.get("/api/v1/memory/context?code=600519&same_limit=5&cross_limit=3")
+    assert client.get("/api/v1/memory/context?code=600519&same_limit=5&cross_limit=3").status_code == 401
+    r = client.get("/api/v1/memory/context?code=600519&same_limit=5&cross_limit=3", headers=headers)
     assert r.status_code == 200
     memory = r.json()
     assert len(memory["same_ticker"]) == 3
     assert memory["cross_ticker_lessons"][0]["code"] == "000001"
     assert "跨标的经验" in memory["cross_ticker_lessons"][0]["lesson"]
+
+    # Runs can be deleted from the dashboard, with auth and cascading children.
+    assert client.delete(f"/api/v1/runs/{cross_run_id}").status_code == 401
+    r = client.delete(f"/api/v1/runs/{cross_run_id}", headers=headers)
+    assert r.status_code == 204, r.text
+    assert client.get(f"/api/v1/runs/{cross_run_id}", headers=headers).status_code == 404
+    assert client.delete(f"/api/v1/runs/{cross_run_id}", headers=headers).status_code == 404
+    r = client.get("/api/v1/runs?code=000001", headers=headers)
+    assert r.status_code == 200
+    assert r.json() == []
 
     # Health failures disable the matching watchlist item; success does not re-enable it.
     r = client.post(
@@ -157,7 +203,8 @@ def test_upload_and_read():
         assert r.status_code == 200, r.text
     assert r.json()["degraded"] is True
 
-    r = client.get("/api/v1/watchlist")
+    assert client.get("/api/v1/watchlist").status_code == 401
+    r = client.get("/api/v1/watchlist", headers=headers)
     assert r.status_code == 200
     assert r.json()[0]["enabled"] is False
 
@@ -168,7 +215,7 @@ def test_upload_and_read():
     )
     assert r.status_code == 200
     assert r.json()["consecutive_failures"] == 0
-    r = client.get("/api/v1/watchlist")
+    r = client.get("/api/v1/watchlist", headers=headers)
     assert r.json()[0]["enabled"] is False
 
     print("SMOKE OK: upload + alpha + timeline verified")

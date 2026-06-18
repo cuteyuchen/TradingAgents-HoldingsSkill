@@ -9,7 +9,13 @@ defineProps<{
 
 const ratingColor = (rating?: string | null): string => {
   if (!rating) return ''
-  return ({ Buy: '#cf1322', Overweight: '#d48806', Hold: '#86909c', Underweight: '#4e83f0', Sell: '#00a854' }[rating]) || '#86909c'
+  return ({
+    Buy: 'var(--app-danger)',
+    Overweight: 'var(--app-warning)',
+    Hold: 'var(--app-text-muted)',
+    Underweight: 'var(--app-primary)',
+    Sell: 'var(--app-success)',
+  }[rating]) || 'var(--app-text-muted)'
 }
 </script>
 
@@ -47,10 +53,57 @@ const ratingColor = (rating?: string | null): string => {
 </template>
 
 <style scoped>
-.verdict-card { border-radius: 8px; padding: 14px 18px; border: 1px solid #e5e6eb; border-left: 4px solid #4e83f0; background: #fff; }
-.verdict-card.green { border-left-color: #00a854; }
-.vc-head { font-weight: 600; font-size: 14px; margin-bottom: 10px; color: #1f2329; }
-.vc-row { display: flex; gap: 12px; font-size: 13px; margin-bottom: 6px; }
-.vc-label { color: #86909c; width: 64px; flex-shrink: 0; }
-.vc-rating { font-weight: 700; font-size: 15px; }
+.verdict-card {
+  border: 1px solid var(--app-border);
+  border-left: 4px solid var(--app-primary);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-surface-strong) 82%, transparent);
+  padding: 14px 18px;
+}
+
+.verdict-card.green {
+  border-left-color: var(--app-success);
+}
+
+.vc-head {
+  margin-bottom: 12px;
+  color: var(--app-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.vc-body {
+  display: grid;
+  gap: 8px;
+}
+
+.vc-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.vc-row span:last-child {
+  overflow-wrap: anywhere;
+}
+
+.vc-label {
+  color: var(--app-text-muted);
+  font-weight: 700;
+}
+
+.vc-rating {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+@media (max-width: 480px) {
+  .vc-row {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+}
 </style>

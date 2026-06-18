@@ -22,7 +22,7 @@ const unresolved = computed(() => props.claims.filter((c) => c.status === 'unres
 <template>
   <div>
     <div v-for="[r, cs] in rounds" :key="r" class="round">
-      <div class="round-head">Round {{ r }} — {{ r === 1 ? '建立核心论点' : r === 2 ? '攻防核心论点' : '收敛结论' }}</div>
+      <div class="round-head">第 {{ r }} 轮 - {{ r === 1 ? '建立核心论点' : r === 2 ? '攻防核心论点' : '收敛结论' }}</div>
       <ClaimTable :claims="cs" />
     </div>
     <div v-if="unresolved.length" class="unres-box">
@@ -39,7 +39,7 @@ const unresolved = computed(() => props.claims.filter((c) => c.status === 'unres
 
 <style scoped>
 .round { margin-bottom: 16px; }
-.round-head { font-weight: 600; font-size: 13px; color: #4e83f0; margin-bottom: 6px; }
-.unres-box { background: #fffbe6; border-left: 3px solid #d48806; padding: 10px 14px; font-size: 13px; }
+.round-head { font-weight: 700; font-size: 13px; color: var(--app-primary); margin-bottom: 6px; }
+.unres-box { background: color-mix(in srgb, var(--app-warning) 12%, transparent); border-left: 3px solid var(--app-warning); padding: 10px 14px; font-size: 13px; }
 .unres-box ul { margin: 6px 0 0; padding-left: 18px; }
 </style>

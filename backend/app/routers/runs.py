@@ -13,15 +13,32 @@ from ..services.alpha import compute_alpha_for_holding
 router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
 
 
+def _norm_code(code: str | None) -> str:
+    return (code or "").strip().upper()
+
+
 def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
     """Persist a full run and compute alpha per holding. Returns (run, alphas)."""
+    holding_codes = {_norm_code(h.code) for h in payload.holdings}
+    candidate_conflicts = [
+        {"code": c.code, "name": c.name}
+        for c in payload.candidates
+        if _norm_code(c.code) in holding_codes
+    ]
+    evidence_pack = dict(payload.evidence_pack or {})
+    if candidate_conflicts:
+        evidence_pack["candidate_conflicts_removed"] = candidate_conflicts
+        evidence_pack["candidate_policy"] = (
+            "今日买入/轮动候选必须是非当前持仓；当前持仓的持有/加仓/减仓只写入交易员方案。"
+        )
+
     run = models.Run(
         timestamp=payload.timestamp,
         checkpoint=payload.checkpoint,
         holdings_source=payload.holdings_source,
         data_quality_grade=payload.data_quality_grade,
         intent=payload.intent.model_dump() if payload.intent else None,
-        evidence_pack=payload.evidence_pack,
+        evidence_pack=evidence_pack or None,
         transcript=payload.transcript,
         sections=payload.sections,
     )
@@ -108,6 +125,8 @@ def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
 
     # Candidates.
     for c in payload.candidates:
+        if _norm_code(c.code) in holding_codes:
+            continue
         db.add(models.Candidate(
             run_id=run.id, code=c.code, name=c.name, type=c.type, score=c.score,
             score_breakdown=c.score_breakdown, entry_trigger=c.entry_trigger,
@@ -141,6 +160,7 @@ def list_runs(
     checkpoint: str | None = Query(None),
     grade: str | None = Query(None),
     db: Session = Depends(get_db),
+    _: str = Depends(require_token),
 ) -> list[RunSummary]:
     q = db.query(models.Run)
     if code:
@@ -160,17 +180,34 @@ def list_runs(
         out.append(RunSummary(
             id=r.id, timestamp=r.timestamp, checkpoint=r.checkpoint,
             data_quality_grade=r.data_quality_grade, pm_rating=pm_rating,
-            holdings_count=len(r.holdings), candidates_count=len(r.candidates),
+            holdings_count=len(r.holdings), candidates_count=len(_non_conflicting_candidates(r)),
         ))
     return out
 
 
 @router.get("/{run_id}")
-def get_run(run_id: int, db: Session = Depends(get_db)):
+def get_run(
+    run_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_token),
+):
     run = db.get(models.Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="run not found")
     return _serialize_run(run)
+
+
+@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_run(
+    run_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_token),
+) -> None:
+    run = db.get(models.Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    db.delete(run)
+    db.commit()
 
 
 def _serialize_run(run: models.Run) -> dict:
@@ -206,7 +243,7 @@ def _serialize_run(run: models.Run) -> dict:
              "initial_size": c.initial_size, "take_profit_1": c.take_profit_1,
              "take_profit_2": c.take_profit_2, "stop_loss": c.stop_loss,
              "invalidation": c.invalidation, "status": c.status}
-            for c in run.candidates
+            for c in _non_conflicting_candidates(run)
         ],
     }
 
@@ -248,6 +285,11 @@ def _one(obj) -> dict | None:
     if obj is None:
         return None
     return {c.name: getattr(obj, c.name) for c in obj.__table__.columns if c.name != "id" and c.name != "run_id"}
+
+
+def _non_conflicting_candidates(run: models.Run) -> list[models.Candidate]:
+    holding_codes = {_norm_code(h.code) for h in run.holdings}
+    return [c for c in run.candidates if _norm_code(c.code) not in holding_codes]
 
 
 def _parse_date_bound(value: str, end: bool) -> datetime:

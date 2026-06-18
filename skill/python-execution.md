@@ -41,6 +41,64 @@ Keep installs minimal:
 
 Inspired by `TradingAgents-astock`'s `_em_get()` and `TradingAgents-AShare`'s `_AkshareLock`:
 
+### Five-Minute Parallel Collection Budget
+
+Routine screenshot portfolio analysis should target `target_runtime_sec` = 300
+seconds. Use multiple ticker-worker subagents or Python worker threads for
+independent data fetches, but keep Eastmoney throttling global.
+
+Recommended wall-clock budget:
+
+| Window | Budget | Work |
+|---|---:|---|
+| Shared prefetch | 0-45s | Symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
+| Ticker workers | 45-210s | Split holdings into up to `max_ticker_workers` bundles; fetch K-line, VPA, news, fundamentals, fund-flow fallback per bundle |
+| Candidate workers | 120-230s | Scan non-held candidate ETFs/stocks from hot sectors in parallel with ticker workers |
+| Merge + quality gate | 210-250s | Normalize evidence, mark missing fields, grade data |
+| Synthesis + upload | 250-300s | Holding actions, new-buy plan, claims, risk debate, persistence |
+
+Rules:
+
+- Start with batch quote/index/sector requests before per-ticker work.
+- Partition holdings by risk priority, not by screen order: heavy losers and
+  largest market-value names get first worker slots.
+- Use `ThreadPoolExecutor(max_workers=max_ticker_workers)` or separate
+  ticker-worker subagents for non-Eastmoney routes. A worker owns one bundle and
+  returns a normalized evidence dict; it must not write holdings or upload runs.
+- Keep one process-wide Eastmoney semaphore and one process-wide timestamp
+  throttle. Eastmoney calls across all workers still obey `em_max_concurrent`
+  and `em_min_interval_sec`.
+- Set every request timeout to `per_source_timeout_sec` unless a source
+  explicitly needs longer. Retry at most once on the next configured fallback.
+- Stop fetching when `fetch_deadline_sec` is reached. Preserve the evidence
+  already collected, mark precise missing fields, and continue to synthesis.
+- Never spend the final `synthesis_deadline_sec` on more network retries. The
+  final answer must still contain the current-holding action table and today's
+  buy/rotation plan.
+
+Minimal worker sketch:
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from time import monotonic
+
+deadline = monotonic() + 240  # fetch_deadline_sec
+
+def collect_ticker_bundle(bundle):
+    out = []
+    for holding in bundle:
+        if monotonic() > deadline:
+            out.append({"code": holding["code"], "missing": ["fetch_deadline"]})
+            continue
+        out.append(fetch_one_holding_with_fallbacks(holding))
+    return out
+
+with ThreadPoolExecutor(max_workers=4) as pool:
+    futures = [pool.submit(collect_ticker_bundle, b) for b in bundles]
+    for f in as_completed(futures, timeout=240):
+        evidence["holdings"].extend(f.result())
+```
+
 ### Eastmoney Throttling
 
 All Eastmoney requests must follow these rules:
@@ -74,13 +132,15 @@ Route requests to minimize Eastmoney load:
 Inspired by `TradingAgents-AShare`'s DataCollector:
 
 1. **Resolve all tickers first**: Chinese name → 6-digit code mapping.
+   - If a name is ambiguous, compare public quote prices with the screenshot price.
+   - If no single candidate is within the 2% tolerance, ask the user to confirm/input the code and pause persistence.
 2. **Batch-fetch shared data** (fetched once, used by all analysts):
    - Major indices (上证/深证/创业板).
    - Sector fund flow ranking.
    - Northbound flow snapshot.
    - Global context (US/HK/commodities).
 3. **Batch-fetch per-holding data** (fetched once per holding):
-   - Real-time quotes for all holdings in one batch URL.
+   - Quotes for all confirmed holdings in one batch URL. Use live quotes during trading hours; after close, use latest completed trading session data.
    - K-line history for technical indicators + VPA.
 4. **Sequential fetch per-holding unique data** (with rate limiting):
    - Individual news, fundamentals, capital flow, lockup, insider transactions.
@@ -239,7 +299,10 @@ evidence = {
                 "low": 1675.00,
                 "prev_close": 1700.50,
                 "turnover": 45.2e8,
-                "volume_ratio": 1.3
+                "volume_ratio": 1.3,
+                "source": "Tencent qt.gtimg.cn",
+                "quote_time": "2026-06-18 10:00:03",
+                "market_session": "trading"
             },
             "technicals": {
                 "rsi_14": 45.2,
@@ -290,8 +353,11 @@ evidence = {
 
 If a source fails, output `[数据缺失: source/field]` instead of silently filling values. Reduce confidence grade for affected holdings.
 
+For quote failures, also record the failed source chain in `missing_fields` and, when persistence is configured, post `/health/outcome` with `success=false`, the affected `code`, checkpoint, and a short reason. If all quote routes fail, the run may still upload only as degraded output.
+
 ## Error Handling
 
 - If a data source is completely unavailable, record `[数据缺失: source名称]` and continue with remaining sources.
 - If Python execution fails entirely, fall back to manual WebFetch/curl for critical data (real-time quotes, index status).
+- If code resolution is uncertain after public matching, ask the user to confirm the code and do not upload the run until confirmation is available.
 - Never let a Python error prevent the skill from producing advice — degrade gracefully to available data.

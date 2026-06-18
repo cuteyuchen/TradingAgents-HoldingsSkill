@@ -16,6 +16,24 @@ Every execution must answer:
 
 If data quality is weak or the portfolio exposure is too high, still provide a "watch only / conditional buy" candidate table and state why orders should wait.
 
+## Candidate / Holding Separation Rule
+
+Today's buy/rotation candidates are for **new money or rotation targets that are
+not already in the current holdings**. This is a hard UX and trading-rule
+constraint:
+
+- Do not output a candidate whose `code` is already present in the current
+  holding list.
+- Do not show the same symbol as "持有/不加仓" in the holding table and "买入/观察买入"
+  in the candidate table.
+- If the best expression of a hot sector is already held, put the instruction in
+  the holding action table only, e.g. "持有不加仓", "突破后加仓现有持仓", or "跌破减仓".
+- The candidate table must then choose a different non-held ETF/stock, or state
+  "今日不新增买入" with the exact condition that would reopen new-buy eligibility.
+- Before upload, compare `candidates[].code` against `holdings[].code`. Any
+  duplicate candidate must be removed or converted into a holding-level trader
+  proposal; do not persist conflicting rows.
+
 ## Hot Sector Scanner — Three-Layer Architecture
 
 ### Layer 1: Broad Market Context (大盘环境)
@@ -76,7 +94,8 @@ For each hot sector, find the best expression:
 Remove candidates that:
 - Are below both open and previous close (弱势).
 - Have main funds materially outflowing while price rises (假突破).
-- Are already in the user's portfolio (重复).
+- Are already in the user's portfolio (重复); this is a hard removal rule, not a
+  soft preference.
 - Have fresh negative announcement, reduction, pledge, ST/delist risk.
 - Have turnover rate > 25% (possible distribution).
 - Have VPA divergence signals (量价背离).
@@ -139,7 +158,9 @@ Buy recommendations must not conflict with the portfolio plan:
 
 - If the user is overexposed, candidate size should come only from cash raised by reducing weak holdings.
 - Do not recommend averaging down current losers as the only buy idea.
-- If the strongest existing holding is already the best expression of the hot sector, say "优先持有/小幅加仓现有强势 ETF" instead of adding a new single stock.
+- If the strongest existing holding is already the best expression of the hot
+  sector, say so in the holding table and still keep the candidate table
+  non-held. Do not repeat that held symbol as a buy candidate.
 - If two candidates are given, make one safer ETF-style candidate and one higher-risk stock-style candidate when evidence supports it.
 - If the risk revision loop rejected the original plan, the revised candidate must incorporate the hard constraints.
 

@@ -11,6 +11,9 @@ export interface Quote {
   prev_close?: number | null
   turnover?: number | null
   volume_ratio?: number | null
+  source?: string | null
+  quote_time?: string | null
+  market_session?: string | null
 }
 
 export interface Technicals {
@@ -54,7 +57,7 @@ export interface Claim {
   claim: string
   evidence?: string[] | null
   confidence?: number | null
-  status: 'open' | 'addressed' | 'resolved' | 'unresolved'
+  status: 'open' | 'addressed' | 'resolved' | 'unresolved' | 'accepted' | string
   target_claim_ids?: string[] | null
   round?: number | null
 }

@@ -14,6 +14,24 @@ The workflow runs in 7 phases (see `multi-agent-workflow.md`). Each phase has a 
 | `quick_mode_phases` | 0, 1, 3, 4(trader) | Reasoning mode | Fast, data-focused: analyst reports, debate responses, trader proposal |
 | `deep_mode_phases` | 4(research mgr), 4(risk mgr), 5 | Reasoning mode | Thorough synthesis: research/risk/portfolio managers weigh all evidence + unresolved claims |
 
+## Runtime Budget Parameters
+
+Routine portfolio runs should finish in about five minutes. These limits keep
+data collection bounded while still preserving the mandatory quote, quality
+gate, holding action, buy-candidate, and risk-claim outputs.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `target_runtime_sec` | 300 | End-to-end target from screenshot parsing to upload |
+| `fetch_deadline_sec` | 240 | Maximum wall-clock time for all network/data fetches |
+| `synthesis_deadline_sec` | 60 | Remaining time for quality gate, debate, action tables, upload |
+| `per_source_timeout_sec` | 8 | Default timeout for a single public HTTP/API request |
+| `per_ticker_worker_timeout_sec` | 90 | Maximum time for one ticker-worker bundle |
+| `max_ticker_workers` | 4 | Parallel ticker/subagent workers for non-Eastmoney sources |
+| `max_candidate_workers` | 2 | Parallel candidate-sector workers |
+| `max_retry_per_source` | 1 | Try the route once, then the configured fallback once; do not grind |
+| `must_output_action_tables` | true | Even under time pressure, output current holding actions and today's buy plan |
+
 ## Debate Parameters
 
 Control how deep the claim-driven debate goes. Inspired by `TradingAgents-AShare`.

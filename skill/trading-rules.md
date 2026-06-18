@@ -105,6 +105,11 @@ Never add simply because:
 
 Every daily execution must include 1-2 buy/rotation candidates, even if the action is "watch only".
 
+The buy/rotation candidate module is for non-held symbols only. Current holdings
+must be handled in the holding action table. If a current holding deserves
+"加仓", state that as a holding action; if it deserves "持有不加仓", do not repeat
+it as a buy candidate later in the report.
+
 Before recommending a buy:
 
 - Scan hot sectors/themes and rank candidates by sector heat, news/policy catalyst, technical setup, capital flow, and portfolio fit.
@@ -124,6 +129,8 @@ For each candidate, include:
 
 Do not recommend a fresh buy when:
 
+- The candidate code already exists in the current holdings, unless the report
+  is explicitly a holding-level add instruction rather than a new-buy candidate.
 - The candidate is below open and previous close.
 - The sector is rising but the candidate is lagging.
 - Main funds are materially outflowing.

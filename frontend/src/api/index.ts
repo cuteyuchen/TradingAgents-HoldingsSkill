@@ -21,6 +21,10 @@ export function setToken(t: string): void {
   localStorage.setItem(TOKEN_KEY, t)
 }
 
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY)
+}
+
 interface RequestOptions {
   method?: string
   headers?: Record<string, string>
@@ -41,6 +45,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('密码错误或已失效，请重新输入访问密码')
+    }
     throw new Error(`${res.status} ${res.statusText} ${text}`)
   }
   if (res.status === 204) return null as T
@@ -48,9 +55,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 }
 
 export const api = {
+  verifyToken: (): Promise<{ status: string }> => request('/api/v1/auth/verify'),
+
   // Runs
   listRuns: (params = ''): Promise<RunSummary[]> => request(`/api/v1/runs${params}`),
   getRun: (id: number | string): Promise<RunDetail> => request(`/api/v1/runs/${id}`),
+  deleteRun: (id: number | string): Promise<void> => request(`/api/v1/runs/${id}`, { method: 'DELETE' }),
 
   // Portfolio / holdings
   currentPortfolio: (): Promise<{ run_id: number | null; timestamp: string | null; holdings: import('./types').Holding[] }> =>

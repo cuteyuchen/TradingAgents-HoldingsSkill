@@ -11,7 +11,10 @@ router = APIRouter(prefix="/api/v1/watchlist", tags=["watchlist"])
 
 
 @router.get("", response_model=list[WatchlistItem])
-def list_watchlist(db: Session = Depends(get_db)):
+def list_watchlist(
+    db: Session = Depends(get_db),
+    _: str = Depends(require_token),
+):
     return db.query(Watchlist).order_by(Watchlist.created_at).all()
 
 

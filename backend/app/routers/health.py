@@ -20,7 +20,10 @@ class Outcome(BaseModel):
 
 
 @router.get("")
-def health_status(db: Session = Depends(get_db)):
+def health_status(
+    db: Session = Depends(get_db),
+    _: str = Depends(require_token),
+):
     rows = failure_tracker.all_status(db)
     return [
         {

@@ -155,8 +155,8 @@ If the Risk Manager sends the proposal back for revision, show:
 | Claim ID | 方 | 论点 | 证据 | 置信度 | 状态 |
 |---|---|---|---|---:|---|
 | RISK-1 | 激进 | ... | ... | 0.7 | open |
-| RISK-2 | 保守 | ... | ... | 0.8 | open |
-| RISK-3 | 中立 | ... | ... | 0.6 | addressed |
+| RISK-2 | 中立 | ... | ... | 0.6 | addressed |
+| RISK-3 | 保守 | ... | ... | 0.8 | resolved |
 
 **未解决风控论点:**
 - RISK-1: [论点]
@@ -263,6 +263,7 @@ Inspired by `TradingAgents-astock`'s three-layer degradation:
 3. **Minimal (time pressure)**: Compress to key claims only (top 2 per side), skip quality gate table (just state grade), merge risk debate into one paragraph per side.
 
 Never skip the debate entirely — even in minimal mode, show at least the top claim from each side and the verdict.
+When persistence is configured, upload the three risk rows as structured `claims` with `claim_id` values `RISK-1`, `RISK-2`, and `RISK-3`; speakers must be `aggressive`, `neutral`, and `conservative` respectively.
 
 ## Formatting Template (Compact Version)
 

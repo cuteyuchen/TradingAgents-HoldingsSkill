@@ -25,6 +25,16 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 ### Phase 1 — Analyst Team (quick)
 
 4. **Centralized Data Collection**: Fetch all data once for all holdings in a single batch pass. See `data-sources.md`. Never fetch the same data point twice.
+   - Routine runs target about five minutes end to end (`target_runtime_sec` = 300).
+   - Start with shared batch quote/index/sector requests, then split holdings
+     into up to `max_ticker_workers` ticker-worker subagents or Python worker
+     bundles. Each worker fetches K-line/VPA/news/fundamentals/fund-flow
+     fallbacks for its assigned tickers and returns normalized evidence.
+   - Run candidate-sector scanning in separate candidate workers where useful.
+   - Eastmoney remains globally throttled across all workers; do not exceed the
+     configured semaphore and request interval.
+   - When the fetch deadline is reached, stop new network requests, mark exact
+     missing fields, and continue to quality gate and action synthesis.
 5. **Rank holdings by risk priority**:
    - Largest market value.
    - Largest loss.
@@ -57,6 +67,11 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 15. **Persistence Upload** (if enabled): Upload the full run (8-section transcript + holdings snapshot + candidates) to the companion system via `persistence.md`. On failure, mark `[未持久化: 原因]` and do not block the advice.
 
 **Degradation note**: Under time/data pressure, compress or skip whole phases rather than half-running them. Phase 2 (quality gate) and Phase 3/5 debate claims should be the last to drop. See Execution Shortcut below.
+
+**Action output note**: Regardless of compression level, final output must include
+both tables: (1) current holding operation advice, and (2) today's new
+buy/rotation advice. The buy/rotation table is for non-held symbols only; add or
+hold decisions for existing holdings belong in the holding table.
 
 ## Intent Parsing
 
@@ -304,6 +319,10 @@ Every execution should include detailed debate for material decisions:
 - Always include a buy/rotation candidate module. If buys are blocked by exposure, timing, or data quality, output watch-only candidates with exact triggers.
 - If the market is strong but the user's heavy holdings are weak, use strength to reduce weak holdings rather than add.
 - New buy candidates must fit the portfolio cash plan; do not add exposure before planned weak-position trims when account exposure is above 85%.
+- New buy/rotation candidates must not duplicate current holdings. If a held
+  symbol is the best expression of a hot sector, record it only as "持有/加仓/不加仓"
+  in the current-holding action table; select a different non-held candidate or
+  state that no new buy is allowed today.
 
 ## Final Decision Vocabulary
 

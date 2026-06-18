@@ -11,6 +11,7 @@ backend/data/
 backend/.venv/
 backend/tests/test_advisor.db
 backend/tests/*.db
+*.log
 
 # Node / frontend build
 node_modules/

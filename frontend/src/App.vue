@@ -1,64 +1,426 @@
-<script setup>
-import { ref } from 'vue'
-import { api, getToken, setToken } from './api'
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { RouterLink, RouterView } from 'vue-router'
+import {
+  Activity,
+  BarChart3,
+  LayoutDashboard,
+  ListChecks,
+  LockKeyhole,
+  LogOut,
+  Moon,
+  Monitor,
+  Star,
+  Sun,
+} from 'lucide-vue-next'
+import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
+import { api, clearToken, getToken, setToken } from './api'
 
-const token = ref(getToken())
-function saveToken() {
-  setToken(token.value)
+type ThemePref = 'system' | 'light' | 'dark'
+
+const THEME_KEY = 'advisor_theme'
+
+const navItems = [
+  { to: '/runs', label: '决策列表', icon: LayoutDashboard },
+  { to: '/holdings', label: '持仓追踪', icon: BarChart3 },
+  { to: '/candidates', label: '候选跟踪', icon: ListChecks },
+  { to: '/watchlist', label: '自选股', icon: Star },
+]
+
+const themeOptions = [
+  { label: '跟随系统', value: 'system' },
+  { label: '亮色', value: 'light' },
+  { label: '暗色', value: 'dark' },
+]
+
+const tokenInput = ref(getToken())
+const authChecked = ref(false)
+const authenticated = ref(false)
+const loginLoading = ref(false)
+const loginError = ref('')
+const themePref = ref<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) || 'system')
+const systemDark = ref(false)
+
+const media = window.matchMedia('(prefers-color-scheme: dark)')
+const updateSystemTheme = () => {
+  systemDark.value = media.matches
 }
+
+const resolvedTheme = computed<'light' | 'dark'>(() => {
+  if (themePref.value === 'system') return systemDark.value ? 'dark' : 'light'
+  return themePref.value
+})
+
+const naiveTheme = computed<GlobalTheme>(() => (resolvedTheme.value === 'dark' ? darkTheme : lightTheme))
+const themeIcon = computed(() => {
+  if (themePref.value === 'system') return Monitor
+  return resolvedTheme.value === 'dark' ? Moon : Sun
+})
+
+const themeOverrides = computed<GlobalThemeOverrides>(() => {
+  const dark = resolvedTheme.value === 'dark'
+  return {
+    common: {
+      primaryColor: dark ? '#60A5FA' : '#0C5CAB',
+      primaryColorHover: dark ? '#93C5FD' : '#0a6fd0',
+      primaryColorPressed: dark ? '#3B82F6' : '#0a4a8a',
+      primaryColorSuppl: dark ? '#60A5FA' : '#0C5CAB',
+      textColor1: dark ? '#fafafa' : '#172033',
+      textColor2: dark ? '#d7deea' : '#344054',
+      textColor3: dark ? '#a3aebf' : '#667085',
+      borderColor: dark ? 'rgba(148, 163, 184, 0.28)' : '#dfe6f1',
+      borderRadius: '8px',
+      fontFamily:
+        '"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif',
+    },
+  }
+})
+
+async function verifyCurrentToken() {
+  const existing = getToken()
+  if (!existing) {
+    authenticated.value = false
+    authChecked.value = true
+    return
+  }
+  try {
+    await api.verifyToken()
+    tokenInput.value = existing
+    authenticated.value = true
+  } catch {
+    clearToken()
+    authenticated.value = false
+  } finally {
+    authChecked.value = true
+  }
+}
+
+async function login() {
+  const token = tokenInput.value.trim()
+  loginError.value = ''
+  if (!token) {
+    loginError.value = '请输入访问密码'
+    return
+  }
+  loginLoading.value = true
+  setToken(token)
+  try {
+    await api.verifyToken()
+    authenticated.value = true
+  } catch (e) {
+    clearToken()
+    loginError.value = (e as Error).message
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+function logout() {
+  clearToken()
+  tokenInput.value = ''
+  authenticated.value = false
+}
+
+function saveTheme(value: ThemePref) {
+  themePref.value = value
+  localStorage.setItem(THEME_KEY, value)
+}
+
+onMounted(() => {
+  updateSystemTheme()
+  media.addEventListener('change', updateSystemTheme)
+  void verifyCurrentToken()
+})
+
+onUnmounted(() => {
+  media.removeEventListener('change', updateSystemTheme)
+})
 </script>
 
 <template>
-  <div class="app">
-    <header class="topbar">
-      <div class="brand">📊 持仓投研决策看板</div>
-      <nav class="nav">
-        <router-link to="/runs">决策列表</router-link>
-        <router-link to="/holdings">持仓追踪</router-link>
-        <router-link to="/candidates">候选跟踪</router-link>
-        <router-link to="/watchlist">自选股</router-link>
-      </nav>
-      <input
-        class="token"
-        v-model="token"
-        @change="saveToken"
-        placeholder="Bearer Token"
-        title="ADVISOR_TOKEN（写入 localStorage）"
-      />
-    </header>
-    <main class="content">
-      <router-view />
-    </main>
-  </div>
+  <n-config-provider
+    :theme="naiveTheme"
+    :theme-overrides="themeOverrides"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
+  >
+    <n-message-provider>
+      <n-global-style />
+      <div class="app-shell" :class="resolvedTheme === 'dark' ? 'theme-dark' : 'theme-light'">
+        <div v-if="!authChecked" class="login-wrap">
+          <n-spin size="large" />
+          <div class="muted mt-3">正在校验访问权限…</div>
+        </div>
+
+        <div v-else-if="!authenticated" class="login-wrap">
+          <section class="login-card panel-card">
+            <div class="login-icon" aria-hidden="true">
+              <LockKeyhole :size="28" />
+            </div>
+            <h1>持仓投研决策看板</h1>
+            <p>请输入后端配置的 ADVISOR_TOKEN 作为远程访问密码。</p>
+            <n-input
+              v-model:value="tokenInput"
+              type="password"
+              show-password-on="mousedown"
+              placeholder="访问密码"
+              size="large"
+              @keyup.enter="login"
+            />
+            <n-alert v-if="loginError" type="error" :show-icon="false">{{ loginError }}</n-alert>
+            <n-button type="primary" size="large" block :loading="loginLoading" @click="login">
+              登录看板
+            </n-button>
+          </section>
+        </div>
+
+        <template v-else>
+          <header class="topbar">
+            <RouterLink to="/runs" class="brand" aria-label="返回决策列表">
+              <Activity :size="24" />
+              <span>持仓投研决策看板</span>
+            </RouterLink>
+
+            <nav class="desktop-nav" aria-label="主导航">
+              <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="nav-link">
+                <component :is="item.icon" :size="17" />
+                <span>{{ item.label }}</span>
+              </RouterLink>
+            </nav>
+
+            <div class="top-actions">
+              <component :is="themeIcon" :size="18" class="muted" />
+              <n-select
+                :value="themePref"
+                :options="themeOptions"
+                size="small"
+                class="theme-select"
+                @update:value="saveTheme"
+              />
+              <n-button quaternary circle aria-label="退出登录" @click="logout">
+                <template #icon><LogOut :size="18" /></template>
+              </n-button>
+            </div>
+          </header>
+
+          <main class="content">
+            <RouterView />
+          </main>
+
+          <nav class="mobile-nav" aria-label="移动端主导航">
+            <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="mobile-nav-link">
+              <component :is="item.icon" :size="19" />
+              <span>{{ item.label }}</span>
+            </RouterLink>
+          </nav>
+        </template>
+      </div>
+    </n-message-provider>
+  </n-config-provider>
 </template>
 
-<style>
-* { box-sizing: border-box; }
-body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f5f6f8; color: #1f2329; }
-.app { min-height: 100vh; }
+<style scoped>
 .topbar {
-  display: flex; align-items: center; gap: 24px;
-  padding: 0 24px; height: 56px; background: #1f2329; color: #fff;
+  position: sticky;
+  z-index: 30;
+  top: 0;
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  gap: 20px;
+  border-bottom: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-surface-strong) 82%, transparent);
+  padding: 0 24px;
+  box-shadow: 0 1px 0 var(--app-border-soft), 0 14px 40px color-mix(in srgb, var(--app-bg) 72%, transparent);
+  backdrop-filter: blur(18px);
 }
-.brand { font-weight: 600; font-size: 16px; }
-.nav { display: flex; gap: 16px; flex: 1; }
-.nav a { color: #c9cdd4; text-decoration: none; font-size: 14px; padding: 6px 4px; }
-.nav a.router-link-active { color: #fff; border-bottom: 2px solid #4e83f0; }
-.token { background: #2a2f36; border: 1px solid #3a4048; color: #fff; padding: 6px 10px; border-radius: 4px; width: 220px; font-size: 12px; }
-.content { padding: 24px; max-width: 1400px; margin: 0 auto; }
-.card { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
-.card h3 { margin: 0 0 12px; font-size: 15px; color: #1f2329; border-left: 3px solid #4e83f0; padding-left: 8px; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #eef0f3; }
-th { color: #86909c; font-weight: 500; background: #fafbfc; }
-.tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
-.grade-A { background: #e8f7ea; color: #00a854; }
-.grade-B { background: #fff7e6; color: #d48806; }
-.grade-C { background: #fff1f0; color: #cf1322; }
-.grade-D, .grade-F { background: #fdeff0; color: #a8071a; }
-.pos { color: #cf1322; }
-.neg { color: #00a854; }
-.muted { color: #86909c; }
-button { cursor: pointer; padding: 6px 14px; border-radius: 4px; border: 1px solid #d9dce0; background: #fff; font-size: 13px; }
-button:hover { background: #f2f3f5; }
+
+.brand {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  color: var(--app-text);
+  font-size: 16px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.brand svg {
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--app-primary) 32%, transparent);
+  border-radius: 8px;
+  background: var(--app-primary-soft);
+  padding: 5px;
+  color: var(--app-primary);
+}
+
+.desktop-nav {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  color: var(--app-text-muted);
+  padding: 0 12px;
+  text-decoration: none;
+  transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+.nav-link:hover {
+  background: color-mix(in srgb, var(--app-primary) 10%, transparent);
+  color: var(--app-text);
+}
+
+.nav-link.router-link-active {
+  background: var(--app-primary-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-primary) 18%, transparent);
+  color: var(--app-text);
+}
+
+.nav-link.router-link-active svg {
+  color: var(--app-primary);
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 1px solid var(--app-border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-surface-strong) 66%, transparent);
+  padding: 2px 4px 2px 10px;
+}
+
+.theme-select {
+  width: 118px;
+}
+
+.content {
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.login-wrap {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card {
+  display: grid;
+  width: min(420px, 100%);
+  gap: 16px;
+  padding: 28px;
+  box-shadow: var(--app-shadow-strong);
+}
+
+.login-icon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-primary) 18%, transparent);
+  color: var(--app-primary);
+}
+
+.login-card h1 {
+  margin: 0;
+  color: var(--app-text);
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.login-card p {
+  margin: 0;
+  color: var(--app-text-muted);
+  line-height: 1.6;
+}
+
+.mobile-nav {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .topbar {
+    min-height: 58px;
+    gap: 10px;
+    padding: 0 12px;
+  }
+
+  .desktop-nav {
+    display: none;
+  }
+
+  .brand span {
+    max-width: 8.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .top-actions {
+    gap: 4px;
+    padding-left: 6px;
+  }
+
+  .theme-select {
+    width: 88px;
+  }
+
+  .content {
+    padding: 16px 12px 92px;
+  }
+
+  .mobile-nav {
+    position: fixed;
+    z-index: 40;
+    right: 10px;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    left: 10px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    border: 1px solid var(--app-border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--app-surface-strong) 88%, transparent);
+    padding: 6px;
+    box-shadow: var(--app-shadow-strong);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-nav-link {
+    display: grid;
+    min-height: 52px;
+    place-items: center;
+    gap: 2px;
+    border-radius: 8px;
+    color: var(--app-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    text-decoration: none;
+    transition: background 180ms ease, color 180ms ease;
+  }
+
+  .mobile-nav-link.router-link-active {
+    background: var(--app-primary-soft);
+    color: var(--app-text);
+  }
+
+  .mobile-nav-link.router-link-active svg {
+    color: var(--app-primary);
+  }
+}
 </style>

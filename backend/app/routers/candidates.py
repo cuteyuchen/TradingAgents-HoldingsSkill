@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from ..auth import require_token
 from ..database import get_db
 from ..models import Candidate
 
@@ -13,11 +14,16 @@ def list_candidates(
     status: str | None = Query(None),  # 待触发/已命中/已取消
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
+    _: str = Depends(require_token),
 ):
     q = db.query(Candidate)
     if status:
         q = q.filter(Candidate.status == status)
     rows = q.order_by(Candidate.id.desc()).limit(limit).all()
+    rows = [
+        c for c in rows
+        if c.code.strip().upper() not in {h.code.strip().upper() for h in c.run.holdings}
+    ]
     return [
         {"id": c.id, "run_id": c.run_id, "code": c.code, "name": c.name, "type": c.type,
          "score": c.score, "score_breakdown": c.score_breakdown,

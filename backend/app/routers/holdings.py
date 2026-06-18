@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from ..auth import require_token
 from ..database import get_db
 from ..models import Claim, HoldingSnapshot, ResearchVerdict, TraderProposal
 
@@ -13,6 +14,7 @@ def holding_timeline(
     code: str,
     limit: int = Query(5, ge=1, le=50),
     db: Session = Depends(get_db),
+    _: str = Depends(require_token),
 ):
     """Last N same-code snapshots with price/raw_return/alpha for the AlphaChart.
 

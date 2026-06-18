@@ -28,7 +28,7 @@ Fetch all data once, share across all analyst roles. Never fetch the same data p
 
 | Data Need | Primary Source | Fallback Chain | Notes |
 |---|---|---|---|
-| Real-time quote (实时行情) | Eastmoney push2 API | Tencent Finance `qt.gtimg.cn` → Sina `hq.sinajs.cn` | Price, pct change, open/high/low/prev close, turnover, volume ratio, main fund flow |
+| Real-time quote (实时行情) | Tencent Finance `qt.gtimg.cn` | Sina `hq.sinajs.cn` → Eastmoney push2 API | Price, pct change, open/high/low/prev close, turnover, volume ratio, quote time, market session |
 | K-line / OHLCV | AkShare `stock_zh_a_hist` (Eastmoney) | mootdx (TCP 7709) → Sina daily → Tencent `stock_zh_a_hist_tx` | For support/resistance and trend; avoid look-ahead bias |
 | ETF K-line | AkShare `fund_etf_hist_em` | `fund_etf_hist_sina` | Separate endpoint for ETFs vs stocks |
 | Technical indicators | Derived from OHLCV via stockstats | Manual calculation from K-line | RSI, MACD, MA(5/10/20/60), EMA, Bollinger, ATR, VWMA, MFI |
@@ -130,6 +130,7 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 - The primary source is tried first; on failure, fall through the chain **once** — do not loop.
 - Eastmoney is used as **primary only** for data unique to it (fund flow, dragon-tiger, lockup); for everything else it is last-resort to protect the rate budget.
 - Any failed fetch records `[数据缺失: source/field]` and continues; confidence is reduced for the affected holding. Never retry endlessly (see `fallback_action` in `configuration.md`).
+- Quote collection is mandatory after codes are confirmed. During trading hours, use live quote fields; outside trading hours, use the latest completed trading session's open/high/low/close/turnover data and set `market_session` to `closed_latest_session`.
 
 ## Symbol Resolution
 
@@ -139,15 +140,23 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 - If only Chinese name is visible:
   1. Search exact name first in stock name → code mapping.
   2. Try partial matches if exact fails.
-  3. If multiple matches exist (e.g., same name different exchanges), ask or mark uncertain.
+  3. Fetch public quotes for candidates and compare the screenshot price.
+  4. If multiple matches remain or no candidate is within 2% of the screenshot price, ask the user to input/confirm the code before upload.
 - Suffix normalization: Shanghai stocks end in 6xx → `.SH`; Shenzhen stocks start with 0xx/3xx → `.SZ`; STAR market 688xxx → `.SH`.
 
 ### ETFs
 
 - Broker display names are often ambiguous. Match by name plus screenshot price.
 - If live quote price conflicts with screenshot price by more than 2%, do not use that code.
-- If uncertain, give advice based on screenshot cost/current price and index/theme direction, not a wrong live quote.
+- If uncertain after public matching, ask the user to input/confirm the ETF code and do not persist the run until confirmed.
 - Common ETF name collisions: always verify by cross-checking the tracking index.
+
+### Confirmation Rule
+
+- `high`: one public symbol candidate and quote price within 2% of the screenshot price.
+- `medium`: one likely candidate but name is abbreviated or price is from a closed/latest session; state the assumption and still record source/time.
+- `needs_user_confirmation`: no match, multiple plausible matches, or price conflict >2%. Ask the user a concise question with the candidate list and pause persistence.
+- Do not upload `UNKNOWN-*` holdings. If the user has not confirmed the code, finish the visible advice with `[未持久化: 待确认代码]`.
 
 ## VPA (Volume Price Analysis) Pre-Computation
 
