@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { WatchlistItem, HealthStatus } from '../api/types'
 
@@ -7,6 +7,13 @@ const list = ref<WatchlistItem[]>([])
 const health = ref<HealthStatus[]>([])
 const err = ref('')
 const form = ref<WatchlistItem>({ code: '', name: '', cadence: '10:00', enabled: true })
+const healthByCode = computed(() => {
+  const map = new Map<string, HealthStatus>()
+  for (const h of health.value) {
+    if (h.code && (!map.has(h.code) || h.degraded)) map.set(h.code, h)
+  }
+  return map
+})
 
 async function load() {
   err.value = ''
@@ -58,16 +65,17 @@ onMounted(load)
       <button @click="add">添加</button>
     </div>
     <table>
-      <thead><tr><th>代码</th><th>名称</th><th>检查点</th><th>启用</th><th></th></tr></thead>
+      <thead><tr><th>代码</th><th>名称</th><th>检查点</th><th>状态</th><th>降级原因</th><th></th></tr></thead>
       <tbody>
         <tr v-for="(w, i) in list" :key="i">
           <td><code>{{ w.code }}</code></td>
           <td>{{ w.name || '—' }}</td>
           <td>{{ w.cadence || '—' }}</td>
-          <td>{{ w.enabled ? '是' : '否' }}</td>
+          <td><span class="tag" :class="w.enabled ? 'grade-A' : 'grade-C'">{{ w.enabled ? '启用' : '已停用' }}</span></td>
+          <td class="muted">{{ healthByCode.get(w.code)?.note || '—' }}</td>
           <td><button @click="remove(w.code)">删除</button></td>
         </tr>
-        <tr v-if="!list.length"><td colspan="5" class="muted">暂无自选股</td></tr>
+        <tr v-if="!list.length"><td colspan="6" class="muted">暂无自选股</td></tr>
       </tbody>
     </table>
   </div>
@@ -75,16 +83,18 @@ onMounted(load)
   <div class="card">
     <h3>检查点健康度（连续失败降级）</h3>
     <table>
-      <thead><tr><th>检查点</th><th>连续失败</th><th>状态</th><th>最近成功</th><th>最近失败</th></tr></thead>
+      <thead><tr><th>代码</th><th>检查点</th><th>连续失败</th><th>状态</th><th>最近成功</th><th>最近失败</th><th>原因</th></tr></thead>
       <tbody>
         <tr v-for="(h, i) in health" :key="i" :class="{ 'degraded': h.degraded }">
+          <td>{{ h.code || '全局' }}</td>
           <td>{{ h.checkpoint }}</td>
           <td>{{ h.consecutive_failures }}</td>
           <td><span class="tag" :class="h.degraded ? 'grade-C' : 'grade-A'">{{ h.degraded ? '降级' : '正常' }}</span></td>
           <td class="muted">{{ h.last_success_at ? h.last_success_at.slice(5, 16).replace('T', ' ') : '—' }}</td>
           <td class="muted">{{ h.last_failure_at ? h.last_failure_at.slice(5, 16).replace('T', ' ') : '—' }}</td>
+          <td class="muted">{{ h.note || '—' }}</td>
         </tr>
-        <tr v-if="!health.length"><td colspan="5" class="muted">暂无健康记录</td></tr>
+        <tr v-if="!health.length"><td colspan="7" class="muted">暂无健康记录</td></tr>
       </tbody>
     </table>
   </div>

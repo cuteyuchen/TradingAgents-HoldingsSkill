@@ -105,6 +105,7 @@ cd backend
 | GET | `/api/v1/runs/{id}` | 单次决策完整详情 |
 | GET | `/api/v1/portfolio/current` | 最新持仓快照 |
 | GET | `/api/v1/holdings/{code}/timeline` | 标的决策序列 + alpha |
+| GET | `/api/v1/memory/context` | Phase 0 同标的记忆 + 跨标的 lessons |
 | GET | `/api/v1/candidates` | 候选跟踪 |
 | GET | `/api/v1/benchmark/hs300` | 沪深300 基准 |
 | GET/POST/DELETE | `/api/v1/watchlist` | 自选股管理 |

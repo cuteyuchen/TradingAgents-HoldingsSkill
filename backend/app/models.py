@@ -14,7 +14,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +36,10 @@ class Run(Base):
 
     # Evidence pack free-form notes + code assumptions.
     evidence_pack: Mapped[dict | None] = mapped_column(JSON)  # {code_assumptions, missing_fields, ...}
+
+    # Full transcript persisted for dashboard review and Phase-0 context.
+    transcript: Mapped[str | None] = mapped_column(Text)
+    sections: Mapped[dict | None] = mapped_column(JSON)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -269,10 +272,9 @@ class HealthLog(Base):
     __tablename__ = "health_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str | None] = mapped_column(String(16), index=True)
     checkpoint: Mapped[str] = mapped_column(String(16), index=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_failure_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
     note: Mapped[str | None] = mapped_column(Text)
-
-    __table_args__ = (UniqueConstraint("checkpoint", name="uq_health_checkpoint"),)

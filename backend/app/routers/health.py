@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/v1/health", tags=["health"])
 class Outcome(BaseModel):
     checkpoint: str
     success: bool
+    code: str | None = None
     note: str | None = None
 
 
@@ -23,11 +24,13 @@ def health_status(db: Session = Depends(get_db)):
     rows = failure_tracker.all_status(db)
     return [
         {
+            "code": r.code,
             "checkpoint": r.checkpoint,
             "consecutive_failures": r.consecutive_failures,
             "degraded": failure_tracker.is_degraded(r),
             "last_failure_at": r.last_failure_at.isoformat() if r.last_failure_at else None,
             "last_success_at": r.last_success_at.isoformat() if r.last_success_at else None,
+            "note": r.note,
         }
         for r in rows
     ]
@@ -40,11 +43,13 @@ def record_outcome(
     _: str = Depends(require_token),
 ):
     if outcome.success:
-        row = failure_tracker.record_success(db, outcome.checkpoint)
+        row = failure_tracker.record_success(db, outcome.checkpoint, outcome.code)
     else:
-        row = failure_tracker.record_failure(db, outcome.checkpoint, outcome.note)
+        row = failure_tracker.record_failure(db, outcome.checkpoint, outcome.code, outcome.note)
     return {
+        "code": row.code,
         "checkpoint": row.checkpoint,
         "consecutive_failures": row.consecutive_failures,
         "degraded": failure_tracker.is_degraded(row),
+        "note": row.note,
     }

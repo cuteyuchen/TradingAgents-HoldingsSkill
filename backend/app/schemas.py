@@ -159,6 +159,8 @@ class RunUpload(BaseModel):
     data_quality_grade: str | None = None
     intent: IntentSchema | None = None
     evidence_pack: dict | None = None
+    transcript: str | None = None
+    sections: dict | None = None
     quality_gates: list[QualityGateUpload] = Field(default_factory=list)
     holdings: list[HoldingUpload] = Field(default_factory=list)
     claims: list[ClaimUpload] = Field(default_factory=list)
@@ -197,10 +199,12 @@ class WatchlistItem(BaseModel):
 
 
 class HealthStatus(BaseModel):
+    code: str | None = None
     checkpoint: str
     consecutive_failures: int
     degraded: bool
     last_failure_at: datetime | None = None
     last_success_at: datetime | None = None
+    note: str | None = None
 
     model_config = ConfigDict(from_attributes=True)

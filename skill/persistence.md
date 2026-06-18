@@ -17,23 +17,27 @@ If either is unset, the skill runs without persistence (trading memory falls bac
 
 Before analysis, fetch prior decisions for in-scope holdings to seed trading memory.
 
-**Request:** `GET {ADVISOR_API_URL}/holdings/{code}/timeline?limit=5` (per holding code)
+**Preferred request:** `GET {ADVISOR_API_URL}/memory/context?code={code}&same_limit=5&cross_limit=3`
+
+**Backward-compatible request:** `GET {ADVISOR_API_URL}/holdings/{code}/timeline?limit=5` (same-ticker timeline only)
 
 **Response:**
 ```json
 {
   "code": "600519",
-  "points": [
+  "same_ticker": [
     {"run_id": 12, "timestamp": "2026-06-17T10:00:00", "checkpoint": "10:00",
-     "price": 1680.0, "raw_return": null, "benchmark_return": null, "alpha": null}
+     "price": 1680.0, "raw_return": null, "benchmark_return": null, "alpha": null,
+     "pm_rating": "Hold", "action": "Hold"}
   ],
-  "verdict": {"rating": "Hold", "winner": "bull", "confidence": "中"},
-  "proposal": {"action": "Hold", "trigger_price": null, "stop_loss": "1650"},
-  "claims": [{"claim_id": "INV-1", "speaker": "bull", "claim": "...", "status": "resolved"}]
+  "cross_ticker_lessons": [
+    {"run_id": 21, "code": "000001", "alpha": -0.02,
+     "lesson": "跨标的经验：强势市场先减弱势仓"}
+  ]
 }
 ```
 
-**Usage:** Inject the last `memory_same_ticker_entries` (default 5) points + the verdict into the Portfolio Manager's context. If `alpha` is present and negative, apply `negative_alpha_sizing` (reduce confidence, tighten sizing). See `trading-rules.md` Trading Memory.
+**Usage:** Inject the last `memory_same_ticker_entries` (default 5) same-ticker points + `memory_cross_ticker_lessons` (default 3) cross-ticker lessons into the Portfolio Manager's context. If `alpha` is present and negative, apply `negative_alpha_sizing` (reduce confidence, tighten sizing). See `trading-rules.md` Trading Memory.
 
 ## Phase 6 — Run Upload (end of run)
 
@@ -51,6 +55,17 @@ The body is the skill's output contract (see `python-execution.md`) plus the 8-s
   "data_quality_grade": "B",
   "intent": {"tickers": ["600519"], "horizon": "short", "focus": ["技术"], "risk_profile": "稳健"},
   "evidence_pack": {"code_assumptions": {"600519": "high"}, "missing_fields": []},
+  "transcript": "完整8段原文 transcript",
+  "sections": {
+    "evidence": "证据包",
+    "quality_gate": "质量门控",
+    "investment_debate": "多空辩论",
+    "research_verdict": "研究总监裁决",
+    "trader_proposal": "交易员方案",
+    "risk_debate": "三方风控辩论",
+    "pm_final": "组合经理结论",
+    "candidates": "候选表"
+  },
   "quality_gates": [
     {"analyst": "技术分析", "hard_check": "pass", "llm_review": "通过", "grade": "A", "gaps": null}
   ],
@@ -140,7 +155,7 @@ If data fetching struggled, report the outcome so the dashboard can flag degrade
 curl -X POST "${ADVISOR_API_URL}/health/outcome" \
   -H "Authorization: Bearer ${ADVISOR_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"checkpoint": "10:00", "success": false, "note": "东财封禁"}'
+  -d '{"code": "600519", "checkpoint": "10:00", "success": false, "note": "东财封禁"}'
 ```
 
-After `consecutive_failure_threshold` (default 3) failures, the dashboard marks that checkpoint degraded (grey), matching the skill's Consecutive-Failure Degradation rule in `SKILL.md`.
+After `consecutive_failure_threshold` (default 3) failures for the same code + checkpoint, the dashboard marks it degraded and disables the matching watchlist item. A later success clears the failure counter but does not automatically re-enable the watchlist item.

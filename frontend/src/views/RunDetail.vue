@@ -13,9 +13,12 @@ const err = ref('')
 
 const invClaims = computed<Claim[]>(() => (run.value?.claims || []).filter((c) => c.claim_id.startsWith('INV-')))
 const riskClaims = computed<Claim[]>(() => (run.value?.claims || []).filter((c) => c.claim_id.startsWith('RISK-')))
+const sectionEntries = computed(() => Object.entries(run.value?.sections || {}))
 
 const fmtPct = (v?: number | null): string => (v == null ? '—' : (v * 100).toFixed(2) + '%')
 const pctClass = (v?: number | null): string => (v == null ? '' : v >= 0 ? 'pos' : 'neg')
+const fmtBlock = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v, null, 2))
+const weakGrade = computed(() => ['C', 'D', 'F'].includes(run.value?.data_quality_grade || ''))
 
 onMounted(async () => {
   try {
@@ -47,9 +50,24 @@ onMounted(async () => {
       </div>
     </div>
 
+    <!-- Raw transcript -->
+    <div class="card" v-if="run.transcript || sectionEntries.length">
+      <h3>原始 Transcript</h3>
+      <pre v-if="run.transcript" class="transcript">{{ run.transcript }}</pre>
+      <div v-if="sectionEntries.length" class="section-grid">
+        <div v-for="[key, value] in sectionEntries" :key="key" class="section-block">
+          <div class="section-title">{{ key }}</div>
+          <pre>{{ fmtBlock(value) }}</pre>
+        </div>
+      </div>
+    </div>
+
     <!-- 2. Quality Gate -->
-    <div class="card" v-if="run.data_quality_grade && run.data_quality_grade <= 'B'">
+    <div class="card" v-if="run.quality_gates.length || run.data_quality_grade">
       <h3>② 质量门控</h3>
+      <div v-if="weakGrade" class="quality-warning">
+        数据质量为 {{ run.data_quality_grade }}，以下缺口需要在裁决和交易动作中降权处理。
+      </div>
       <QualityGateTable :gates="run.quality_gates" />
     </div>
 
@@ -158,4 +176,8 @@ onMounted(async () => {
 .kv { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; margin-bottom: 6px; }
 .revision-box { margin-top: 12px; background: #fff7e6; border-left: 3px solid #d48806; padding: 10px 14px; font-size: 13px; }
 .err { color: #cf1322; font-size: 13px; }
+.quality-warning { background: #fff7e6; border-left: 3px solid #d48806; padding: 8px 12px; margin-bottom: 10px; font-size: 13px; color: #8a5200; }
+.transcript, .section-block pre { white-space: pre-wrap; word-break: break-word; background: #f7f8fa; border: 1px solid #eef0f3; border-radius: 6px; padding: 10px 12px; font-size: 12px; line-height: 1.6; }
+.section-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+.section-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; color: #4e83f0; }
 </style>

@@ -152,6 +152,8 @@ export interface RunDetail {
   data_quality_grade?: DataGrade | null
   intent?: Intent | null
   evidence_pack?: Record<string, unknown> | null
+  transcript?: string | null
+  sections?: Record<string, unknown> | null
   quality_gates: QualityGate[]
   holdings: Holding[]
   claims: Claim[]
@@ -200,11 +202,13 @@ export interface WatchlistItem {
 }
 
 export interface HealthStatus {
+  code?: string | null
   checkpoint: string
   consecutive_failures: number
   degraded: boolean
   last_failure_at?: string | null
   last_success_at?: string | null
+  note?: string | null
 }
 
 export interface BenchmarkPrice {

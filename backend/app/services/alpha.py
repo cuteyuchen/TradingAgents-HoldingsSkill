@@ -7,17 +7,17 @@ against the previous same-code snapshot's price, then subtract the benchmark
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import BenchmarkPrice, HoldingSnapshot
+from ..models import BenchmarkPrice, HoldingSnapshot, Run
 
 
 def _prev_snapshot(db: Session, code: str, run_timestamp) -> HoldingSnapshot | None:
     """Most recent same-code snapshot strictly before this run."""
     return (
         db.query(HoldingSnapshot)
-        .join(HoldingSnapshot.run)
+        .join(Run, HoldingSnapshot.run_id == Run.id)
         .filter(HoldingSnapshot.code == code)
-        .filter(HoldingSnapshot.run.has())  # any run
-        .order_by(HoldingSnapshot.id.desc())
+        .filter(Run.timestamp < run_timestamp)
+        .order_by(Run.timestamp.desc(), HoldingSnapshot.id.desc())
         .first()
     )
 

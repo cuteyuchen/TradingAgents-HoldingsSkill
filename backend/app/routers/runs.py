@@ -1,5 +1,5 @@
 """Run upload + list + detail routes."""
-from datetime import datetime
+from datetime import datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -22,6 +22,8 @@ def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
         data_quality_grade=payload.data_quality_grade,
         intent=payload.intent.model_dump() if payload.intent else None,
         evidence_pack=payload.evidence_pack,
+        transcript=payload.transcript,
+        sections=payload.sections,
     )
     db.add(run)
     db.flush()  # get run.id
@@ -134,11 +136,23 @@ def list_runs(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     code: str | None = Query(None),
+    from_date: str | None = Query(None, alias="from"),
+    to_date: str | None = Query(None),
+    checkpoint: str | None = Query(None),
+    grade: str | None = Query(None),
     db: Session = Depends(get_db),
 ) -> list[RunSummary]:
     q = db.query(models.Run)
     if code:
         q = q.join(models.HoldingSnapshot).filter(models.HoldingSnapshot.code == code)
+    if from_date:
+        q = q.filter(models.Run.timestamp >= _parse_date_bound(from_date, end=False))
+    if to_date:
+        q = q.filter(models.Run.timestamp <= _parse_date_bound(to_date, end=True))
+    if checkpoint:
+        q = q.filter(models.Run.checkpoint == checkpoint)
+    if grade:
+        q = q.filter(models.Run.data_quality_grade == grade.upper())
     runs = q.order_by(models.Run.timestamp.desc()).offset(offset).limit(limit).all()
     out = []
     for r in runs:
@@ -169,6 +183,8 @@ def _serialize_run(run: models.Run) -> dict:
         "data_quality_grade": run.data_quality_grade,
         "intent": run.intent,
         "evidence_pack": run.evidence_pack,
+        "transcript": run.transcript,
+        "sections": run.sections,
         "quality_gates": [
             {"analyst": q.analyst, "hard_check": q.hard_check, "llm_review": q.llm_review,
              "grade": q.grade, "gaps": q.gaps}
@@ -232,3 +248,13 @@ def _one(obj) -> dict | None:
     if obj is None:
         return None
     return {c.name: getattr(obj, c.name) for c in obj.__table__.columns if c.name != "id" and c.name != "run_id"}
+
+
+def _parse_date_bound(value: str, end: bool) -> datetime:
+    try:
+        if len(value) == 10:
+            parsed_date = datetime.fromisoformat(value).date()
+            return datetime.combine(parsed_date, time.max if end else time.min)
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date filter: {value}") from exc

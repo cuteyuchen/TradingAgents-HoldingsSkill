@@ -9,13 +9,23 @@ const runs = ref<RunSummary[]>([])
 const loading = ref(false)
 const err = ref('')
 const codeFilter = ref('')
+const fromFilter = ref('')
+const toFilter = ref('')
+const checkpointFilter = ref('')
+const gradeFilter = ref('')
 
 async function load() {
   loading.value = true
   err.value = ''
   try {
-    const params = codeFilter.value ? `?code=${encodeURIComponent(codeFilter.value)}` : ''
-    runs.value = await api.listRuns(params)
+    const params = new URLSearchParams()
+    if (codeFilter.value) params.set('code', codeFilter.value)
+    if (fromFilter.value) params.set('from', fromFilter.value)
+    if (toFilter.value) params.set('to', toFilter.value)
+    if (checkpointFilter.value) params.set('checkpoint', checkpointFilter.value)
+    if (gradeFilter.value) params.set('grade', gradeFilter.value)
+    const query = params.toString()
+    runs.value = await api.listRuns(query ? `?${query}` : '')
   } catch (e) {
     err.value = (e as Error).message
   } finally {
@@ -33,6 +43,23 @@ onMounted(load)
     <h3>决策列表</h3>
     <div class="toolbar">
       <input v-model="codeFilter" placeholder="按代码筛选，如 600519" @keyup.enter="load" />
+      <input v-model="fromFilter" type="date" title="开始日期" />
+      <input v-model="toFilter" type="date" title="结束日期" />
+      <select v-model="checkpointFilter">
+        <option value="">全部检查点</option>
+        <option value="09:25">09:25</option>
+        <option value="10:00">10:00</option>
+        <option value="12:00">12:00</option>
+        <option value="14:30">14:30</option>
+      </select>
+      <select v-model="gradeFilter">
+        <option value="">全部质量</option>
+        <option value="A">A</option>
+        <option value="B">B</option>
+        <option value="C">C</option>
+        <option value="D">D</option>
+        <option value="F">F</option>
+      </select>
       <button @click="load">查询</button>
       <span class="muted" style="margin-left: auto">共 {{ runs.length }} 条</span>
     </div>
@@ -61,7 +88,8 @@ onMounted(load)
 
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.toolbar input { padding: 6px 10px; border: 1px solid #d9dce0; border-radius: 4px; font-size: 13px; width: 200px; }
+.toolbar input, .toolbar select { padding: 6px 10px; border: 1px solid #d9dce0; border-radius: 4px; font-size: 13px; }
+.toolbar input:first-child { width: 200px; }
 .clickable { cursor: pointer; }
 .clickable:hover { background: #f2f6ff; }
 .err { color: #cf1322; font-size: 13px; margin-bottom: 8px; }
