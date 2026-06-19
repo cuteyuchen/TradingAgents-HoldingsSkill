@@ -1,64 +1,58 @@
 <script setup lang="ts">
+import { h } from 'vue'
+import type { DataTableColumns } from 'naive-ui'
 import type { Claim } from '../api/types'
+import { emptyText, renderCode, renderSpeaker, renderStatus } from '../utils/ui'
 
 defineProps<{ claims: Claim[] }>()
 
-const speakerLabel = (s: string): string =>
-  ({ bull: '多头', bear: '空头', aggressive: '激进', conservative: '保守', neutral: '中立' }[s] || s)
+const columns: DataTableColumns<Claim> = [
+  { title: '论点ID', key: 'claim_id', width: 92, render: (row) => renderCode(row.claim_id) },
+  { title: '方', key: 'speaker', width: 82, render: (row) => renderSpeaker(row.speaker) },
+  { title: '论点', key: 'claim', minWidth: 240 },
+  {
+    title: '证据',
+    key: 'evidence',
+    minWidth: 280,
+    render: (row) =>
+      row.evidence?.length
+        ? h('div', { class: 'evidence-list' }, row.evidence.map((e) => h('span', { class: 'evidence-item' }, e)))
+        : emptyText,
+  },
+  { title: '置信度', key: 'confidence', width: 88, render: (row) => (row.confidence != null ? row.confidence.toFixed(2) : emptyText) },
+  { title: '状态', key: 'status', width: 96, render: (row) => renderStatus(row.status) },
+]
 
-const speakerClass = (s: string): string =>
-  ({
-    bull: 'spk-bull', bear: 'spk-bear',
-    aggressive: 'spk-bull', conservative: 'spk-bear', neutral: 'spk-neutral',
-  }[s] || 'spk-neutral')
-
-const statusLabel = (s: string): string =>
-  ({ open: '待回应', addressed: '已回应', resolved: '已定论', unresolved: '未解决', accepted: '已采纳' }[s] || s)
-
-const statusClass = (s: string): string =>
-  ({
-    open: 'st-open', addressed: 'st-addr', resolved: 'st-res', unresolved: 'st-unres', accepted: 'st-res',
-  }[s] || 'st-open')
+const rowClassName = (row: Claim): string => row.status === 'unresolved' ? 'claim-unresolved-row' : ''
 </script>
 
 <template>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th style="width: 70px">论点ID</th>
-        <th style="width: 60px">方</th>
-        <th>论点</th>
-        <th>证据</th>
-        <th style="width: 70px">置信度</th>
-        <th style="width: 80px">状态</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr v-for="c in claims" :key="c.claim_id" :class="{ 'claim-unres': c.status === 'unresolved' }">
-        <td data-label="论点ID"><code>{{ c.claim_id }}</code></td>
-        <td data-label="方"><span class="tag" :class="speakerClass(c.speaker)">{{ speakerLabel(c.speaker) }}</span></td>
-        <td data-label="论点">{{ c.claim }}</td>
-        <td data-label="证据" class="evidence">
-          <span v-for="(e, i) in (c.evidence || [])" :key="i">• {{ e }} </span>
-        </td>
-        <td data-label="置信度">{{ c.confidence != null ? c.confidence.toFixed(2) : '—' }}</td>
-        <td data-label="状态"><span class="tag" :class="statusClass(c.status)">{{ statusLabel(c.status) }}</span></td>
-      </tr>
-      <tr v-if="!claims.length"><td colspan="6" class="muted">无论点记录</td></tr>
-    </tbody>
-  </table>
+  <n-data-table
+    :columns="columns"
+    :data="claims"
+    :bordered="false"
+    :single-line="false"
+    :scroll-x="920"
+    :row-class-name="rowClassName"
+    size="small"
+  />
 </template>
 
 <style scoped>
-.evidence {
+.evidence-list {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   color: var(--app-text-muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
-.claim-unres {
+.evidence-item::before {
+  color: var(--app-primary);
+  content: "• ";
+}
+
+:deep(.claim-unresolved-row td) {
   background: color-mix(in srgb, var(--app-warning) 12%, transparent);
 }
 </style>

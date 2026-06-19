@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import type { DataTableColumns } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import { api } from '../api'
 import type { Holding, HoldingTimeline } from '../api/types'
 import AlphaChart from '../components/AlphaChart.vue'
+import { emptyText, fmtDateTime, fmtPct, pctClass, renderCode, renderPct } from '../utils/ui'
 
 const route = useRoute()
 const portfolio = ref<{ run_id: number | null; timestamp: string | null; holdings: Holding[] }>({ run_id: null, timestamp: null, holdings: [] })
@@ -33,51 +35,66 @@ async function loadTimeline(code: string) {
 }
 
 watch(() => route.params.code, (c) => { if (c) { selectedCode.value = c as string; loadTimeline(c as string) } })
-onMounted(loadPortfolio)
+const columns: DataTableColumns<Holding> = [
+  { title: '代码', key: 'code', width: 108, render: (row) => renderCode(row.code) },
+  { title: '名称', key: 'name', minWidth: 160, render: (row) => row.name || emptyText },
+  { title: '现价', key: 'price', width: 110, render: (row) => row.price ?? emptyText },
+  { title: '成本', key: 'cost', width: 110, render: (row) => row.cost ?? emptyText },
+  { title: '盈亏', key: 'pnl', width: 120, render: (row) => renderPct(row.pnl) },
+  { title: 'Alpha', key: 'alpha', width: 120, render: (row) => renderPct(row.alpha) },
+]
 
-const fmtPct = (v?: number | null): string => (v == null ? '—' : (v * 100).toFixed(2) + '%')
-const pctClass = (v?: number | null): string => (v == null ? '' : v >= 0 ? 'pos' : 'neg')
+const rowProps = (row: Holding) => ({
+  class: 'clickable',
+  onClick: () => {
+    selectedCode.value = row.code
+    void loadTimeline(row.code)
+  },
+})
+
+const rowClassName = (row: Holding): string => selectedCode.value === row.code ? 'selected-row' : ''
+
+onMounted(loadPortfolio)
 </script>
 
 <template>
-  <div v-if="err" class="card"><n-alert type="error" :show-icon="false">{{ err }}</n-alert></div>
-  <div class="card">
-    <h3>当前持仓（{{ portfolio.timestamp ? portfolio.timestamp.slice(0, 16).replace('T', ' ') : '无' }}）</h3>
-    <table class="data-table">
-      <thead>
-        <tr><th>代码</th><th>名称</th><th>现价</th><th>成本</th><th>盈亏</th><th>Alpha</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="(h, i) in portfolio.holdings" :key="i"
-            :class="{ active: selectedCode === h.code }"
-            class="clickable"
-            @click="selectedCode = h.code; loadTimeline(h.code)">
-          <td data-label="代码"><code>{{ h.code }}</code></td>
-          <td data-label="名称">{{ h.name || '—' }}</td>
-          <td data-label="现价">{{ h.price ?? '—' }}</td>
-          <td data-label="成本">{{ h.cost ?? '—' }}</td>
-          <td data-label="盈亏" :class="pctClass(h.pnl)">{{ h.pnl != null ? (h.pnl * 100).toFixed(2) + '%' : '—' }}</td>
-          <td data-label="Alpha" :class="pctClass(h.alpha)">{{ fmtPct(h.alpha) }}</td>
-        </tr>
-        <tr v-if="!portfolio.holdings.length"><td colspan="6" class="muted">暂无持仓</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <div class="card" v-if="selectedCode">
-    <h3>{{ selectedCode }} 收益 / Alpha 曲线</h3>
+  <n-alert v-if="err" type="error" :show-icon="false" class="mb-4">{{ err }}</n-alert>
+  <n-card :title="`当前持仓（${portfolio.timestamp ? fmtDateTime(portfolio.timestamp) : '无'}）`">
+    <n-data-table
+      :columns="columns"
+      :data="portfolio.holdings"
+      :bordered="false"
+      :single-line="false"
+      :scroll-x="730"
+      :row-props="rowProps"
+      :row-class-name="rowClassName"
+    />
+  </n-card>
+  <n-card v-if="selectedCode" :title="`${selectedCode} 收益 / Alpha 曲线`">
     <AlphaChart :points="timeline?.points || []" />
-  </div>
-  <div class="card" v-if="timeline">
-    <h3>最近决策</h3>
-    <div class="kv">
-      <span><b>评级：</b>{{ timeline.verdict?.rating || '—' }}</span>
-      <span><b>动作：</b>{{ timeline.proposal?.action || '—' }}</span>
-      <span><b>触发价：</b>{{ timeline.proposal?.trigger_price ?? '—' }}</span>
-      <span><b>止损：</b>{{ timeline.proposal?.stop_loss || '—' }}</span>
-    </div>
-  </div>
+  </n-card>
+  <n-card v-if="timeline" title="最近决策">
+    <n-descriptions :column="4" label-placement="left" bordered size="small">
+      <n-descriptions-item label="评级">{{ timeline.verdict?.rating || '—' }}</n-descriptions-item>
+      <n-descriptions-item label="动作">{{ timeline.proposal?.action || '—' }}</n-descriptions-item>
+      <n-descriptions-item label="触发价">{{ timeline.proposal?.trigger_price ?? '—' }}</n-descriptions-item>
+      <n-descriptions-item label="止损">{{ timeline.proposal?.stop_loss || '—' }}</n-descriptions-item>
+    </n-descriptions>
+  </n-card>
 </template>
 
 <style scoped>
-.kv { display: flex; gap: 18px; font-size: 13px; flex-wrap: wrap; }
+:deep(.selected-row td) {
+  background: var(--app-row-hover);
+}
+
+:deep(.n-card + .n-card) {
+  margin-top: 16px;
+}
+
+@media (max-width: 768px) {
+  :deep(.n-descriptions) {
+    overflow-x: auto;
+  }
+}
 </style>

@@ -7,103 +7,63 @@ defineProps<{
   accent?: 'blue' | 'green'
 }>()
 
-const ratingColor = (rating?: string | null): string => {
-  if (!rating) return ''
+const ratingType = (rating?: string | null): 'default' | 'success' | 'warning' | 'error' | 'info' => {
+  if (!rating) return 'default'
   return ({
-    Buy: 'var(--app-danger)',
-    Overweight: 'var(--app-warning)',
-    Hold: 'var(--app-text-muted)',
-    Underweight: 'var(--app-primary)',
-    Sell: 'var(--app-success)',
-  }[rating]) || 'var(--app-text-muted)'
+    Buy: 'error',
+    Overweight: 'warning',
+    Hold: 'default',
+    Underweight: 'info',
+    Sell: 'success',
+  }[rating] || 'default') as 'default' | 'success' | 'warning' | 'error' | 'info'
 }
 </script>
 
 <template>
-  <div class="verdict-card" :class="accent">
-    <div class="vc-head">{{ title }}</div>
-    <div v-if="verdict" class="vc-body">
-      <div class="vc-row">
-        <span class="vc-label">评级</span>
-        <span class="vc-rating" :style="{ color: ratingColor(verdict.rating) }">{{ verdict.rating || '—' }}</span>
-      </div>
-      <div v-if="'winner' in verdict && verdict.winner" class="vc-row">
-        <span class="vc-label">胜出方</span>
-        <span>{{ verdict.winner === 'bull' ? '多头' : '空头' }}</span>
-      </div>
-      <div v-if="'rationale' in verdict && verdict.rationale" class="vc-row">
-        <span class="vc-label">理由</span>
-        <span>{{ verdict.rationale }}</span>
-      </div>
-      <div v-if="'cash_target' in verdict && verdict.cash_target" class="vc-row">
-        <span class="vc-label">现金目标</span>
-        <span>{{ verdict.cash_target }}</span>
-      </div>
-      <div v-if="'confidence' in verdict && verdict.confidence" class="vc-row">
-        <span class="vc-label">置信度</span>
-        <span>{{ verdict.confidence }}</span>
-      </div>
-      <div v-if="'priority_notes' in verdict && verdict.priority_notes" class="vc-row">
-        <span class="vc-label">备注</span>
-        <span>{{ verdict.priority_notes }}</span>
-      </div>
-    </div>
-    <div v-else class="muted">无裁决记录</div>
-  </div>
+  <n-card class="verdict-card" :class="accent" size="small" embedded>
+    <template #header>{{ title }}</template>
+    <n-descriptions v-if="verdict" label-placement="left" :column="1" size="small" bordered>
+      <n-descriptions-item label="评级">
+        <n-tag :type="ratingType(verdict.rating)" round :bordered="false">{{ verdict.rating || '—' }}</n-tag>
+      </n-descriptions-item>
+      <n-descriptions-item v-if="'winner' in verdict && verdict.winner" label="胜出方">
+        {{ verdict.winner === 'bull' ? '多头' : '空头' }}
+      </n-descriptions-item>
+      <n-descriptions-item v-if="'rationale' in verdict && verdict.rationale" label="理由">
+        {{ verdict.rationale }}
+      </n-descriptions-item>
+      <n-descriptions-item v-if="'cash_target' in verdict && verdict.cash_target" label="现金目标">
+        {{ verdict.cash_target }}
+      </n-descriptions-item>
+      <n-descriptions-item v-if="'confidence' in verdict && verdict.confidence" label="置信度">
+        {{ verdict.confidence }}
+      </n-descriptions-item>
+      <n-descriptions-item v-if="'priority_notes' in verdict && verdict.priority_notes" label="备注">
+        {{ verdict.priority_notes }}
+      </n-descriptions-item>
+    </n-descriptions>
+    <n-empty v-else description="无裁决记录" />
+  </n-card>
 </template>
 
 <style scoped>
 .verdict-card {
-  border: 1px solid var(--app-border);
   border-left: 4px solid var(--app-primary);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-surface-strong) 82%, transparent);
-  padding: 14px 18px;
 }
 
 .verdict-card.green {
   border-left-color: var(--app-success);
 }
 
-.vc-head {
-  margin-bottom: 12px;
-  color: var(--app-text);
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.vc-body {
-  display: grid;
-  gap: 8px;
-}
-
-.vc-row {
-  display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.vc-row span:last-child {
+:deep(.n-descriptions-table-content) {
+  line-height: 1.7;
   overflow-wrap: anywhere;
 }
 
-.vc-label {
-  color: var(--app-text-muted);
-  font-weight: 700;
-}
-
-.vc-rating {
-  font-size: 15px;
-  font-weight: 800;
-}
-
-@media (max-width: 480px) {
-  .vc-row {
-    grid-template-columns: 1fr;
-    gap: 3px;
-  }
+:deep(.n-descriptions-table-header) {
+  width: 76px;
+  min-width: 76px;
+  white-space: nowrap;
+  word-break: keep-all;
 }
 </style>

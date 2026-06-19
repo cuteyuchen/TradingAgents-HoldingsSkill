@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { h, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Trash2 } from 'lucide-vue-next'
-import { useMessage } from 'naive-ui'
+import { NButton, NPopconfirm, type DataTableColumns, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { RunSummary } from '../api/types'
+import { fmtDateTime, renderGrade } from '../utils/ui'
 
 const router = useRouter()
 const message = useMessage()
@@ -68,17 +69,52 @@ async function removeRun(id: number) {
   }
 }
 
-const gradeClass = (g?: string | null): string => (g ? `grade-${g}` : '')
+const columns: DataTableColumns<RunSummary> = [
+  { title: '时间', key: 'timestamp', minWidth: 156, render: (row) => fmtDateTime(row.timestamp) },
+  { title: '检查点', key: 'checkpoint', width: 96, render: (row) => row.checkpoint || '—' },
+  { title: '数据质量', key: 'data_quality_grade', width: 104, render: (row) => renderGrade(row.data_quality_grade) },
+  { title: '组合评级', key: 'pm_rating', minWidth: 120, render: (row) => row.pm_rating || '—' },
+  { title: '持仓数', key: 'holdings_count', width: 86 },
+  { title: '候选数', key: 'candidates_count', width: 86 },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 86,
+    render: (row) =>
+      h('div', { onClick: (event: MouseEvent) => event.stopPropagation() }, [
+        h(NPopconfirm, {
+          positiveText: '删除',
+          negativeText: '取消',
+          showIcon: false,
+          onPositiveClick: () => removeRun(row.id),
+        }, {
+          trigger: () => h(NButton, {
+            quaternary: true,
+            circle: true,
+            type: 'error',
+            loading: deletingId.value === row.id,
+            disabled: deletingId.value !== null && deletingId.value !== row.id,
+            ariaLabel: '删除决策',
+          }, { icon: () => h(Trash2, { size: 17 }) }),
+          default: () => '删除这条决策记录？相关持仓快照、论点和候选会一起删除。',
+        }),
+      ]),
+  },
+]
+
+const rowProps = (row: RunSummary) => ({
+  class: 'clickable',
+  onClick: () => router.push(`/runs/${row.id}`),
+})
 
 onMounted(load)
 </script>
 
 <template>
-  <div class="card list-card">
-    <div class="list-head">
-      <h3>决策列表</h3>
-      <span class="count-pill" aria-live="polite">共 {{ runs.length }} 条</span>
-    </div>
+  <n-card class="list-card" title="决策列表">
+    <template #header-extra>
+      <n-tag type="info" round :bordered="false" aria-live="polite">共 {{ runs.length }} 条</n-tag>
+    </template>
     <div class="toolbar list-toolbar" aria-label="决策筛选">
       <n-input v-model:value="codeFilter" clearable placeholder="按代码筛选，如 600519" @keyup.enter="load" />
       <n-date-picker
@@ -102,80 +138,23 @@ onMounted(load)
       <n-button type="primary" class="query-button" :loading="loading" @click="load">查询</n-button>
     </div>
     <n-alert v-if="err" type="error" :show-icon="false" class="mb-3">{{ err }}</n-alert>
-    <table v-if="runs.length" class="data-table list-table">
-      <thead>
-        <tr>
-          <th>时间</th><th>检查点</th><th>数据质量</th><th>组合评级</th>
-          <th>持仓数</th><th>候选数</th><th class="action-col">操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in runs" :key="r.id" class="clickable" @click="router.push(`/runs/${r.id}`)">
-          <td data-label="时间">{{ r.timestamp.slice(0, 16).replace('T', ' ') }}</td>
-          <td data-label="检查点">{{ r.checkpoint || '—' }}</td>
-          <td data-label="数据质量"><span v-if="r.data_quality_grade" class="tag" :class="gradeClass(r.data_quality_grade)">{{ r.data_quality_grade }}</span><span v-else>—</span></td>
-          <td data-label="组合评级">{{ r.pm_rating || '—' }}</td>
-          <td data-label="持仓数">{{ r.holdings_count }}</td>
-          <td data-label="候选数">{{ r.candidates_count }}</td>
-          <td data-label="操作" class="action-cell" @click.stop>
-            <n-popconfirm
-              positive-text="删除"
-              negative-text="取消"
-              :show-icon="false"
-              @positive-click="() => removeRun(r.id)"
-            >
-              <template #trigger>
-                <n-button
-                  quaternary
-                  circle
-                  type="error"
-                  :loading="deletingId === r.id"
-                  :disabled="deletingId !== null && deletingId !== r.id"
-                  aria-label="删除决策"
-                >
-                  <template #icon><Trash2 :size="17" /></template>
-                </n-button>
-              </template>
-              删除这条决策记录？相关持仓快照、论点和候选会一起删除。
-            </n-popconfirm>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <n-empty v-else-if="!loading" description="暂无决策记录。先在 skill 执行一次并上传。" class="py-8" />
-  </div>
+    <n-data-table
+      v-if="runs.length || loading"
+      :columns="columns"
+      :data="runs"
+      :loading="loading"
+      :bordered="false"
+      :single-line="false"
+      :scroll-x="850"
+      :row-props="rowProps"
+    />
+    <n-empty v-else description="暂无决策记录。先在 skill 执行一次并上传。" class="py-8" />
+  </n-card>
 </template>
 
 <style scoped>
 .list-card {
   overflow: hidden;
-}
-
-.list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.list-head h3 {
-  margin-bottom: 0;
-}
-
-.count-pill {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid color-mix(in srgb, var(--app-primary) 26%, var(--app-border));
-  border-radius: 999px;
-  background: var(--app-primary-soft);
-  padding: 4px 12px;
-  color: var(--app-text);
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
 }
 
 .list-toolbar {
@@ -190,59 +169,12 @@ onMounted(load)
   min-width: 88px;
 }
 
-.list-table {
-  border: 1px solid var(--app-border-soft);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.list-table tbody tr {
-  border-left: 3px solid transparent;
-}
-
-.list-table tbody tr:hover {
-  border-left-color: var(--app-primary);
-}
-
-.list-table td:first-child {
-  font-weight: 700;
-}
-
-.action-col,
-.action-cell {
-  width: 82px;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.action-cell :deep(.n-button) {
-  min-width: 44px;
-  min-height: 44px;
-}
-
-.action-cell :deep(.n-button:hover) {
-  background: color-mix(in srgb, var(--app-danger) 12%, transparent);
-}
-
 @media (max-width: 640px) {
-  .list-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .toolbar :deep(.n-input),
   .toolbar :deep(.n-date-picker),
   .toolbar :deep(.n-select),
   .toolbar :deep(.n-button) {
     width: 100%;
-  }
-
-  .action-cell {
-    text-align: left;
-  }
-
-  .action-cell :deep(.n-button) {
-    border: 1px solid color-mix(in srgb, var(--app-danger) 24%, transparent);
   }
 }
 </style>

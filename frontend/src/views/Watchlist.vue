@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useMessage } from 'naive-ui'
+import { computed, h, onMounted, ref } from 'vue'
+import { NButton, NPopconfirm, type DataTableColumns, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { HealthStatus, WatchlistItem } from '../api/types'
+import { emptyText, fmtDateTime, renderCode, renderMuted, renderStatus } from '../utils/ui'
 
 const message = useMessage()
 const list = ref<WatchlistItem[]>([])
@@ -72,93 +73,101 @@ async function remove(code: string) {
   }
 }
 
+const watchlistColumns: DataTableColumns<WatchlistItem> = [
+  { title: '代码', key: 'code', width: 110, render: (row) => renderCode(row.code) },
+  { title: '名称', key: 'name', minWidth: 140, render: (row) => row.name || emptyText },
+  { title: '检查点', key: 'cadence', width: 120, render: (row) => row.cadence || emptyText },
+  { title: '状态', key: 'enabled', width: 110, render: (row) => renderStatus(row.enabled ? '启用' : '已停用') },
+  {
+    title: '停用/降级原因',
+    key: 'note',
+    minWidth: 240,
+    render: (row) => renderMuted(healthByCode.value.get(row.code)?.note),
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 100,
+    render: (row) =>
+      h(NPopconfirm, {
+        positiveText: '删除',
+        negativeText: '取消',
+        showIcon: false,
+        onPositiveClick: () => remove(row.code),
+      }, {
+        trigger: () => h(NButton, { size: 'small', secondary: true, type: 'error' }, { default: () => '删除' }),
+        default: () => `删除 ${row.code}？`,
+      }),
+  },
+]
+
+const healthColumns: DataTableColumns<HealthStatus> = [
+  { title: '代码', key: 'code', width: 110, render: (row) => row.code ? renderCode(row.code) : '全局' },
+  { title: '检查点', key: 'checkpoint', width: 110 },
+  { title: '连续失败', key: 'consecutive_failures', width: 110 },
+  { title: '状态', key: 'degraded', width: 110, render: (row) => renderStatus(row.degraded ? '降级' : '正常') },
+  { title: '最近成功', key: 'last_success_at', width: 150, render: (row) => renderMuted(fmtDateTime(row.last_success_at)) },
+  { title: '最近失败', key: 'last_failure_at', width: 150, render: (row) => renderMuted(fmtDateTime(row.last_failure_at)) },
+  { title: '原因', key: 'note', minWidth: 240, render: (row) => renderMuted(row.note) },
+]
+
+const healthRowClassName = (row: HealthStatus): string => row.degraded ? 'degraded-row' : ''
+
 onMounted(load)
 </script>
 
 <template>
-  <div class="card">
-    <h3>自选股 / 定时分析</h3>
+  <n-card title="自选股 / 定时分析">
     <n-alert v-if="err" type="error" :show-icon="false" class="mb-3">{{ err }}</n-alert>
-    <n-form class="watch-form" label-placement="top">
-      <n-form-item label="代码" required>
-        <n-input v-model:value="form.code" placeholder="如 600519 或 513040" @keyup.enter="add" />
-      </n-form-item>
-      <n-form-item label="名称">
-        <n-input v-model:value="form.name" placeholder="可选" @keyup.enter="add" />
-      </n-form-item>
-      <n-form-item label="检查点">
-        <n-select v-model:value="form.cadence" :options="cadenceOptions" />
-      </n-form-item>
-      <n-form-item label="启用">
-        <n-switch v-model:value="form.enabled" />
-      </n-form-item>
-      <n-form-item label="操作">
-        <n-button type="primary" block :loading="submitting" @click="add">添加 / 更新</n-button>
-      </n-form-item>
+    <n-form label-placement="top" class="mb-4">
+      <n-grid :cols="5" :x-gap="12" responsive="screen" item-responsive>
+        <n-form-item-gi label="代码" required :span="1">
+          <n-input v-model:value="form.code" placeholder="如 600519 或 513040" @keyup.enter="add" />
+        </n-form-item-gi>
+        <n-form-item-gi label="名称" :span="1">
+          <n-input v-model:value="form.name" placeholder="可选" @keyup.enter="add" />
+        </n-form-item-gi>
+        <n-form-item-gi label="检查点" :span="1">
+          <n-select v-model:value="form.cadence" :options="cadenceOptions" />
+        </n-form-item-gi>
+        <n-form-item-gi label="启用" :span="1">
+          <n-switch v-model:value="form.enabled" />
+        </n-form-item-gi>
+        <n-form-item-gi label="操作" :span="1">
+          <n-button type="primary" block :loading="submitting" @click="add">添加 / 更新</n-button>
+        </n-form-item-gi>
+      </n-grid>
     </n-form>
 
-    <table class="data-table">
-      <thead><tr><th>代码</th><th>名称</th><th>检查点</th><th>状态</th><th>停用/降级原因</th><th>操作</th></tr></thead>
-      <tbody>
-        <tr v-for="(w, i) in list" :key="i">
-          <td data-label="代码"><code>{{ w.code }}</code></td>
-          <td data-label="名称">{{ w.name || '—' }}</td>
-          <td data-label="检查点">{{ w.cadence || '—' }}</td>
-          <td data-label="状态"><span class="tag" :class="w.enabled ? 'grade-A' : 'grade-C'">{{ w.enabled ? '启用' : '已停用' }}</span></td>
-          <td data-label="停用/降级原因" class="muted">{{ healthByCode.get(w.code)?.note || '—' }}</td>
-          <td data-label="操作"><n-button size="small" secondary type="error" @click="remove(w.code)">删除</n-button></td>
-        </tr>
-        <tr v-if="!list.length"><td colspan="6" class="muted">暂无自选股</td></tr>
-      </tbody>
-    </table>
-  </div>
+    <n-data-table
+      :columns="watchlistColumns"
+      :data="list"
+      :bordered="false"
+      :single-line="false"
+      :scroll-x="820"
+    />
+  </n-card>
 
-  <div class="card">
-    <h3>检查点健康度（连续失败降级）</h3>
-    <table class="data-table">
-      <thead><tr><th>代码</th><th>检查点</th><th>连续失败</th><th>状态</th><th>最近成功</th><th>最近失败</th><th>原因</th></tr></thead>
-      <tbody>
-        <tr v-for="(h, i) in health" :key="i" :class="{ degraded: h.degraded }">
-          <td data-label="代码">{{ h.code || '全局' }}</td>
-          <td data-label="检查点">{{ h.checkpoint }}</td>
-          <td data-label="连续失败">{{ h.consecutive_failures }}</td>
-          <td data-label="状态"><span class="tag" :class="h.degraded ? 'grade-C' : 'grade-A'">{{ h.degraded ? '降级' : '正常' }}</span></td>
-          <td data-label="最近成功" class="muted">{{ h.last_success_at ? h.last_success_at.slice(5, 16).replace('T', ' ') : '—' }}</td>
-          <td data-label="最近失败" class="muted">{{ h.last_failure_at ? h.last_failure_at.slice(5, 16).replace('T', ' ') : '—' }}</td>
-          <td data-label="原因" class="muted">{{ h.note || '—' }}</td>
-        </tr>
-        <tr v-if="!health.length"><td colspan="7" class="muted">暂无健康记录</td></tr>
-      </tbody>
-    </table>
-  </div>
+  <n-card title="检查点健康度（连续失败降级）" class="mt-4">
+    <n-data-table
+      :columns="healthColumns"
+      :data="health"
+      :bordered="false"
+      :single-line="false"
+      :scroll-x="1050"
+      :row-class-name="healthRowClassName"
+    />
+  </n-card>
 </template>
 
 <style scoped>
-.watch-form {
-  display: grid;
-  grid-template-columns: 140px 1fr 190px 90px 140px;
-  gap: 12px;
-  align-items: end;
-  margin-bottom: 16px;
-}
-
-.watch-form :deep(.n-form-item) {
-  margin-bottom: 0;
-}
-
-.degraded {
+:deep(.degraded-row td) {
   background: color-mix(in srgb, var(--app-warning) 12%, transparent);
 }
 
-@media (max-width: 900px) {
-  .watch-form {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
 @media (max-width: 640px) {
-  .watch-form {
-    grid-template-columns: 1fr;
+  :deep(.n-grid) {
+    grid-template-columns: 1fr !important;
   }
 }
 </style>

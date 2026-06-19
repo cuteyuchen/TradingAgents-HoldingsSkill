@@ -20,26 +20,34 @@ const unresolved = computed(() => props.claims.filter((c) => c.status === 'unres
 </script>
 
 <template>
-  <div>
-    <div v-for="[r, cs] in rounds" :key="r" class="round">
-      <div class="round-head">第 {{ r }} 轮 - {{ r === 1 ? '建立核心论点' : r === 2 ? '攻防核心论点' : '收敛结论' }}</div>
+  <n-timeline v-if="claims.length" class="debate-timeline">
+    <n-timeline-item
+      v-for="[r, cs] in rounds"
+      :key="r"
+      type="info"
+      :title="`第 ${r} 轮 - ${r === 1 ? '建立核心论点' : r === 2 ? '攻防核心论点' : '收敛结论'}`"
+    >
       <ClaimTable :claims="cs" />
-    </div>
-    <div v-if="unresolved.length" class="unres-box">
-      <strong>未解决论点（裁决官必须处理）：</strong>
-      <ul>
-        <li v-for="c in unresolved" :key="c.claim_id">
-          <code>{{ c.claim_id }}</code> {{ c.claim }}
-        </li>
-      </ul>
-    </div>
-    <div v-if="!claims.length" class="muted">无辩论记录</div>
-  </div>
+    </n-timeline-item>
+  </n-timeline>
+  <n-alert v-if="unresolved.length" type="warning" :show-icon="false" class="mt-3">
+    <strong>未解决论点（裁决官必须处理）：</strong>
+    <n-list class="mt-2" size="small">
+      <n-list-item v-for="c in unresolved" :key="c.claim_id">
+        <n-code :code="c.claim_id" inline /> {{ c.claim }}
+      </n-list-item>
+    </n-list>
+  </n-alert>
+  <n-empty v-if="!claims.length" description="无辩论记录" />
 </template>
 
 <style scoped>
-.round { margin-bottom: 16px; }
-.round-head { font-weight: 700; font-size: 13px; color: var(--app-primary); margin-bottom: 6px; }
-.unres-box { background: color-mix(in srgb, var(--app-warning) 12%, transparent); border-left: 3px solid var(--app-warning); padding: 10px 14px; font-size: 13px; }
-.unres-box ul { margin: 6px 0 0; padding-left: 18px; }
+.debate-timeline {
+  margin-top: 4px;
+}
+
+:deep(.n-timeline-item-content__title) {
+  color: var(--app-primary);
+  font-weight: 800;
+}
 </style>
