@@ -11,6 +11,13 @@ export function fmtPct(value?: number | null): string {
   return value == null ? emptyText : `${(value * 100).toFixed(2)}%`
 }
 
+export function fmtMoney(value?: number | null): string {
+  return value == null ? emptyText : value.toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+}
+
 export function pctClass(value?: number | null): string {
   return value == null ? '' : value >= 0 ? 'pos' : 'neg'
 }
@@ -19,8 +26,30 @@ export function renderPct(value?: number | null): VNodeChild {
   return h('span', { class: pctClass(value) }, fmtPct(value))
 }
 
+export function renderPnl(value?: number | null, amount?: number | null): VNodeChild {
+  if (amount == null) return renderPct(value)
+  return h('div', { class: 'pnl-cell' }, [
+    h('span', { class: pctClass(value) }, fmtPct(value)),
+    h('span', { class: 'muted pnl-amount' }, `金额 ${fmtMoney(amount)}`),
+  ])
+}
+
 export function renderCode(value?: string | null): VNodeChild {
   return value ? h(NCode, { code: value, inline: true }) : emptyText
+}
+
+export function instrumentLabel(name?: string | null, code?: string | null): string {
+  if (name && code) return `${name}（${code}）`
+  return name || code || emptyText
+}
+
+export function renderInstrument(name?: string | null, code?: string | null): VNodeChild {
+  if (!name && !code) return emptyText
+  return h('span', { class: 'instrument-label' }, [
+    name ? h('span', { class: 'instrument-name' }, name) : null,
+    name && code ? ' ' : null,
+    code ? renderCode(code) : null,
+  ])
 }
 
 export function renderGrade(grade?: string | null): VNodeChild {
@@ -40,6 +69,59 @@ export function renderSpeaker(s: string): VNodeChild {
 
 export function statusLabel(s: string): string {
   return ({ open: '待回应', addressed: '已回应', resolved: '已定论', unresolved: '未解决', accepted: '已采纳' }[s] || s)
+}
+
+export function ratingLabel(value?: string | null): string {
+  if (!value) return emptyText
+  return ({
+    Buy: '买入',
+    Overweight: '增配',
+    Hold: '持有',
+    Underweight: '低配/减仓',
+    Sell: '卖出',
+  }[value] || value)
+}
+
+export function actionLabel(value?: string | null): string {
+  if (!value) return emptyText
+  return ({
+    Buy: '买入',
+    Add: '加仓',
+    Hold: '持有',
+    Reduce: '减仓',
+    Sell: '卖出',
+    Watch: '观察',
+    Rotate: '轮动',
+  }[value] || value)
+}
+
+export function qualityCheckLabel(value?: string | null): string {
+  if (!value) return emptyText
+  return ({
+    pass: '通过',
+    passed: '通过',
+    fail: '失败',
+    failed: '失败',
+    partial: '部分通过',
+    caution: '谨慎',
+    warning: '警示',
+  }[value] || value)
+}
+
+export function analystLabel(value?: string | null): string {
+  if (!value) return emptyText
+  return ({
+    technical: '技术',
+    vpa: '量价/VPA',
+    'technical/VPA': '技术/量价',
+    capital: '资金',
+    news: '新闻',
+    fundamentals: '基本面',
+    'capital/news/fundamentals': '资金/新闻/基本面',
+    sentiment: '情绪',
+    policy: '政策',
+    quality_gate: '质量门控',
+  }[value] || value)
 }
 
 export function renderStatus(s?: string | null): VNodeChild {

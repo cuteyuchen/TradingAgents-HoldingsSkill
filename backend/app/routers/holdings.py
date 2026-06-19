@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..auth import require_token
 from ..database import get_db
 from ..models import Claim, HoldingSnapshot, ResearchVerdict, TraderProposal
+from ..services.pnl import normalize_pnl
 
 router = APIRouter(prefix="/api/v1/holdings", tags=["holdings"])
 
@@ -31,13 +32,15 @@ def holding_timeline(
     snaps = list(reversed(snaps))
     points = []
     for s in snaps:
+        pnl, pnl_amount, _correction = normalize_pnl(s.code, s.name, s.pnl, s.price, s.cost, s.pnl_amount)
         points.append({
             "run_id": s.run_id,
             "timestamp": s.run.timestamp.isoformat() if s.run else None,
             "checkpoint": s.run.checkpoint if s.run else None,
             "price": s.price,
             "cost": s.cost,
-            "pnl": s.pnl,
+            "pnl": pnl,
+            "pnl_amount": pnl_amount,
             "raw_return": s.raw_return,
             "benchmark_return": s.benchmark_return,
             "alpha": s.alpha,

@@ -286,11 +286,26 @@ When Python is used, normalize results before reasoning:
 ####################### 标准化输出格式 #######################
 evidence = {
     "timestamp": "2026-06-18 10:00",
+    "screenshot": {
+        "filename": "holdings-2026-06-18.png",
+        "mime_type": "image/png",
+        "data_url": "data:image/png;base64,...",
+        "captured_at": "2026-06-18T10:00:00+08:00",
+        "source": "user_upload"
+    },
     "holdings": [
         {
             "name": "贵州茅台",
             "code": "600519",
             "code_confidence": "high",
+            "qty": 100,
+            "available_qty": 100,
+            "cost": 1700.00,
+            "price": 1680.00,
+            "market_value": 168000.00,
+            "pnl": -0.0117647059,
+            "pnl_amount": -2000.00,
+            "screenshot_price": 1680.00,
             "quote": {
                 "price": 1680.00,
                 "pct_change": -1.2,
@@ -352,6 +367,8 @@ evidence = {
 ```
 
 If a source fails, output `[数据缺失: source/field]` instead of silently filling values. Reduce confidence grade for affected holdings.
+
+Before reasoning or upload, validate every holding P/L ratio against the screenshot layout and `(price - cost) / cost` when both values exist. `holdings[].pnl` is a decimal return ratio only. For a normal 同花顺/券商 two-line 盈亏 cell, parse line 1 as `pnl_amount` and line 2 as percent-unit `pnl`; convert line 2 to decimal and do not add `pnl_corrections`. If there is no separate percent line and OCR only yields one amount-like value, store it in `holdings[].pnl_amount`, compute `holdings[].pnl` from price/cost, and add `pnl_corrections` only when this was a true ambiguous or conflicting single-value correction; Phase 6 maps that list into `evidence_pack.pnl_corrections`.
 
 For quote failures, also record the failed source chain in `missing_fields` and, when persistence is configured, post `/health/outcome` with `success=false`, the affected `code`, checkpoint, and a short reason. If all quote routes fail, the run may still upload only as degraded output.
 

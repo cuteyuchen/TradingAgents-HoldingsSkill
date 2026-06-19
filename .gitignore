@@ -5,12 +5,17 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.local
 
 # Backend data (SQLite + anything runtime)
 backend/data/
 backend/.venv/
 backend/tests/test_advisor.db
 backend/tests/*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.tmp-sqlite-test.db*
 *.log
 
 # Node / frontend build
@@ -20,6 +25,8 @@ frontend/node_modules/
 
 # IDE / OS
 .vscode/
+!.vscode/
+!.vscode/tasks.json
 .idea/
 .DS_Store
 Thumbs.db

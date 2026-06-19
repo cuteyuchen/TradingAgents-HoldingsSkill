@@ -3,7 +3,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { Candidate } from '../api/types'
-import { emptyText, renderCode, renderMuted, renderStatus } from '../utils/ui'
+import { emptyText, renderInstrument, renderMuted, renderStatus } from '../utils/ui'
 
 const list = ref<Candidate[]>([])
 const statusFilter = ref('')
@@ -20,7 +20,7 @@ const columns: DataTableColumns<Candidate> = [
     title: '候选',
     key: 'name',
     minWidth: 180,
-    render: (row) => [row.name || emptyText, ' ', renderCode(row.code)],
+    render: (row) => renderInstrument(row.name, row.code),
   },
   { title: '类型', key: 'type', width: 92, render: (row) => row.type || emptyText },
   { title: '评分', key: 'score', width: 82, render: (row) => row.score ?? emptyText },

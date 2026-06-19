@@ -45,7 +45,9 @@ After producing advice, upload the full run so it is queryable in the dashboard.
 
 **Request:** `POST {ADVISOR_API_URL}/runs` with header `Authorization: Bearer {ADVISOR_TOKEN}`
 
-The body is the skill's output contract (see `python-execution.md`) plus the 8-section transcript. All sections are optional — a degraded run uploads what it has:
+The body is the skill's output contract (see `python-execution.md`) plus the 8-section transcript. All sections are optional — a degraded run uploads what it has. When the holdings source is a screenshot, include the screenshot as a `data_url` when feasible so the remote dashboard can render it without local filesystem access:
+
+For holdings, `pnl` is always the decimal return ratio and `pnl_amount` is the currency amount. In a normal 同花顺/券商 two-line 盈亏 cell, line 1 is amount and line 2 is percent; persist them directly as `pnl_amount` and `pnl`. Do not add `evidence_pack.pnl_corrections` for that normal mapping. Use `pnl_corrections` only for true OCR/input conflicts where a single parsed P/L value had to be corrected.
 
 ```json
 {
@@ -54,7 +56,10 @@ The body is the skill's output contract (see `python-execution.md`) plus the 8-s
   "holdings_source": "screenshot",
   "data_quality_grade": "B",
   "intent": {"tickers": ["600519"], "horizon": "short", "focus": ["技术"], "risk_profile": "稳健"},
-  "evidence_pack": {"code_assumptions": {"600519": "high: public quote matched screenshot price"}, "missing_fields": []},
+  "evidence_pack": {
+    "code_assumptions": {"600519": "high: public quote matched screenshot price"},
+    "missing_fields": []
+  },
   "transcript": "完整8段原文 transcript",
   "sections": {
     "evidence": "证据包",
@@ -66,11 +71,20 @@ The body is the skill's output contract (see `python-execution.md`) plus the 8-s
     "pm_final": "组合经理结论",
     "candidates": "候选表"
   },
+  "screenshot": {
+    "filename": "holdings-2026-06-18.png",
+    "mime_type": "image/png",
+    "data_url": "data:image/png;base64,...",
+    "captured_at": "2026-06-18T10:00:00+08:00",
+    "source": "user_upload"
+  },
   "quality_gates": [
     {"analyst": "技术分析", "hard_check": "pass", "llm_review": "通过", "grade": "A", "gaps": null}
   ],
   "holdings": [
     {"code": "600519", "name": "贵州茅台", "qty": 100, "cost": 1700, "price": 1680,
+     "pnl": -0.0117647059,
+     "pnl_amount": -2000,
      "data_quality": "B",
      "indicators": {
        "quote": {

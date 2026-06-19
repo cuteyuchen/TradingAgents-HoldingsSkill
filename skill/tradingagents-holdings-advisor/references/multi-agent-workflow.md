@@ -1,6 +1,6 @@
 # Multi-Agent Workflow
 
-Use this file to structure reasoning. It adapts and extends design patterns from both `simonlin1212/TradingAgents-astock` and `KylinMountain/TradingAgents-AShare`: layered data sources, 7+ analyst roles, two-layer data quality gate, claim-driven bull/bear debate, trader proposal, three-way risk debate with revision loop, trading memory reflection, and portfolio-level final decision.
+Use this file to structure reasoning. It adapts and extends the base multi-agent research graph from `TauricResearch/TradingAgents`, plus A-share extensions from `simonlin1212/TradingAgents-astock` and `KylinMountain/TradingAgents-AShare`: layered data sources, 7+ analyst roles, two-layer data quality gate, claim-driven bull/bear debate, trader proposal, three-way risk debate with revision loop, trading memory reflection, and portfolio-level final decision.
 
 ## Portfolio-Aware Pipeline (7 Phases)
 
@@ -19,6 +19,7 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 ### Phase 0 — Intent Parsing + History Fetch (quick)
 
 1. **Intent Parsing**: Parse the user's natural language to identify: target tickers, investment horizon (短线/中线/长线), focus areas (技术/基本面/政策/资金), risk profile, and specific questions. If the user says "分析茅台短线", extract ticker=600519, horizon=short, focus=technical+momentum. See Intent Parsing section below.
+   - If the user says "解析持仓/解析截图/上传持仓", default the objective to "完成持仓解析并给出今日操作建议". Do not downgrade the task to extraction only unless the user explicitly says not to provide advice.
 2. **Extract the whole portfolio** from screenshot/typed input/history.
 3. **History Fetch** (if persistence enabled, see `persistence.md`): Pull last `memory_same_ticker_entries` (default 5) same-ticker decisions + `memory_cross_ticker_lessons` (default 3) cross-ticker lessons for the holdings in scope. This replaces "rely on conversation history" with a real data source for trading memory.
 

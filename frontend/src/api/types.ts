@@ -132,6 +132,7 @@ export interface Holding {
   price?: number | null
   market_value?: number | null
   pnl?: number | null
+  pnl_amount?: number | null
   data_quality?: DataGrade | null
   raw_return?: number | null
   benchmark_return?: number | null
@@ -147,6 +148,15 @@ export interface Intent {
   objective?: string | null
 }
 
+export interface ScreenshotPayload {
+  filename?: string | null
+  mime_type?: string | null
+  data_url?: string | null
+  captured_at?: string | null
+  source?: string | null
+  [key: string]: unknown
+}
+
 export interface RunDetail {
   id: number
   timestamp: string
@@ -157,6 +167,7 @@ export interface RunDetail {
   evidence_pack?: Record<string, unknown> | null
   transcript?: string | null
   sections?: Record<string, unknown> | null
+  screenshot?: ScreenshotPayload | null
   quality_gates: QualityGate[]
   holdings: Holding[]
   claims: Claim[]
@@ -183,6 +194,7 @@ export interface TimelinePoint {
   price?: number | null
   cost?: number | null
   pnl?: number | null
+  pnl_amount?: number | null
   raw_return?: number | null
   benchmark_return?: number | null
   alpha?: number | null

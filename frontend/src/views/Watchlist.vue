@@ -3,7 +3,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { NButton, NPopconfirm, type DataTableColumns, useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { HealthStatus, WatchlistItem } from '../api/types'
-import { emptyText, fmtDateTime, renderCode, renderMuted, renderStatus } from '../utils/ui'
+import { emptyText, fmtDateTime, renderCode, renderInstrument, renderMuted, renderStatus } from '../utils/ui'
 
 const message = useMessage()
 const list = ref<WatchlistItem[]>([])
@@ -74,8 +74,7 @@ async function remove(code: string) {
 }
 
 const watchlistColumns: DataTableColumns<WatchlistItem> = [
-  { title: '代码', key: 'code', width: 110, render: (row) => renderCode(row.code) },
-  { title: '名称', key: 'name', minWidth: 140, render: (row) => row.name || emptyText },
+  { title: '标的', key: 'code', minWidth: 190, render: (row) => renderInstrument(row.name, row.code) },
   { title: '检查点', key: 'cadence', width: 120, render: (row) => row.cadence || emptyText },
   { title: '状态', key: 'enabled', width: 110, render: (row) => renderStatus(row.enabled ? '启用' : '已停用') },
   {

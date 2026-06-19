@@ -1,0 +1,4 @@
+interface:
+  display_name: "TradingAgents Holdings Advisor"
+  short_description: "Analyze holdings screenshots into trading advice"
+  default_prompt: "Use $tradingagents-holdings-advisor to analyze my holdings screenshot and produce today's operation plan."

@@ -7,14 +7,16 @@ import os
 import sys
 from datetime import datetime
 
-# Point DB at a temp file before importing app modules.
-os.environ["ADVISOR_DB_PATH"] = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "test_advisor.db"
-)
+# Point DB at a per-process backend/data file before importing app modules.
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TEST_DB_DIR = os.path.join(BACKEND_DIR, "data")
+os.makedirs(TEST_DB_DIR, exist_ok=True)
+os.environ["ADVISOR_DB_PATH"] = os.path.join(TEST_DB_DIR, f"test_advisor_{os.getpid()}.db")
+os.environ["ADVISOR_SQLITE_JOURNAL_MODE"] = "MEMORY"
 os.environ["ADVISOR_BENCHMARK_FETCH_ON_START"] = "0"
 os.environ["ADVISOR_TOKEN"] = "test_token_xxx"
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, BACKEND_DIR)
 
 
 def test_upload_and_read():
@@ -27,7 +29,7 @@ def test_upload_and_read():
 
     from app.database import SessionLocal, init_db
     from app.main import app
-    from app.models import BenchmarkPrice
+    from app.models import BenchmarkPrice, HoldingSnapshot, Run
 
     init_db()
 
@@ -38,6 +40,52 @@ def test_upload_and_read():
     db.add(BenchmarkPrice(date="2026-06-18", close=3978.0, pct_change=0.02))  # +2%
     db.add(BenchmarkPrice(date="2026-06-19", close=4017.78, pct_change=0.01))
     db.commit()
+    db.close()
+
+    # Legacy broker/OCR records may have amount-like values in pnl. Startup repair fixes them once.
+    legacy_cases = [
+        ("000158", "常山北明", 14.52, 20.092, -19490.87, -0.2773243081823611),
+        ("600693", "东百集团", 8.38, 16.304, -43555.62, -0.48601570166830216),
+        ("159915", "创业板ETF", 4.269, 3.676, 5336.64, 0.16131664853101196),
+        ("588080", "科创50ETF易方达", 1.953, 1.952, 4.57, 0.0005122950819672705),
+        ("515980", "人工智能ETF华富", 1.23, 1.23, 2.94, 0.0),
+        ("000858", "五粮液", 75.85, 155.565, -7966.83, -0.5124224600649246),
+    ]
+    db = SessionLocal()
+    legacy_run = Run(
+        timestamp=datetime.fromisoformat("2026-06-15T10:00:00"),
+        checkpoint="10:00",
+        holdings_source="screenshot",
+        data_quality_grade="B",
+    )
+    db.add(legacy_run)
+    db.flush()
+    for code, name, price, cost, bad_pnl, _expected in legacy_cases:
+        db.add(HoldingSnapshot(
+            run_id=legacy_run.id, code=code, name=name,
+            price=price, cost=cost, pnl=bad_pnl,
+        ))
+    db.commit()
+    legacy_run_id = legacy_run.id
+    db.close()
+
+    init_db()
+    db = SessionLocal()
+    repaired = (
+        db.query(HoldingSnapshot)
+        .filter(HoldingSnapshot.run_id == legacy_run_id)
+        .order_by(HoldingSnapshot.id)
+        .all()
+    )
+    for snap, (_code, _name, _price, _cost, bad_pnl, expected_pnl) in zip(repaired, legacy_cases):
+        assert abs(snap.pnl - expected_pnl) < 1e-9
+        assert snap.pnl_amount == bad_pnl
+    correction_count = len(db.get(Run, legacy_run_id).evidence_pack["pnl_corrections"])
+    db.close()
+
+    init_db()
+    db = SessionLocal()
+    assert len(db.get(Run, legacy_run_id).evidence_pack["pnl_corrections"]) == correction_count
     db.close()
 
     client = TestClient(app)
@@ -66,6 +114,13 @@ def test_upload_and_read():
         "checkpoint": "14:30",
         "data_quality_grade": "C",
         "transcript": "完整8段 transcript",
+        "screenshot": {
+            "filename": "holdings.png",
+            "mime_type": "image/png",
+            "data_url": "data:image/png;base64,AAAA",
+            "captured_at": "2026-06-18T10:00:00+08:00",
+            "source": "user_upload",
+        },
         "sections": {
             "evidence": "证据包",
             "quality_gate": "质量门",
@@ -82,7 +137,9 @@ def test_upload_and_read():
         "holdings": [{
             "code": "600519",
             "name": "贵州茅台",
+            "cost": 10.0,
             "price": 11.0,
+            "pnl": 5048.62,
             "indicators": {
                 "quote": {
                     "price": 11.0,
@@ -132,7 +189,12 @@ def test_upload_and_read():
     detail = r.json()
     assert detail["transcript"] == "完整8段 transcript"
     assert detail["sections"]["risk_debate"] == "风控辩论"
+    assert detail["screenshot"]["filename"] == "holdings.png"
     assert detail["holdings"][0]["alpha"] is not None
+    assert abs(detail["holdings"][0]["pnl"] - 0.1) < 1e-6
+    assert detail["holdings"][0]["pnl_amount"] == 5048.62
+    assert detail["evidence_pack"]["pnl_corrections"][0]["code"] == "600519"
+    assert detail["evidence_pack"]["pnl_corrections"][0]["reason"] == "extreme_pnl_recomputed_from_price_cost"
     assert detail["holdings"][0]["indicators"]["quote"]["source"] == "Tencent qt.gtimg.cn"
     assert len(detail["claims"]) == 4
     assert len([c for c in detail["claims"] if c["claim_id"].startswith("RISK-")]) == 3

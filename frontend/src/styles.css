@@ -112,6 +112,31 @@ pre {
   color: var(--app-success);
 }
 
+.instrument-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.instrument-name {
+  color: var(--app-text);
+  font-weight: 650;
+  word-break: keep-all;
+}
+
+.pnl-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.pnl-amount {
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
 .clickable {
   cursor: pointer;
   touch-action: manipulation;

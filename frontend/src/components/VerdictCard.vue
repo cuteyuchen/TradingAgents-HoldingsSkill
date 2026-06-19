@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ResearchVerdict, PMFinal } from '../api/types'
+import { ratingLabel } from '../utils/ui'
 
 defineProps<{
   title: string
@@ -24,7 +25,9 @@ const ratingType = (rating?: string | null): 'default' | 'success' | 'warning' |
     <template #header>{{ title }}</template>
     <n-descriptions v-if="verdict" label-placement="left" :column="1" size="small" bordered>
       <n-descriptions-item label="评级">
-        <n-tag :type="ratingType(verdict.rating)" round :bordered="false">{{ verdict.rating || '—' }}</n-tag>
+        <n-tag :type="ratingType(verdict.rating)" round :bordered="false">
+          {{ ratingLabel(verdict.rating) }}
+        </n-tag>
       </n-descriptions-item>
       <n-descriptions-item v-if="'winner' in verdict && verdict.winner" label="胜出方">
         {{ verdict.winner === 'bull' ? '多头' : '空头' }}

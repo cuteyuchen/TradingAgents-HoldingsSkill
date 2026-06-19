@@ -43,15 +43,19 @@
 ```
 TradingAgents-HoldingsSkill/
 ├── skill/
-│   ├── SKILL.md                 # Skill 入口与执行流程
-│   ├── data-sources.md          # 数据源路由、行情/资金流/新闻/基本面策略
-│   ├── multi-agent-workflow.md  # 多智能体分析、质量门控、辩论和组合综合
-│   ├── trading-rules.md         # A 股交易约束、仓位和触发规则
-│   ├── debate-reporting.md      # 8 段 transcript 与 claim 输出格式
-│   ├── buy-candidate-selection.md
-│   ├── python-execution.md
-│   ├── persistence.md           # Phase 0/Phase 6 后端集成契约
-│   └── configuration.md
+│   └── tradingagents-holdings-advisor/
+│       ├── SKILL.md             # Skill 入口与执行流程
+│       ├── agents/
+│       │   └── openai.yaml      # Codex UI 元数据
+│       └── references/
+│           ├── data-sources.md          # 数据源路由、行情/资金流/新闻/基本面策略
+│           ├── multi-agent-workflow.md  # 多智能体分析、质量门控、辩论和组合综合
+│           ├── trading-rules.md         # A 股交易约束、仓位和触发规则
+│           ├── debate-reporting.md      # 8 段 transcript 与 claim 输出格式
+│           ├── buy-candidate-selection.md
+│           ├── python-execution.md
+│           ├── persistence.md           # Phase 0/Phase 6 后端集成契约
+│           └── configuration.md
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口 + lifespan + 定时抓沪深300
@@ -101,7 +105,49 @@ docker compose up -d --build
 # 远程访问: http://<主机IP>:8080，页面输入 ADVISOR_TOKEN 登录
 ```
 
-### 方式二：本地开发（前后端分离）
+### 方式二：本地开发
+
+Windows 下可在 VS Code/Cursor 中运行任务 `Start Backend`，或直接执行：
+
+```powershell
+.\backend\scripts\start-dev.ps1
+# 或双击 backend/scripts/start-dev.cmd
+```
+
+脚本会在缺少依赖时安装后端 `.venv`，自动生成 `backend/.env.local` 中的 `ADVISOR_TOKEN`，并启动后端：
+
+- 后端：`http://localhost:8000`
+- API 文档：`http://localhost:8000/docs`
+- 默认数据库：`backend/data/advisor.db`
+- 启动脚本会使用 `ADVISOR_SQLITE_JOURNAL_MODE=MEMORY`，避免 Windows 编译器终端中 SQLite journal 文件写入失败
+
+如依赖已安装且只想启动后端：
+
+```powershell
+.\backend\scripts\start-dev.ps1 -SkipInstall
+```
+
+默认关闭 `uvicorn --reload`，避免 Windows 编译器终端里出现 multiprocessing 命名管道权限问题。确实需要热重载时可手动执行：
+
+```powershell
+.\backend\scripts\start-dev.ps1 -Reload
+```
+
+如需指定后端目录中的其它数据库文件，`-DbPath` 使用相对 `backend/` 的路径：
+
+```powershell
+.\backend\scripts\start-dev.ps1 -DbPath data/advisor-dev.db
+```
+
+前端如需本地开发，另开终端手动启动：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+完整手动启动方式：
 
 ```bash
 # 后端
@@ -156,7 +202,7 @@ cd backend
 
 ## 使用 Skill
 
-`skill/` 是本项目主能力目录，可以作为 Codex Skill 安装或复制到本地 Skill 目录使用。其中 `persistence.md` 定义了上传/拉取契约。设置环境变量即可启用可选的后端记忆与看板：
+`skill/tradingagents-holdings-advisor/` 是本项目主能力目录，按 Codex Skill 规范组织，可以作为 Skill 安装或复制到本地 Skill 目录使用。其中 `references/persistence.md` 定义了上传/拉取契约。设置环境变量即可启用可选的后端记忆与看板：
 
 ```
 ADVISOR_API_URL=http://localhost:8000/api/v1

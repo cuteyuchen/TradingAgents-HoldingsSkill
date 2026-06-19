@@ -40,6 +40,7 @@ class Run(Base):
     # Full transcript persisted for dashboard review and Phase-0 context.
     transcript: Mapped[str | None] = mapped_column(Text)
     sections: Mapped[dict | None] = mapped_column(JSON)
+    screenshot: Mapped[dict | None] = mapped_column(JSON)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -98,6 +99,7 @@ class HoldingSnapshot(Base):
     price: Mapped[float | None] = mapped_column(Float)  # current/advice price
     market_value: Mapped[float | None] = mapped_column(Float)
     pnl: Mapped[float | None] = mapped_column(Float)
+    pnl_amount: Mapped[float | None] = mapped_column(Float)
     data_quality: Mapped[str | None] = mapped_column(String(4))
 
     # Alpha vs CSI 300, computed on upload by comparing to the previous same-code snapshot.

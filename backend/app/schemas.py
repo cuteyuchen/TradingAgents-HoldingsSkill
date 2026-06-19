@@ -77,6 +77,7 @@ class HoldingUpload(BaseModel):
     price: float | None = None
     market_value: float | None = None
     pnl: float | None = None
+    pnl_amount: float | None = None
     data_quality: str | None = None
     indicators: HoldingIndicatorsSchema | None = None
 
@@ -164,6 +165,7 @@ class RunUpload(BaseModel):
     evidence_pack: dict | None = None
     transcript: str | None = None
     sections: dict | None = None
+    screenshot: dict | None = None
     quality_gates: list[QualityGateUpload] = Field(default_factory=list)
     holdings: list[HoldingUpload] = Field(default_factory=list)
     claims: list[ClaimUpload] = Field(default_factory=list)

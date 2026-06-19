@@ -9,6 +9,7 @@ from ..auth import require_token
 from ..database import get_db
 from ..schemas import RunCreated, RunSummary, RunUpload
 from ..services.alpha import compute_alpha_for_holding
+from ..services.pnl import append_unique_corrections, normalize_pnl
 
 router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
 
@@ -31,6 +32,17 @@ def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
         evidence_pack["candidate_policy"] = (
             "今日买入/轮动候选必须是非当前持仓；当前持仓的持有/加仓/减仓只写入交易员方案。"
         )
+    normalized_holdings: list[tuple[float | None, float | None]] = []
+    pnl_corrections: list[dict] = []
+    for h in payload.holdings:
+        normalized_pnl, pnl_amount, correction = normalize_pnl(
+            h.code, h.name, h.pnl, h.price, h.cost, h.pnl_amount
+        )
+        normalized_holdings.append((normalized_pnl, pnl_amount))
+        if correction:
+            pnl_corrections.append(correction)
+    if pnl_corrections:
+        evidence_pack = append_unique_corrections(evidence_pack, pnl_corrections) or {}
 
     run = models.Run(
         timestamp=payload.timestamp,
@@ -41,6 +53,7 @@ def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
         evidence_pack=evidence_pack or None,
         transcript=payload.transcript,
         sections=payload.sections,
+        screenshot=payload.screenshot,
     )
     db.add(run)
     db.flush()  # get run.id
@@ -55,7 +68,8 @@ def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
         ))
 
     # Holdings + indicators + alpha.
-    for h in payload.holdings:
+    for idx, h in enumerate(payload.holdings):
+        normalized_pnl, pnl_amount = normalized_holdings[idx]
         # Compute alpha BEFORE inserting this snapshot (prev = previous same-code run).
         alpha_info = compute_alpha_for_holding(db, h.code, h.price, payload.timestamp)
         alphas[h.code] = alpha_info
@@ -63,7 +77,8 @@ def _store_run(db: Session, payload: RunUpload) -> tuple[models.Run, dict]:
         snap = models.HoldingSnapshot(
             run_id=run.id, code=h.code, name=h.name, qty=h.qty,
             available_qty=h.available_qty, cost=h.cost, price=h.price,
-            market_value=h.market_value, pnl=h.pnl, data_quality=h.data_quality,
+            market_value=h.market_value, pnl=normalized_pnl, pnl_amount=pnl_amount,
+            data_quality=h.data_quality,
             raw_return=alpha_info["raw_return"],
             benchmark_return=alpha_info["benchmark_return"],
             alpha=alpha_info["alpha"],
@@ -222,6 +237,7 @@ def _serialize_run(run: models.Run) -> dict:
         "evidence_pack": run.evidence_pack,
         "transcript": run.transcript,
         "sections": run.sections,
+        "screenshot": run.screenshot,
         "quality_gates": [
             {"analyst": q.analyst, "hard_check": q.hard_check, "llm_review": q.llm_review,
              "grade": q.grade, "gaps": q.gaps}
@@ -250,9 +266,11 @@ def _serialize_run(run: models.Run) -> dict:
 
 def _serialize_holding(h: models.HoldingSnapshot) -> dict:
     ind = h.indicators
+    pnl, pnl_amount, _correction = normalize_pnl(h.code, h.name, h.pnl, h.price, h.cost, h.pnl_amount)
     return {
         "code": h.code, "name": h.name, "qty": h.qty, "available_qty": h.available_qty,
-        "cost": h.cost, "price": h.price, "market_value": h.market_value, "pnl": h.pnl,
+        "cost": h.cost, "price": h.price, "market_value": h.market_value, "pnl": pnl,
+        "pnl_amount": pnl_amount,
         "data_quality": h.data_quality, "raw_return": h.raw_return,
         "benchmark_return": h.benchmark_return, "alpha": h.alpha,
         "indicators": {

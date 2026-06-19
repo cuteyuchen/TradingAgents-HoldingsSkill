@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { DataTableColumns } from 'naive-ui'
 import { api } from '../api'
 import type { Candidate, Claim, Holding, RunDetail, TraderProposal } from '../api/types'
@@ -7,7 +7,17 @@ import QualityGateTable from '../components/QualityGateTable.vue'
 import DebateTimeline from '../components/DebateTimeline.vue'
 import ClaimTable from '../components/ClaimTable.vue'
 import VerdictCard from '../components/VerdictCard.vue'
-import { emptyText, fmtDateTime, fmtPct, pctClass, renderCode, renderMuted, renderStatus } from '../utils/ui'
+import {
+  actionLabel,
+  emptyText,
+  fmtDateTime,
+  fmtPct,
+  renderInstrument,
+  renderMuted,
+  renderPnl,
+  renderPct,
+  renderStatus,
+} from '../utils/ui'
 
 const props = defineProps<{ id: string }>()
 const run = ref<RunDetail | null>(null)
@@ -36,14 +46,40 @@ const sectionEntries = computed(() =>
 )
 const riskDebateFallback = computed(() => run.value?.sections?.risk_debate ?? null)
 const weakGrade = computed(() => ['C', 'D', 'F'].includes(run.value?.data_quality_grade || ''))
+const nameByCode = computed(() => {
+  const map = new Map<string, string>()
+  for (const h of run.value?.holdings || []) {
+    if (h.code && h.name) map.set(h.code.toUpperCase(), h.name)
+  }
+  for (const c of run.value?.candidates || []) {
+    if (c.code && c.name && !map.has(c.code.toUpperCase())) map.set(c.code.toUpperCase(), c.name)
+  }
+  return map
+})
+const screenshotDataUrl = computed(() => {
+  const value = run.value?.screenshot?.data_url
+  return typeof value === 'string' && value.startsWith('data:image/') ? value : ''
+})
+const screenshotEntries = computed(() => {
+  const s = run.value?.screenshot
+  if (!s) return []
+  return [
+    { label: '文件名', value: s.filename },
+    { label: '格式', value: s.mime_type },
+    { label: '来源', value: s.source },
+    { label: '截图时间', value: s.captured_at },
+  ].filter((item) => item.value)
+})
 
 const fmtBlock = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v, null, 2))
 const gradeType = (grade?: string | null): 'success' | 'warning' | 'error' | 'default' =>
   !grade ? 'default' : grade === 'A' ? 'success' : grade === 'B' ? 'warning' : 'error'
+const nameForCode = (code?: string | null): string | undefined =>
+  code ? nameByCode.value.get(code.toUpperCase()) : undefined
 
 const traderColumns: DataTableColumns<TraderProposal> = [
-  { title: '代码', key: 'code', width: 110, render: (row) => renderCode(row.code) },
-  { title: '动作', key: 'action', width: 130, render: (row) => row.action || emptyText },
+  { title: '标的', key: 'code', minWidth: 190, render: (row) => renderInstrument(nameForCode(row.code), row.code) },
+  { title: '动作', key: 'action', width: 130, render: (row) => actionLabel(row.action) },
   { title: '触发价', key: 'trigger_price', width: 110, render: (row) => row.trigger_price ?? emptyText },
   { title: '数量/比例', key: 'qty', minWidth: 220, render: (row) => row.qty || emptyText },
   { title: '止盈', key: 'take_profit', minWidth: 160, render: (row) => row.take_profit || emptyText },
@@ -52,7 +88,7 @@ const traderColumns: DataTableColumns<TraderProposal> = [
 ]
 
 const candidateColumns: DataTableColumns<Candidate> = [
-  { title: '候选', key: 'name', minWidth: 180, render: (row) => [row.name || emptyText, ' ', renderCode(row.code)] },
+  { title: '候选', key: 'name', minWidth: 180, render: (row) => renderInstrument(row.name, row.code) },
   { title: '类型', key: 'type', width: 90, render: (row) => row.type || emptyText },
   { title: '评分', key: 'score', width: 82, render: (row) => row.score ?? emptyText },
   { title: '入场', key: 'entry_trigger', minWidth: 280, render: (row) => renderMuted(row.entry_trigger) },
@@ -68,14 +104,13 @@ const candidateColumns: DataTableColumns<Candidate> = [
 ]
 
 const holdingColumns: DataTableColumns<Holding> = [
-  { title: '代码', key: 'code', width: 110, render: (row) => renderCode(row.code) },
-  { title: '名称', key: 'name', minWidth: 160, render: (row) => row.name || emptyText },
+  { title: '标的', key: 'code', minWidth: 190, render: (row) => renderInstrument(row.name, row.code) },
   { title: '现价', key: 'price', width: 100, render: (row) => row.price ?? emptyText },
   { title: '成本', key: 'cost', width: 100, render: (row) => row.cost ?? emptyText },
-  { title: '盈亏', key: 'pnl', width: 110, render: (row) => h('span', { class: pctClass(row.pnl) }, row.pnl != null ? `${(row.pnl * 100).toFixed(2)}%` : emptyText) },
-  { title: '标的收益', key: 'raw_return', width: 120, render: (row) => h('span', { class: pctClass(row.raw_return) }, fmtPct(row.raw_return)) },
+  { title: '盈亏率', key: 'pnl', width: 130, render: (row) => renderPnl(row.pnl, row.pnl_amount) },
+  { title: '标的收益', key: 'raw_return', width: 120, render: (row) => renderPct(row.raw_return) },
   { title: '沪深300', key: 'benchmark_return', width: 120, render: (row) => renderMuted(fmtPct(row.benchmark_return)) },
-  { title: 'Alpha', key: 'alpha', width: 120, render: (row) => h('span', { class: pctClass(row.alpha) }, fmtPct(row.alpha)) },
+  { title: 'Alpha', key: 'alpha', width: 120, render: (row) => renderPct(row.alpha) },
 ]
 
 onMounted(async () => {
@@ -115,6 +150,27 @@ onMounted(async () => {
           {{ run.intent.risk_profile }}
         </n-descriptions-item>
       </n-descriptions>
+    </n-card>
+
+    <n-card v-if="run.screenshot" title="持仓截图">
+      <div class="screenshot-grid">
+        <n-image
+          v-if="screenshotDataUrl"
+          class="screenshot-image"
+          :src="screenshotDataUrl"
+          object-fit="contain"
+        />
+        <n-descriptions v-if="screenshotEntries.length" :column="2" label-placement="left" bordered size="small">
+          <n-descriptions-item
+            v-for="item in screenshotEntries"
+            :key="item.label"
+            :label="item.label"
+          >
+            {{ item.value }}
+          </n-descriptions-item>
+        </n-descriptions>
+        <pre v-if="!screenshotDataUrl" class="section-pre">{{ fmtBlock(run.screenshot) }}</pre>
+      </div>
     </n-card>
 
     <n-card v-if="run.transcript || sectionEntries.length" title="原始记录">
@@ -237,6 +293,27 @@ onMounted(async () => {
   max-height: 520px;
   overflow: auto;
   box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 16%, transparent);
+}
+
+.screenshot-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.screenshot-image {
+  width: min(100%, 860px);
+  overflow: hidden;
+  border: 1px solid var(--app-border-soft);
+  border-radius: 8px;
+  background: var(--app-surface-strong);
+}
+
+.screenshot-image :deep(img) {
+  display: block;
+  max-width: 100%;
+  max-height: 680px;
+  object-fit: contain;
 }
 
 .detail-page :deep(.verdict-card) {
