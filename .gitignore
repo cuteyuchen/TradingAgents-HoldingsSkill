@@ -17,6 +17,7 @@ backend/tests/*.db
 *.db-shm
 .tmp-sqlite-test.db*
 *.log
+deploy-*.tar.gz
 
 # Node / frontend build
 node_modules/

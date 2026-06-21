@@ -36,7 +36,7 @@
 - **后端**：Python + FastAPI + SQLite（单文件零运维）+ AKShare（沪深300）
 - **前端**：Vue 3 + TypeScript + Vite + Naive UI + TailwindCSS + ECharts（亮/暗主题看板）
 - **鉴权**：单一静态 Bearer Token（单用户场景）；前端登录密码即 `ADVISOR_TOKEN`
-- **部署**：docker-compose 一键起（后端 + 前端 + 数据卷）
+- **部署**：本地可用 docker-compose 构建；服务器推荐拉取 GitHub Actions 发布到 GHCR 的镜像
 
 ## 目录结构
 
@@ -105,7 +105,34 @@ docker compose up -d --build
 # 远程访问: http://<主机IP>:8080，页面输入 ADVISOR_TOKEN 登录
 ```
 
-### 方式二：本地开发
+### 方式二：服务器拉取 GHCR 镜像部署
+
+GitHub Actions 会在推送到 `main/master` 或手动触发时构建并发布两个镜像：
+
+- `ghcr.io/cuteyuchen/tradingagents-holdings-advisor-backend:latest`
+- `ghcr.io/cuteyuchen/tradingagents-holdings-advisor-frontend:latest`
+
+服务器部署目录建议固定为 `/home/cuteyuchen/projects/tradingagents-holdings-advisor`，数据库持久化在该目录下的 `backend/data/advisor.db`。
+
+```bash
+mkdir -p /home/cuteyuchen/projects/tradingagents-holdings-advisor
+cd /home/cuteyuchen/projects/tradingagents-holdings-advisor
+
+# 首次部署：放入 docker-compose.deploy.yml 和 .env
+cp .env.deploy.example .env
+# 编辑 .env，填入 ADVISOR_TOKEN；192.168.1.13 默认使用 18080/18000 避免占用 8080/8000
+
+docker compose -f docker-compose.deploy.yml pull
+docker compose -f docker-compose.deploy.yml up -d
+```
+
+访问：
+
+- 前端：`http://192.168.1.13:18080`
+- 后端：`http://192.168.1.13:18000`
+- 登录密码：`.env` 中的 `ADVISOR_TOKEN`
+
+### 方式三：本地开发
 
 Windows 下可在 VS Code/Cursor 中运行任务 `Start Backend`，或直接执行：
 

@@ -1,26 +1,23 @@
 services:
   backend:
-    build: ./backend
+    image: ghcr.io/${GHCR_OWNER:-cuteyuchen}/tradingagents-holdings-advisor-backend:${IMAGE_TAG:-latest}
     container_name: advisor-backend
     environment:
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
       - ADVISOR_DB_PATH=/app/data/advisor.db
-      - ADVISOR_BENCHMARK_FETCH_ON_START=1
+      - ADVISOR_BENCHMARK_FETCH_ON_START=${ADVISOR_BENCHMARK_FETCH_ON_START:-1}
       - ADVISOR_CORS_ORIGINS=${ADVISOR_CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
     volumes:
-      - advisor-data:/app/data
+      - ./backend/data:/app/data
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    image: ghcr.io/${GHCR_OWNER:-cuteyuchen}/tradingagents-holdings-advisor-frontend:${IMAGE_TAG:-latest}
     container_name: advisor-frontend
     depends_on:
       - backend
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     restart: unless-stopped
-
-volumes:
-  advisor-data:
