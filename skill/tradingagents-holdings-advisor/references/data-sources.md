@@ -11,6 +11,25 @@ Use this file when collecting data for intraday portfolio advice. The data archi
 
 Never infer holdings from local dev apps, local databases, test fixtures, broker cache files, or unrelated prior tool output.
 
+## Account Cash And Non-Equity Items
+
+When a broker screenshot shows account-level `total_assets` and
+`total_market_value`, compute corrected unused funds as:
+
+```text
+corrected_unused_funds = total_assets - total_market_value
+```
+
+Do not rely on the broker "available cash" field as the full remaining cash in
+this case. Pending buy/sell orders, frozen balances, and same-day settlement can
+make available cash temporarily lower than true unused or soon-to-return funds.
+
+Rows named "新标准券", standard bond, treasury reverse repo, 国债逆回购, or similar
+cash-management/repo instruments are not stock/ETF holdings. Exclude them from
+`holdings[]`, do not run quote or trading advice on them, and record their value
+under account funds such as `repo_or_standard_bond_value`,
+`unused_or_repo_occupied_funds`, or `excluded_items[]`.
+
 ## Centralized Data Collection Principle
 
 Fetch all data once, share across all analyst roles. Never fetch the same data point twice. When multiple holdings share the same data needs (e.g., same sector news, same index data), deduplicate requests.

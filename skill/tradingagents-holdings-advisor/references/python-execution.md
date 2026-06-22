@@ -291,6 +291,18 @@ evidence = {
         "captured_at": "2026-06-18T10:00:00+08:00",
         "source": "user_upload"
     },
+    "account": {
+        "total_assets": 219165.49,
+        "total_market_value": 203481.00,
+        "broker_available_cash": 422.43,
+        "corrected_unused_funds": 15684.49,  # total_assets - total_market_value
+        "repo_or_standard_bond_value": 37000.00,
+        "unused_or_repo_occupied_funds": 52684.49,
+        "cash_rule_note": (
+            "Use total_assets - total_market_value when both are visible; "
+            "exclude 新标准券/国债逆回购 from holdings and treat it as unused/repo funds."
+        )
+    },
     "holdings": [
         {
             "name": "贵州茅台",
@@ -342,6 +354,13 @@ evidence = {
             "data_quality": "B"
         }
     ],
+    "excluded_items": [
+        {
+            "name": "新标准券",
+            "display_value": 37000.00,
+            "reason": "国债逆回购/standard bond cash-management item; exclude from holdings and count as unused/repo funds"
+        }
+    ],
     "market": {
         "shanghai_index": {"price": 3280, "pct_change": -0.3},
         "northbound_net": 12.5e8,
@@ -373,6 +392,13 @@ evidence = {
 If a source fails, output `[数据缺失: source/field]` instead of silently filling values. Reduce confidence grade for affected holdings.
 
 Before reasoning or upload, validate every holding P/L ratio against the screenshot layout and `(price - cost) / cost` when both values exist. `holdings[].pnl` is a decimal return ratio only. For a normal 同花顺/券商 two-line 盈亏 cell, parse line 1 as `pnl_amount` and line 2 as percent-unit `pnl`; convert line 2 to decimal and do not add `pnl_corrections`. If there is no separate percent line and OCR only yields one amount-like value, store it in `holdings[].pnl_amount`, compute `holdings[].pnl` from price/cost, and add `pnl_corrections` only when this was a true ambiguous or conflicting single-value correction; Phase 6 stores the normalized holdings JSON in the archive.
+
+When account totals are visible, compute `account.corrected_unused_funds` as
+`total_assets - total_market_value`. Keep broker `available_cash` as a separate
+field only, because pending-order funds may not have returned to availability.
+If a row is named "新标准券"/standard bond/treasury reverse repo/国债逆回购, do not
+append it to `holdings[]`; put it in `excluded_items[]` and account repo/unused
+funds fields.
 
 For quote failures, also record the failed source chain in `missing_fields` and, when persistence is configured, post `/health/outcome` with `success=false`, the affected `code`, checkpoint, and a short reason. If all quote routes fail for a confirmed holding, do not issue trading advice for that holding.
 

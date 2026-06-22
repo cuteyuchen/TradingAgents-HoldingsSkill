@@ -62,6 +62,14 @@ pending orders, freeze, or T+1 limits; it must not be inferred as already
 reduced/sold. Any reduce/sell recommendation must be sized from
 `available_qty`.
 
+For account funds, when `total_assets` and `total_market_value` are visible in
+the screenshot, persist corrected unused funds as
+`total_assets - total_market_value`. Keep the broker "available cash" value only
+as `broker_available_cash`, because pending-order funds may not have returned to
+availability yet. Do not persist "新标准券", standard bond, treasury reverse repo,
+or 国债逆回购 rows inside `holdings[]`; persist them under account fund fields
+such as `repo_or_standard_bond_value` or under `excluded_items[]` with a reason.
+
 For P/L, `pnl` is always the decimal return ratio and `pnl_amount` is the
 currency amount. In a normal 同花顺/券商 two-line 盈亏 cell, line 1 is amount and
 line 2 is percent; persist them directly as `pnl_amount` and `pnl`.
