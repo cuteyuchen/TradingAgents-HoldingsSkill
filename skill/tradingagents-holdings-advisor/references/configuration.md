@@ -14,23 +14,25 @@ The workflow runs in 7 phases (see `multi-agent-workflow.md`). Each phase has a 
 | `quick_mode_phases` | 0, 1, 3, 4(trader) | Reasoning mode | Fast, data-focused: analyst reports, debate responses, trader proposal |
 | `deep_mode_phases` | 4(research mgr), 4(risk mgr), 5 | Reasoning mode | Thorough synthesis: research/risk/portfolio managers weigh all evidence + unresolved claims |
 
-## Runtime Budget Parameters
+## Runtime Experience Parameters
 
-Routine portfolio runs should finish in about five minutes. These limits keep
-data collection bounded while still preserving the mandatory quote, quality
-gate, holding action, buy-candidate, and risk-claim outputs.
+Routine portfolio runs should aim to show the final advice within 10 minutes.
+This is an experience target and progress prompt, not a hard cutoff and not a
+reason to skip mandatory evidence. If the run exceeds the progress threshold,
+state which key data is still being collected and continue until the quality
+gate can pass or explicitly block trading advice.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `target_runtime_sec` | 300 | End-to-end target from screenshot parsing to upload |
-| `fetch_deadline_sec` | 240 | Maximum wall-clock time for all network/data fetches |
-| `synthesis_deadline_sec` | 60 | Remaining time for quality gate, debate, action tables, upload |
+| `target_advice_sec` | 600 | Experience target from screenshot parsing to visible advice; do not lower evidence quality to meet it |
+| `progress_notice_sec` | 600 | If exceeded, explain which mandatory data is still being collected |
+| `mandatory_data_complete` | true | Do not issue trade actions until required quote, market, sector, capital-flow, and risk evidence is available or explicitly blocked |
 | `per_source_timeout_sec` | 8 | Default timeout for a single public HTTP/API request |
 | `per_ticker_worker_timeout_sec` | 90 | Maximum time for one ticker-worker bundle |
 | `max_ticker_workers` | 4 | Parallel ticker/subagent workers for non-Eastmoney sources |
 | `max_candidate_workers` | 2 | Parallel candidate-sector workers |
 | `max_retry_per_source` | 1 | Try the route once, then the configured fallback once; do not grind |
-| `must_output_action_tables` | true | Even under time pressure, output current holding actions and today's buy plan |
+| `must_output_action_tables` | true | Only after mandatory data and quality gate pass; otherwise output blocker + missing data + next fetch step |
 
 ## Debate Parameters
 
@@ -63,8 +65,8 @@ Numeric thresholds for evidence grading. Inspired by `TradingAgents-astock`'s me
 | A | All checks pass, current data | Normal action |
 | B | Minor gaps | Normal action, lower confidence |
 | C | Multiple missing / stale | Reduce action size; no new buys |
-| D | Mostly failed / too short | Risk-control only |
-| F | No usable data | Ask for data or generic risk framework only |
+| D | Mostly failed / too short | Block buy/sell/reduce actions unless mandatory risk-control data is still sufficient |
+| F | No usable data | Do not give trading advice; ask for the missing data and state the next collection path |
 
 ## Trading Rules Parameters
 
@@ -136,15 +138,15 @@ When the companion persistence system is configured. See `persistence.md`.
 | Parameter | Default | Notes |
 |---|---|---|
 | `persistence_enabled` | false | Set true when `ADVISOR_API_URL` + `ADVISOR_TOKEN` are configured |
-| `upload_on_completion` | true | Upload full run at end of pipeline (Phase 6) |
+| `archive_after_display` | true | Upload archive only after final advice is already visible to the user |
 | `fetch_history_on_start` | true | Pull same-ticker timeline at Phase 0 for trading memory |
 | `upload_failure_policy` | warn, do not block | On upload failure, finish advice to user and mark `[未持久化: 原因]`; never silently swallow |
-| `consecutive_failure_threshold` | 3 | After 3 consecutive data-fetch failures for a checkpoint, output degradation warning and let the system flag that checkpoint grey (health linkage) |
+| `consecutive_failure_threshold` | 3 | After 3 consecutive data-fetch failures for a checkpoint, output a blocking quality warning and let the system flag that checkpoint grey (health linkage) |
 
 ## Tuning Guidance
 
 - These defaults are tuned for **single-user, single-portfolio, intraday A-share** use.
-- To speed up routine runs: lower `max_debate_rounds` to 1, raise `claims_per_side_min` tolerance.
+- To speed up routine runs: improve batch fetching, cache repeated public data, and parallelize independent non-Eastmoney collection. Do not remove mandatory data or the quality gate.
 - To deepen analysis on a heavy position: raise `max_debate_rounds` to 3 for that name only.
 - Before a large multi-holding batch: set `em_min_interval_sec` to 2.0 to avoid bans.
-- When the persistence system is down: the skill still runs; only trading-memory recall and upload degrade.
+- When the persistence system is down: the skill still runs; only trading-memory recall and post-advice archive are unavailable.

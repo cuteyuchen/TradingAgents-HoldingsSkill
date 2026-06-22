@@ -5,3 +5,4 @@ pydantic>=2.11
 akshare>=1.16
 apscheduler>=3.11
 python-dotenv>=1.0.1
+python-multipart>=0.0.20

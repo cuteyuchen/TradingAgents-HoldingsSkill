@@ -23,7 +23,7 @@ Installing dependencies is allowed when necessary for data collection or parsing
 Prefer this order:
 
 1. **Standard library + already installed packages**.
-2. **Minimal widely used packages**: `requests`, `beautifulsoup4`, `lxml`, `pandas`, `numpy`.
+2. **Small widely used packages**: `requests`, `beautifulsoup4`, `lxml`, `pandas`, `numpy`.
 3. **Finance data packages** only when justified by the data need:
    - `akshare`: A-share/HK comprehensive data (Eastmoney/Sina/THS aggregator).
    - `stockstats`: Technical indicator computation from OHLCV DataFrames.
@@ -41,21 +41,24 @@ Keep installs minimal:
 
 Inspired by `TradingAgents-astock`'s `_em_get()` and `TradingAgents-AShare`'s `_AkshareLock`:
 
-### Five-Minute Parallel Collection Budget
+### Quality-First Parallel Collection
 
-Routine screenshot portfolio analysis should target `target_runtime_sec` = 300
-seconds. Use multiple ticker-worker subagents or Python worker threads for
-independent data fetches, but keep Eastmoney throttling global.
+Routine screenshot portfolio analysis should target `target_advice_sec` = 600
+seconds, but this is a progress target rather than a hard cutoff. Use multiple
+ticker-worker subagents or Python worker threads for independent data fetches,
+but keep Eastmoney throttling global. If the run exceeds 10 minutes, report
+which mandatory evidence is still pending instead of issuing lower-quality
+advice.
 
-Recommended wall-clock budget:
+Recommended collection sequence:
 
-| Window | Budget | Work |
-|---|---:|---|
-| Shared prefetch | 0-45s | Symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
-| Ticker workers | 45-210s | Split holdings into up to `max_ticker_workers` bundles; fetch K-line, VPA, news, fundamentals, fund-flow fallback per bundle |
-| Candidate workers | 120-230s | Scan non-held candidate ETFs/stocks from hot sectors in parallel with ticker workers |
-| Merge + quality gate | 210-250s | Normalize evidence, mark missing fields, grade data |
-| Synthesis + upload | 250-300s | Holding actions, new-buy plan, claims, risk debate, persistence |
+| Stage | Work |
+|---|---|
+| Shared prefetch | Symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
+| Ticker workers | Split holdings into up to `max_ticker_workers` bundles; fetch K-line, VPA, news, fundamentals, fund-flow fallback per bundle |
+| Candidate workers | Scan non-held candidate ETFs/stocks from hot sectors in parallel with ticker workers |
+| Merge + quality gate | Normalize evidence, mark missing fields, grade whether action advice is allowed |
+| Synthesis + archive | Show advice first, then archive Markdown/holdings/screenshot if persistence is configured |
 
 Rules:
 
@@ -70,32 +73,27 @@ Rules:
   and `em_min_interval_sec`.
 - Set every request timeout to `per_source_timeout_sec` unless a source
   explicitly needs longer. Retry at most once on the next configured fallback.
-- Stop fetching when `fetch_deadline_sec` is reached. Preserve the evidence
-  already collected, mark precise missing fields, and continue to synthesis.
-- Never spend the final `synthesis_deadline_sec` on more network retries. The
-  final answer must still contain the current-holding action table and today's
-  buy/rotation plan.
+- If a mandatory route chain fails, mark the exact missing fields and block the
+  affected trading advice instead of filling with a weak substitute.
+- If elapsed time exceeds `progress_notice_sec`, state which mandatory data is
+  still being fetched and why it is needed for advice quality.
+- Upload/archive is never allowed to consume time before the user sees the
+  final advice; persistence happens only after visible output.
 
-Minimal worker sketch:
+Worker sketch:
 
 ```python
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from time import monotonic
-
-deadline = monotonic() + 240  # fetch_deadline_sec
 
 def collect_ticker_bundle(bundle):
     out = []
     for holding in bundle:
-        if monotonic() > deadline:
-            out.append({"code": holding["code"], "missing": ["fetch_deadline"]})
-            continue
         out.append(fetch_one_holding_with_fallbacks(holding))
     return out
 
 with ThreadPoolExecutor(max_workers=4) as pool:
     futures = [pool.submit(collect_ticker_bundle, b) for b in bundles]
-    for f in as_completed(futures, timeout=240):
+    for f in as_completed(futures):
         evidence["holdings"].extend(f.result())
 ```
 
@@ -300,6 +298,7 @@ evidence = {
             "code_confidence": "high",
             "qty": 100,
             "available_qty": 100,
+            "unavailable_qty": 0,
             "cost": 1700.00,
             "price": 1680.00,
             "market_value": 168000.00,
@@ -360,7 +359,12 @@ evidence = {
             "take_profit_1": "1.080",
             "take_profit_2": "1.120",
             "stop_loss": "1.020",
-            "invalidation": "板块跌超2%或北向净流出超50亿"
+            "invalidation": "板块跌超2%或北向净流出超50亿",
+            "recommendation_reason": {
+                "news": "半导体政策/订单催化仍在发酵，无重大负面公告",
+                "capital_flow": "板块和ETF资金净流入，个券/ETF无明显出货",
+                "sector_position": "板块日内排名靠前，5日强于20日但未进入明显高位衰退"
+            }
         }
     ]
 }
@@ -368,13 +372,14 @@ evidence = {
 
 If a source fails, output `[数据缺失: source/field]` instead of silently filling values. Reduce confidence grade for affected holdings.
 
-Before reasoning or upload, validate every holding P/L ratio against the screenshot layout and `(price - cost) / cost` when both values exist. `holdings[].pnl` is a decimal return ratio only. For a normal 同花顺/券商 two-line 盈亏 cell, parse line 1 as `pnl_amount` and line 2 as percent-unit `pnl`; convert line 2 to decimal and do not add `pnl_corrections`. If there is no separate percent line and OCR only yields one amount-like value, store it in `holdings[].pnl_amount`, compute `holdings[].pnl` from price/cost, and add `pnl_corrections` only when this was a true ambiguous or conflicting single-value correction; Phase 6 maps that list into `evidence_pack.pnl_corrections`.
+Before reasoning or upload, validate every holding P/L ratio against the screenshot layout and `(price - cost) / cost` when both values exist. `holdings[].pnl` is a decimal return ratio only. For a normal 同花顺/券商 two-line 盈亏 cell, parse line 1 as `pnl_amount` and line 2 as percent-unit `pnl`; convert line 2 to decimal and do not add `pnl_corrections`. If there is no separate percent line and OCR only yields one amount-like value, store it in `holdings[].pnl_amount`, compute `holdings[].pnl` from price/cost, and add `pnl_corrections` only when this was a true ambiguous or conflicting single-value correction; Phase 6 stores the normalized holdings JSON in the archive.
 
-For quote failures, also record the failed source chain in `missing_fields` and, when persistence is configured, post `/health/outcome` with `success=false`, the affected `code`, checkpoint, and a short reason. If all quote routes fail, the run may still upload only as degraded output.
+For quote failures, also record the failed source chain in `missing_fields` and, when persistence is configured, post `/health/outcome` with `success=false`, the affected `code`, checkpoint, and a short reason. If all quote routes fail for a confirmed holding, do not issue trading advice for that holding.
 
 ## Error Handling
 
-- If a data source is completely unavailable, record `[数据缺失: source名称]` and continue with remaining sources.
+- If a non-critical data source is completely unavailable, record `[数据缺失: source名称]` and continue with remaining sources.
+- If a mandatory source chain is unavailable, stop the affected trading advice and list the missing data plus next fetch step.
 - If Python execution fails entirely, fall back to manual WebFetch/curl for critical data (real-time quotes, index status).
 - If code resolution is uncertain after public matching, ask the user to confirm the code and do not upload the run until confirmation is available.
-- Never let a Python error prevent the skill from producing advice — degrade gracefully to available data.
+- Never let a Python error silently lower advice quality. Recover critical data manually; if it cannot be recovered, block trading advice for the affected scope.

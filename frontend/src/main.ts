@@ -5,6 +5,8 @@ import 'echarts'
 import naive from 'naive-ui'
 
 import App from './App.vue'
+import ArchiveList from './views/ArchiveList.vue'
+import ArchiveDetail from './views/ArchiveDetail.vue'
 import RunList from './views/RunList.vue'
 import RunDetail from './views/RunDetail.vue'
 import Holdings from './views/Holdings.vue'
@@ -15,7 +17,9 @@ import './styles.css'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/runs' },
+    { path: '/', redirect: '/archives' },
+    { path: '/archives', component: ArchiveList },
+    { path: '/archives/:id', component: ArchiveDetail, props: true },
     { path: '/runs', component: RunList },
     { path: '/runs/:id', component: RunDetail, props: true },
     { path: '/holdings', component: Holdings },

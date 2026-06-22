@@ -68,6 +68,30 @@ class Run(Base):
     )
 
 
+class Archive(Base):
+    """File-backed analysis archive uploaded after advice is shown to the user."""
+
+    __tablename__ = "archives"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    checkpoint: Mapped[str | None] = mapped_column(String(16), index=True)
+    holdings_source: Mapped[str | None] = mapped_column(String(32))
+    data_quality_grade: Mapped[str | None] = mapped_column(String(4))
+    title: Mapped[str | None] = mapped_column(String(128))
+
+    # File-backed archive payload. Files live under backend/data/artifacts/<id>/.
+    meta: Mapped[dict | None] = mapped_column(JSON)
+    holdings_json: Mapped[list | dict | None] = mapped_column(JSON)
+    advice_filename: Mapped[str] = mapped_column(String(64), default="advice.md")
+    holdings_filename: Mapped[str] = mapped_column(String(64), default="holdings.json")
+    screenshot_filename: Mapped[str | None] = mapped_column(String(128))
+    screenshot_mime_type: Mapped[str | None] = mapped_column(String(64))
+    screenshot_original_name: Mapped[str | None] = mapped_column(String(256))
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
 class QualityGate(Base):
     """Phase 2 quality-gate row per analyst lens."""
 

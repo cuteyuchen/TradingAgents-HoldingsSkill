@@ -4,7 +4,7 @@ Use this file to structure reasoning. It adapts and extends the base multi-agent
 
 ## Portfolio-Aware Pipeline (7 Phases)
 
-The original repos analyze one ticker through a graph. For a screenshot portfolio, extend to multi-ticker. The pipeline is organized into **7 numbered phases** so each can be tracked, degraded, or skipped as a unit. Reasoning mode and default parameters for each phase are defined in `configuration.md` (single source of truth).
+The original repos analyze one ticker through a graph. For a screenshot portfolio, extend to multi-ticker. The pipeline is organized into **7 numbered phases** so each can be tracked and quality-gated as a unit. Reasoning mode and default parameters for each phase are defined in `configuration.md` (single source of truth).
 
 | Phase | Name | Reasoning Mode | Steps |
 |---|---|---|---|
@@ -14,7 +14,7 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 | **Phase 3** | Claim-Driven Bull/Bear Debate | quick | Structured claims with tracking |
 | **Phase 4** | Research → Trader → Risk Revision | mixed (research/risk mgr = deep, trader = quick) | Verdict, executable proposal, revision loop |
 | **Phase 5** | Portfolio Synthesis | deep | Three-way risk debate + portfolio-level final decision |
-| **Phase 6** | Memory Reflection + Persistence | quick | Compute alpha, record decision, upload to system |
+| **Phase 6** | Memory Reflection + Archive | quick | Reflect on past decisions; after visible advice, upload archive files |
 
 ### Phase 0 — Intent Parsing + History Fetch (quick)
 
@@ -26,7 +26,7 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 ### Phase 1 — Analyst Team (quick)
 
 4. **Centralized Data Collection**: Fetch all data once for all holdings in a single batch pass. See `data-sources.md`. Never fetch the same data point twice.
-   - Routine runs target about five minutes end to end (`target_runtime_sec` = 300).
+   - Routine runs target about 10 minutes end to end (`target_advice_sec` = 600), but this is a progress target, not a hard cutoff.
    - Start with shared batch quote/index/sector requests, then split holdings
      into up to `max_ticker_workers` ticker-worker subagents or Python worker
      bundles. Each worker fetches K-line/VPA/news/fundamentals/fund-flow
@@ -34,8 +34,9 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
    - Run candidate-sector scanning in separate candidate workers where useful.
    - Eastmoney remains globally throttled across all workers; do not exceed the
      configured semaphore and request interval.
-   - When the fetch deadline is reached, stop new network requests, mark exact
-     missing fields, and continue to quality gate and action synthesis.
+   - If elapsed time exceeds `progress_notice_sec`, state which mandatory data
+     is still being collected. Do not stop mandatory data collection just to
+     meet the time target.
 5. **Rank holdings by risk priority**:
    - Largest market value.
    - Largest loss.
@@ -62,12 +63,12 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 
 13. **Three-Way Risk Debate** + **Portfolio-Level Synthesis**: Aggressive / Neutral / Conservative with claim tracking, then aggregate all decisions at portfolio level, not single-stock level.
 
-### Phase 6 — Memory Reflection + Persistence (quick)
+### Phase 6 — Memory Reflection + Archive (quick)
 
 14. **Trading Memory Reflection**: Compare with past decisions on same tickers, compute alpha vs CSI 300 benchmark. See `trading-rules.md` Trading Memory section.
-15. **Persistence Upload** (if enabled): Upload the full run (8-section transcript + holdings snapshot + candidates) to the companion system via `persistence.md`. On failure, mark `[未持久化: 原因]` and do not block the advice.
+15. **Archive Upload** (if enabled): First display the final advice. Then upload `advice.md`, `holdings.json`, and the original screenshot to the companion system via `persistence.md`. On failure, mark `[未持久化: 原因]` and do not change the already displayed advice.
 
-**Degradation note**: Under time/data pressure, compress or skip whole phases rather than half-running them. Phase 2 (quality gate) and Phase 3/5 debate claims should be the last to drop. See Execution Shortcut below.
+**Quality note**: Under time/data pressure, do not skip mandatory evidence or the quality gate. If mandatory evidence is unavailable, block trading advice and state the missing data plus next collection step.
 
 **Action output note**: Regardless of compression level, final output must include
 both tables: (1) current holding operation advice, and (2) today's new
@@ -158,8 +159,8 @@ Output: `data_quality_summary` with grade, key gaps, and confidence modifier.
 | A | Mandatory checks mostly complete and current | Can give normal action |
 | B | Minor missing data | Use normal action with lower confidence |
 | C | Multiple missing fields or stale data | Reduce action size; avoid new buys |
-| D | Mostly failed/too short evidence | Risk-control only |
-| F | No usable data | Ask for data or give only generic risk framework |
+| D | Mostly failed/too short evidence | Block buy/sell/reduce actions unless mandatory risk-control data is still sufficient |
+| F | No usable data | Do not give trading advice; ask for the missing data and next collection step |
 
 ### Phase 3: Claim-Driven Bull/Bear Debate
 
@@ -270,7 +271,7 @@ These run as part of the portfolio synthesis, not as separate graph nodes. See `
 
 Inspired by TradingAgents-astock's memory log, maintain awareness of past decisions. The persistence system (see `persistence.md`) is the primary store; conversation history is the fallback when it is not configured. Parameters live in `configuration.md`.
 
-1. **Record**: After each execution, the Phase 6 persistence upload stores the decision for each holding (action, price, confidence, rating). If persistence is not configured, reference it from conversation history.
+1. **Record**: After each execution, the Phase 6 archive stores the visible advice, parsed holdings JSON, and screenshot. If persistence is not configured, reference prior decisions from conversation history.
 2. **Reflect**: If the same ticker appears in a future run, the Phase 0 history fetch pulls the last `memory_same_ticker_entries` (default 5) decisions + `memory_cross_ticker_lessons` (default 3) cross-ticker lessons. For each, compare:
    - What was the previous decision and price?
    - What is the raw return since then? (pre-computed by the system if configured)
@@ -291,9 +292,15 @@ Inspired by `TradingAgents-AShare`'s dual model strategy (quick_think_llm vs dee
 
 In practice: analyst-level and debate-level reasoning (Phases 0/1/3, trader) is fast and data-focused. Judge-level reasoning (research manager, risk manager, portfolio manager — Phases 4/5) must be thorough, weighing all evidence and unresolved claims before deciding.
 
-## Execution Shortcut
+## Long-Running Execution
 
-If time is short, do not omit roles entirely. Compress them:
+If the run is taking longer than expected, send a progress note after
+`progress_notice_sec` and continue collecting mandatory evidence. To keep the
+report readable after evidence is complete, summarize low-risk small positions
+more compactly, but do not remove quality gate, material debate claims, action
+triggers, risk controls, or buy-candidate reasons.
+
+Use compact groupings only after the required data is present:
 
 - Market + hot money = "tape check" (include VPA signals).
 - News + policy + lockup = "event risk check".

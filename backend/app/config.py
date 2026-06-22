@@ -13,6 +13,9 @@ class Settings:
     DB_PATH: str = os.getenv("ADVISOR_DB_PATH", os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "advisor.db"
     ))
+    ARTIFACTS_DIR: str = os.getenv("ADVISOR_ARTIFACTS_DIR", os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "artifacts"
+    ))
     SQLITE_JOURNAL_MODE: str = os.getenv("ADVISOR_SQLITE_JOURNAL_MODE", "").upper()
 
     # Server.

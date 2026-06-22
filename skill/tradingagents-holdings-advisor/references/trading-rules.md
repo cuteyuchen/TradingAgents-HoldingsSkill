@@ -82,6 +82,12 @@ Prefer staged actions:
 - **Second trim (二次减仓)**: Another 20%-30% if it breaks support or sector turns down.
 - **Full exit (清仓)**: Major red flag, limit-down risk, ST/delist risk, or thesis broken.
 
+All sell/reduce quantities must be capped by `available_qty`. `qty` is total
+position only. If `qty > available_qty`, the difference is unavailable because
+of pending orders, freeze, or T+1 limits; it is not evidence that the position
+has already been reduced. If `available_qty` is 0, do not output an executable
+sell/reduce order.
+
 Do not propose precise stop-loss on a position that may hit limit-down and become untradeable without warning about execution risk.
 
 ## Add Rules
@@ -121,6 +127,7 @@ Before recommending a buy:
 
 For each candidate, include:
 
+- Recommendation reason (建议理由), split into 消息面/催化, 资金面, and 板块位置/轮动阶段.
 - Entry trigger (入场触发).
 - Initial position size (初始仓位).
 - First and second take-profit targets, or a trailing stop rule (止盈目标).
@@ -137,6 +144,7 @@ Do not recommend a fresh buy when:
 - The idea depends only on recovering losses from existing holdings.
 - It is late session and the trade lacks strong confirmation.
 - VPA shows distribution (price up but volume down).
+- Any of the three recommendation reason fields (消息面, 资金面, 板块位置) cannot be supported by current evidence.
 
 ## Rotation Rules
 
@@ -214,17 +222,18 @@ Feed into the Portfolio Manager's context:
 
 The persistence system is the primary memory store; conversation history is the fallback when it is not configured. Either way, when past advice exists for a holding, reference it and the alpha in the final advice.
 
-## Structured Output Degradation
+## Quality-Gated Output
 
-When conditions prevent full output (time pressure, data gaps, user requests brevity):
+When conditions prevent a full evidence-backed decision, do not output a lower-quality trading plan.
 
-| Level | Conditions | What to Include |
-|---|---|---|
-| Full | Normal execution, data quality A-B | All 8 sections from debate-reporting.md |
-| Compressed | Data quality C, user requests brevity | Evidence pack + holding table + key claims (top 2 per side) + verdict + risk summary |
-| Minimal | Data quality D-F, extreme time pressure | Evidence pack with warnings + holding table + one-line verdict per holding |
+| Situation | Required Output |
+|---|---|
+| Mandatory evidence complete, grade A-B | Full advice with evidence pack, debate, holding actions, buy/rotation candidates, and risk controls |
+| Non-critical gaps only, grade C | Explicitly mark missing fields, reduce action size, and block immediate new buys unless all buy-reason fields are supported |
+| Mandatory quote/market/sector/capital/risk evidence missing | State "暂不能给出交易建议", list missing data, and provide next collection/confirmation steps |
+| User requests brevity | Keep sections concise, but do not remove quality gate, key evidence, triggers, or risk controls |
 
-Never go below Minimal. Even Minimal must include the action, trigger, and risk warning for each holding.
+The output may be shorter, but it must not be less rigorous.
 
 ## User-Facing Disclaimer
 
