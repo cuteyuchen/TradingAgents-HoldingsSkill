@@ -13,8 +13,21 @@ Every execution must answer:
 3. Which 1-2 stocks or ETFs are the best candidates?
 4. What are the entry trigger, position size, take-profit, stop-loss, and invalidation rules?
 5. What condition cancels all new buys today?
+6. Why this candidate is recommended today, with explicit evidence from news/catalyst, capital flow, and current sector position/rotation stage.
 
-If data quality is weak or the portfolio exposure is too high, still provide a "watch only / conditional buy" candidate table and state why orders should wait.
+If data quality is weak or the portfolio exposure is too high, provide a "watch only / conditional buy" candidate table only when the three-part reason is still supported by evidence; otherwise state that new-buy advice is blocked and list the missing data.
+
+## Recommendation Reason Requirement
+
+Every buy or watch-only candidate must include a reason block with these three fields:
+
+| Reason Field | Required Evidence |
+|---|---|
+| 消息面 / 催化 | Fresh policy, industry news, company announcement, earnings/event catalyst, or explicit "no negative catalyst found" |
+| 资金面 | Sector fund flow, individual/ETF fund flow, northbound/hot-money confirmation, or evidence that funds are not distributing |
+| 板块位置 | Daily/5-day/20-day sector rank, rotation stage (early/mid/late), whether the sector is overextended or just turning up |
+
+Do not output a buy recommendation if any of the three reason fields is empty. If one field is missing because data cannot be fetched, convert the idea to "暂不建议买入" and state the exact missing source.
 
 ## Candidate / Holding Separation Rule
 
@@ -129,6 +142,7 @@ For each candidate, output:
 - **Name and code** (名称和代码); mark uncertainty if any.
 - **Candidate type** (候选类型): ETF / stock / watch only.
 - **Long thesis in one sentence** (一句话看多逻辑).
+- **Recommendation reason** (建议理由): three short bullets for 消息面/催化, 资金面, 板块位置.
 - **Entry trigger** (入场触发): Exact price or condition.
 - **Initial size** (初始仓位): Amount, shares/lots, or portfolio percentage.
 - **Take-profit** (止盈): First and second target, or trailing rule.
@@ -138,7 +152,7 @@ For each candidate, output:
 
 ## Buy Risk Gate
 
-Block or downgrade new buys when any applies:
+Block new buys or convert them to watch-only when any applies:
 
 - Account exposure remains above 85% and no weak holdings were reduced first.
 - Major index and candidate sector diverge negatively (大盘跌而板块涨 — 不可持续).

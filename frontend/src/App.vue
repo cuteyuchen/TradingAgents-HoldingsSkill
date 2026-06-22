@@ -3,14 +3,11 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import {
   Activity,
-  BarChart3,
-  LayoutDashboard,
-  ListChecks,
+  FileText,
   LockKeyhole,
   LogOut,
   Moon,
   Monitor,
-  Star,
   Sun,
 } from 'lucide-vue-next'
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
@@ -21,10 +18,7 @@ type ThemePref = 'system' | 'light' | 'dark'
 const THEME_KEY = 'advisor_theme'
 
 const navItems = [
-  { to: '/runs', label: '决策列表', icon: LayoutDashboard },
-  { to: '/holdings', label: '持仓追踪', icon: BarChart3 },
-  { to: '/candidates', label: '候选跟踪', icon: ListChecks },
-  { to: '/watchlist', label: '自选股', icon: Star },
+  { to: '/archives', label: '分析归档', icon: FileText },
 ]
 
 const themeOptions = [
@@ -176,7 +170,7 @@ onUnmounted(() => {
 
         <template v-else>
           <header class="topbar">
-            <RouterLink to="/runs" class="brand" aria-label="返回决策列表">
+            <RouterLink to="/archives" class="brand" aria-label="返回分析归档">
               <Activity :size="24" />
               <span>持仓投研决策看板</span>
             </RouterLink>
@@ -391,7 +385,7 @@ onUnmounted(() => {
     bottom: max(10px, env(safe-area-inset-bottom));
     left: 10px;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: 1fr;
     gap: 4px;
     border: 1px solid var(--app-border);
     border-radius: 8px;

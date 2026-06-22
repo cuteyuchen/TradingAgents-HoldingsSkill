@@ -180,8 +180,8 @@ If the Risk Manager sends the proposal back for revision, show:
 
 ```markdown
 **今日买入/轮动候选**
-| 候选 | 类型 | 热门逻辑 | 入场条件 | 仓位 | 止盈1 | 止盈2 | 止损 | 取消条件 | 评分 |
-|---|---|---|---|---:|---:|---:|---:|---|---:|
+| 候选 | 类型 | 消息面/催化 | 资金面 | 板块位置 | 入场条件 | 仓位 | 止盈1 | 止盈2 | 止损 | 取消条件 | 评分 |
+|---|---|---|---|---|---|---:|---:|---:|---:|---|---:|
 ```
 
 ## A-Share Bull Framework
@@ -254,15 +254,15 @@ If the Risk Manager / Portfolio Manager sends the Trader proposal back for revis
 
 Max 1 revision. If still unsatisfactory, default to reject.
 
-## Structured Output with Graceful Degradation
+## Quality-Gated Reporting
 
-Inspired by `TradingAgents-astock`'s three-layer degradation:
+Do not replace missing mandatory evidence with a lower-quality report. If
+mandatory quote, market, sector, capital-flow, or risk data is missing, state
+"暂不能给出交易建议", list the missing fields, and explain the next collection
+step. If the user requests brevity, keep the same evidence and quality gates but
+write fewer words.
 
-1. **Full**: Full structured output with claim tables, quality gate table, all 8 sections.
-2. **Compressed (data gaps)**: Still show claim structure but mark missing evidence as `[数据缺失]`; reduce debate rounds to 1.
-3. **Minimal (time pressure)**: Compress to key claims only (top 2 per side), skip quality gate table (just state grade), merge risk debate into one paragraph per side.
-
-Never skip the debate entirely — even in minimal mode, show at least the top claim from each side and the verdict.
+Never skip the debate entirely for material decisions. Show at least the top claim from each side and the verdict when action advice is allowed.
 When persistence is configured, upload the three risk rows as structured `claims` with `claim_id` values `RISK-1`, `RISK-2`, and `RISK-3`; speakers must be `aggressive`, `neutral`, and `conservative` respectively.
 
 ## Formatting Template (Compact Version)
@@ -282,8 +282,8 @@ Use this compact but detailed shape when full detail would be too long:
 |---|---|---:|---:|---|---|
 
 **今日买入/轮动候选**
-| 候选 | 热门逻辑 | 入场条件 | 仓位 | 止盈 | 止损/取消条件 | 评分 |
-|---|---|---|---:|---|---|---:|
+| 候选 | 消息面/催化 | 资金面 | 板块位置 | 入场条件 | 仓位 | 止盈 | 止损/取消条件 | 评分 |
+|---|---|---|---|---|---:|---|---|---:|
 
 **三方风控** (Claim-Driven)
 | 标的 | 激进核心Claim | 保守核心Claim | 中立核心Claim | 组合经理最终意见 |

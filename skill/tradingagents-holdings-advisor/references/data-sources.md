@@ -103,7 +103,7 @@ Eastmoney endpoints can rate-limit or temporarily block aggressive polling. All 
 - **Session reuse**: Use Keep-Alive sessions to reduce connection overhead.
 - **Batch first**: Prefer batch quote APIs over individual queries.
 - **Non-Eastmoney for redundancy**: Use Tencent/Sina/mootdx for data they can reliably provide, reserving Eastmoney for unique data (dragon-tiger, lockup, fund flow).
-- **Record gaps**: If a request fails, record `[数据缺失: source/field]` and continue. Do not retry endlessly.
+- **Record gaps**: If a request fails, record `[数据缺失: source/field]` and continue only when the field is non-critical. Do not retry endlessly.
 - **Concurrent slot limit**: Limit total concurrent Eastmoney requests to `em_max_concurrent` (5 interactive, 3 scheduled).
 
 ## Source Routing Decision Table
@@ -112,7 +112,7 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 
 | Data Type | Route Priority | Fallback Action on Failure | Why This Route |
 |---|---|---|---|
-| Real-time quote | Tencent `qt.gtimg.cn` → Sina → Eastmoney push2 | Record `[数据缺失: quote]`, lower confidence | Tencent/Sina have no rate limit; reserve Eastmoney |
+| Real-time quote | Tencent `qt.gtimg.cn` → Sina → Eastmoney push2 | Record `[数据缺失: quote]`; block affected trading advice if all quote routes fail | Tencent/Sina have no rate limit; reserve Eastmoney |
 | K-line OHLCV (stock) | mootdx TCP 7709 → AkShare `stock_zh_a_hist` → Sina daily | Use cached last close, mark stale | mootdx is direct connection, no HTTP overhead |
 | K-line OHLCV (ETF) | AkShare `fund_etf_hist_em` → `fund_etf_hist_sina` | Record `[数据缺失: etf kline]` | Separate endpoint per asset class |
 | Technical indicators | Local compute via stockstats | Manual calc from K-line | No network needed |
@@ -129,7 +129,7 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 
 - The primary source is tried first; on failure, fall through the chain **once** — do not loop.
 - Eastmoney is used as **primary only** for data unique to it (fund flow, dragon-tiger, lockup); for everything else it is last-resort to protect the rate budget.
-- Any failed fetch records `[数据缺失: source/field]` and continues; confidence is reduced for the affected holding. Never retry endlessly (see `fallback_action` in `configuration.md`).
+- Any failed fetch records `[数据缺失: source/field]`. If the missing field is mandatory for the action decision, block the affected trading advice instead of lowering the evidence standard. Never retry endlessly (see `fallback_action` in `configuration.md`).
 - Quote collection is mandatory after codes are confirmed. During trading hours, use live quote fields; outside trading hours, use the latest completed trading session's open/high/low/close/turnover data and set `market_session` to `closed_latest_session`.
 
 ## Symbol Resolution
@@ -141,14 +141,14 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
   1. Search exact name first in stock name → code mapping.
   2. Try partial matches if exact fails.
   3. Fetch public quotes for candidates and compare the screenshot price.
-  4. If multiple matches remain or no candidate is within 2% of the screenshot price, ask the user to input/confirm the code before upload.
+  4. If multiple matches remain or no candidate is within 2% of the screenshot price, ask the user to input/confirm the code before archive upload.
 - Suffix normalization: Shanghai stocks end in 6xx → `.SH`; Shenzhen stocks start with 0xx/3xx → `.SZ`; STAR market 688xxx → `.SH`.
 
 ### ETFs
 
 - Broker display names are often ambiguous. Match by name plus screenshot price.
 - If live quote price conflicts with screenshot price by more than 2%, do not use that code.
-- If uncertain after public matching, ask the user to input/confirm the ETF code and do not persist the run until confirmed.
+- If uncertain after public matching, ask the user to input/confirm the ETF code and do not upload the archive until confirmed.
 - Common ETF name collisions: always verify by cross-checking the tracking index.
 
 ### Confirmation Rule
@@ -182,7 +182,7 @@ When the task involves several holdings, hot-sector candidates, or repeated time
 - Parse JSON into a compact evidence table before writing the debate.
 - Calculate technical indicators and candidate scores programmatically.
 - Keep the script read-only; do not query local development databases as holdings.
-- If a request fails, record `[数据缺失: source/field]` and continue with lower confidence.
+- If a request fails, record `[数据缺失: source/field]`; continue only for non-critical fields, otherwise block the affected trading advice.
 
 ## Mandatory Data Checklist
 
@@ -199,7 +199,7 @@ For concentrated or risky positions, collect as much of this as possible:
 | Lockup/reduction | 6-month insider/major-holder activity; top holder change; lockup/reduction news; reduction-pressure grade; next 90 days risk |
 | Buy candidates | Today's leading sectors/themes; candidate score; entry trigger; initial size; take-profit; stop-loss; invalidating condition |
 
-If a field is unavailable, mark `[数据缺失: field]` and reduce confidence.
+If a field is unavailable, mark `[数据缺失: field]`. If it is mandatory for an action decision, block that advice and state the next collection step.
 
 ## Data Quality Gate
 
@@ -210,6 +210,6 @@ Quick reference:
 - Empty or very short evidence is low quality.
 - A report made mostly of "unable to fetch" is low quality.
 - Missing 3+ mandatory fields for a heavy holding requires caution.
-- If hot-sector or candidate-pool data fails, still provide conditional ETF-style watch candidates based on index/sector proxies and mark lower confidence.
+- If hot-sector or candidate-pool data fails, block new-buy advice and state the missing sector/candidate source instead of filling with proxy-only candidates.
 - If most data checks fail, output a data warning and avoid aggressive new buys.
 - Quality grade must be explicitly stated in the evidence pack.

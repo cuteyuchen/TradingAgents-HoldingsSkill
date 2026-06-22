@@ -8,7 +8,7 @@
 
 这个项目的核心不是前端或后端，而是 `skill/` 下的持仓交易分析能力。它把 TradingAgents 的多智能体投研流程改造成面向真实持仓截图的日内/隔夜操作流程：先解析持仓，再集中采集行情、资金流、板块、新闻和基本面数据，随后通过多空辩论、研究总监裁决、交易员方案、三方风控和组合经理最终决策，输出可执行的当前持仓操作建议与今日非持仓买入/轮动候选。
 
-前后端只是增强层：后端负责保存每次 Skill 执行的完整 transcript、claims、持仓快照、候选和 Alpha；前端负责把这些历史决策用看板方式展示出来，方便复盘和远程访问。
+前后端只是增强层：后端负责归档每次 Skill 执行后的建议 Markdown、解析持仓 JSON 和原始截图，并保留旧的 run/Alpha 复盘能力；前端默认展示分析归档列表和详情，方便复盘和远程访问。
 
 ## 基于的 TradingAgents 仓库
 
@@ -23,7 +23,7 @@
 ## 架构
 
 ```
-┌──────────────┐   上传 run(Phase 6)    ┌───────────┐   查询    ┌────────────┐
+┌──────────────┐   先显示建议，再归档(Phase 6) ┌───────────┐   查询    ┌────────────┐
 │ TradingAgents│ ─────────────────────▶ │  backend  │ ◀──────▶ │  frontend  │
 │ HoldingsSkill│ ◀────拉取历史(Phase 0) │ FastAPI   │           │  Vue3+TS   │
 └──────────────┘                        │ + SQLite  │           │ + ECharts  │
@@ -33,8 +33,8 @@
 ```
 
 - **Skill**：持仓截图解析 + 公共行情/资金流/板块/新闻/基本面采集 + 多空辩论 + 三方风控 + 操作建议
-- **后端**：Python + FastAPI + SQLite（单文件零运维）+ AKShare（沪深300）
-- **前端**：Vue 3 + TypeScript + Vite + Naive UI + TailwindCSS + ECharts（亮/暗主题看板）
+- **后端**：Python + FastAPI + SQLite（单文件零运维）+ 文件归档（`backend/data/artifacts/<archive_id>/`）+ AKShare（沪深300）
+- **前端**：Vue 3 + TypeScript + Vite + Naive UI + TailwindCSS + Markdown 渲染 + ECharts（亮/暗主题看板）
 - **鉴权**：单一静态 Bearer Token（单用户场景）；前端登录密码即 `ADVISOR_TOKEN`
 - **部署**：本地可用 docker-compose 构建；服务器推荐拉取 GitHub Actions 发布到 GHCR 的镜像
 
@@ -64,7 +64,7 @@ TradingAgents-HoldingsSkill/
 │   │   ├── auth.py              # 单 Token Bearer 鉴权
 │   │   ├── models.py            # ORM（与 skill 输出契约 1:1）
 │   │   ├── schemas.py           # Pydantic 上传/查询 schema
-│   │   ├── routers/             # runs/portfolio/holdings/candidates/benchmark/watchlist/health
+│   │   ├── routers/             # archives/runs/portfolio/holdings/candidates/benchmark/watchlist/health
 │   │   ├── services/            # alpha 计算 + 沪深300抓取 + 失败追踪
 │   │   └── seed.py              # 生成 Token
 │   ├── tests/test_smoke.py      # 冒烟测试（上传→alpha→查询全链路）
@@ -73,7 +73,7 @@ TradingAgents-HoldingsSkill/
 │   ├── src/
 │   │   ├── api/                 # API 客户端 + 类型定义（types.ts）
 │   │   ├── components/          # DebateTimeline/ClaimTable/VerdictCard/QualityGateTable/AlphaChart
-│   │   ├── views/               # RunList/RunDetail/Holdings/Candidates/Watchlist
+│   │   ├── views/               # ArchiveList/ArchiveDetail + legacy RunList/RunDetail/Holdings/Candidates/Watchlist
 │   │   └── App.vue main.ts
 │   └── Dockerfile + nginx.conf
 ├── docker-compose.yml
@@ -82,7 +82,7 @@ TradingAgents-HoldingsSkill/
 
 ## 数据模型（与 skill 输出契约 1:1）
 
-`runs`（根）/ `run_quality_gates` / `holdings_snapshots`(+alpha) / `holding_indicators` / `claims`(INV-/RISK-) / `research_verdicts` / `trader_proposals` / `risk_revisions`(pass/revise/reject+4类约束) / `pm_finals` / `candidates` / `benchmark_prices`(沪深300) / `watchlist` / `health_log`(失败计数)
+`archives`（建议 Markdown + 持仓 JSON + 截图文件索引）/ `runs`（旧结构化复盘）/ `run_quality_gates` / `holdings_snapshots`(+alpha) / `holding_indicators` / `claims`(INV-/RISK-) / `research_verdicts` / `trader_proposals` / `risk_revisions`(pass/revise/reject+4类约束) / `pm_finals` / `candidates` / `benchmark_prices`(沪深300) / `watchlist` / `health_log`(失败计数)
 
 ## 快速开始
 
@@ -206,6 +206,10 @@ cd backend
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/v1/auth/verify` | 校验前端登录密码（Bearer） |
+| POST | `/api/v1/archives` | 上传归档：截图、持仓 JSON、建议 Markdown（Bearer） |
+| GET | `/api/v1/archives` | 归档列表（Bearer） |
+| GET | `/api/v1/archives/{id}` | 单条归档详情：Markdown、持仓 JSON、截图 data_url（Bearer） |
+| DELETE | `/api/v1/archives/{id}` | 删除归档及其文件目录（Bearer） |
 | POST | `/api/v1/runs` | 上传完整 run（Bearer） |
 | GET | `/api/v1/runs` | 决策列表（可按 code 筛选，Bearer） |
 | GET | `/api/v1/runs/{id}` | 单次决策完整详情（Bearer） |
@@ -237,7 +241,7 @@ ADVISOR_TOKEN=adv_xxx
 ```
 
 - **Phase 0**：Skill 执行开始时拉取同标的最近 5 次决策 + alpha，注入 trading memory
-- **Phase 6**：Skill 执行末尾上传完整 run
+- **Phase 6**：先把建议展示给用户，再上传归档文件（`advice.md`、`holdings.json`、截图）
 - 未配置时 Skill 仍可独立运行（trading memory 回退到对话历史）
 
 ## 边界

@@ -175,6 +175,23 @@ class RunUpload(BaseModel):
     candidates: list[CandidateUpload] = Field(default_factory=list)
 
 
+class ArchiveCreated(BaseModel):
+    id: int
+
+
+class ArchiveSummary(BaseModel):
+    id: int
+    timestamp: datetime
+    checkpoint: str | None = None
+    holdings_source: str | None = None
+    data_quality_grade: str | None = None
+    title: str | None = None
+    holdings_count: int
+    has_screenshot: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ---- Response schemas ----
 
 class RunCreated(BaseModel):

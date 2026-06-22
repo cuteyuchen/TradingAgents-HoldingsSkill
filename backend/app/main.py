@@ -66,9 +66,10 @@ app.add_middleware(
 
 # Register routers.
 from .routers import (  # noqa: E402
-    benchmark, candidates, health, holdings, memory, portfolio, runs, watchlist,
+    archives, benchmark, candidates, health, holdings, memory, portfolio, runs, watchlist,
 )
 
+app.include_router(archives.router)
 app.include_router(runs.router)
 app.include_router(portfolio.router)
 app.include_router(holdings.router)

@@ -2,6 +2,8 @@
 // are served from the same origin via docker-compose.
 
 import type {
+  ArchiveDetail,
+  ArchiveSummary,
   BenchmarkPrice,
   Candidate,
   HealthStatus,
@@ -56,6 +58,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 export const api = {
   verifyToken: (): Promise<{ status: string }> => request('/api/v1/auth/verify'),
+
+  // Archives
+  listArchives: (): Promise<ArchiveSummary[]> => request('/api/v1/archives'),
+  getArchive: (id: number | string): Promise<ArchiveDetail> => request(`/api/v1/archives/${id}`),
+  deleteArchive: (id: number | string): Promise<void> => request(`/api/v1/archives/${id}`, { method: 'DELETE' }),
 
   // Runs
   listRuns: (params = ''): Promise<RunSummary[]> => request(`/api/v1/runs${params}`),
