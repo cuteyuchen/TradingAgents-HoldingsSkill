@@ -10,7 +10,7 @@ The workflow runs in 7 phases (see `multi-agent-workflow.md`). Each phase has a 
 
 | Parameter | Default | Applies To | Notes |
 |---|---|---|---|
-| `pipeline_phases` | 7 (Phase 0–6) | Whole pipeline | Phase 0 意图解析 / 1 分析师 / 2 质量门 / 3 多空辩论 / 4 研究·交易·风控修正 / 5 组合综合 / 6 记忆反思+持久化 |
+| `pipeline_phases` | 7 (Phase 0–6) | Whole pipeline | Phase 0 意图解析+本地上下文 / 1 分析师 / 2 质量门 / 3 多空辩论 / 4 研究·交易·风控修正 / 5 组合综合 / 6 反思+归档 |
 | `quick_mode_phases` | 0, 1, 3, 4(trader) | Reasoning mode | Fast, data-focused: analyst reports, debate responses, trader proposal |
 | `deep_mode_phases` | 4(research mgr), 4(risk mgr), 5 | Reasoning mode | Thorough synthesis: research/risk/portfolio managers weigh all evidence + unresolved claims |
 
@@ -139,7 +139,7 @@ When the companion persistence system is configured. See `persistence.md`.
 |---|---|---|
 | `persistence_enabled` | false | Set true when `ADVISOR_API_URL` + `ADVISOR_TOKEN` are configured |
 | `archive_after_display` | true | Upload archive only after final advice is already visible to the user |
-| `fetch_history_on_start` | true | Pull same-ticker timeline at Phase 0 for trading memory |
+| `fetch_history_on_start` | false | Use conversation or user-provided archive content only |
 | `upload_failure_policy` | warn, do not block | On upload failure, finish advice to user and mark `[未持久化: 原因]`; never silently swallow |
 | `consecutive_failure_threshold` | 3 | After 3 consecutive data-fetch failures for a checkpoint, output a blocking quality warning and let the system flag that checkpoint grey (health linkage) |
 
@@ -149,4 +149,4 @@ When the companion persistence system is configured. See `persistence.md`.
 - To speed up routine runs: improve batch fetching, cache repeated public data, and parallelize independent non-Eastmoney collection. Do not remove mandatory data or the quality gate.
 - To deepen analysis on a heavy position: raise `max_debate_rounds` to 3 for that name only.
 - Before a large multi-holding batch: set `em_min_interval_sec` to 2.0 to avoid bans.
-- When the persistence system is down: the skill still runs; only trading-memory recall and post-advice archive are unavailable.
+- When the persistence system is down: the skill still runs; only post-advice archive upload is unavailable.

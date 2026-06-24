@@ -28,13 +28,6 @@ class Settings:
         if o.strip()
     ]
 
-    # Benchmark fetcher (Phase 3).
-    BENCHMARK_CODE: str = os.getenv("ADVISOR_BENCHMARK_CODE", "000300")  # CSI 300
-    BENCHMARK_FETCH_ON_START: bool = os.getenv("ADVISOR_BENCHMARK_FETCH_ON_START", "1") == "1"
-
-    # Alpha benchmark window fallback.
-    ALPHA_BENCHMARK_MISSING: str = "[数据缺失]"
-
 
 @lru_cache
 def get_settings() -> Settings:

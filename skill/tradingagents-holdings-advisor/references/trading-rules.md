@@ -202,13 +202,13 @@ Inspired by `TradingAgents-astock`'s memory log system:
 After each execution, record the decision so future runs can reflect on it:
 - Ticker, date, action, price at time of advice, confidence level, rating.
 - Key reasons for the decision.
-- **Storage**: if the persistence system is configured (`ADVISOR_API_URL` set), the Phase 6 upload (see `persistence.md`) stores this automatically — no manual note needed. Otherwise, reference it from conversation history.
+- **Storage**: if the persistence system is configured (`ADVISOR_API_URL` set), the Phase 6 archive upload (see `persistence.md`) stores the visible Markdown, holdings JSON, and screenshot automatically. Otherwise, reference prior decisions from conversation history.
 
 ### Reflecting on Past Decisions
 
 When the same ticker appears in a future run:
-1. **Retrieve**: What was the previous decision? At what price? — **Primary source**: pull last `memory_same_ticker_entries` (default 5) decisions from the persistence system at Phase 0 (see `persistence.md`). **Fallback**: conversation history only if persistence is not configured.
-2. **Compute raw return**: Current price vs previous advice price. If the persistence system is configured, alpha is pre-computed there (see `alpha_benchmark`).
+1. **Retrieve**: What was the previous decision? At what price? Use conversation history or archive content explicitly provided by the user. Do not call legacy persistence history endpoints during Phase 0.
+2. **Compute raw return**: Current price vs previous advice price.
 3. **Compute alpha**: Raw return minus CSI 300 (沪深300) return over the same period. If the benchmark price for the window is missing, mark `[数据缺失]` and lower alpha confidence (`alpha_window_fallback`).
 4. **Assess**: Was the decision correct? What went right/wrong?
 5. **Learn**: Extract 1-2 lessons to apply to the current decision.
@@ -216,11 +216,11 @@ When the same ticker appears in a future run:
 ### Injecting Memory
 
 Feed into the Portfolio Manager's context:
-- Last `memory_same_ticker_entries` (default 5) same-ticker decisions with performance.
-- `memory_cross_ticker_lessons` (default 3) cross-ticker lessons (e.g., "上次在类似板块轮动中追高被套").
+- Available same-ticker decisions with performance from conversation history or user-provided archive content.
+- Available cross-ticker lessons from conversation history or user-provided archive content.
 - If alpha was negative, apply `negative_alpha_sizing` (reduce confidence and tighten sizing).
 
-The persistence system is the primary memory store; conversation history is the fallback when it is not configured. Either way, when past advice exists for a holding, reference it and the alpha in the final advice.
+Do not fetch memory via legacy backend endpoints. When past advice exists for a holding, reference it and the alpha in the final advice.
 
 ## Quality-Gated Output
 

@@ -1,42 +1,25 @@
 # TradingAgents-HoldingsSkill — 以 Skill 为核心的 A 股持仓交易助手
 
-## GitHub 简介
-
-**TradingAgents-HoldingsSkill** 是一个基于 TradingAgents 思路开发的 A 股/ETF 持仓交易 Skill，支持持仓截图解析、实时/最近交易行情采集、多智能体投研辩论、三方风控、今日操作建议、非持仓买入候选、Alpha 记忆与可选的前后端看板持久化。
-
 ## 项目定位
 
-这个项目的核心不是前端或后端，而是 `skill/` 下的持仓交易分析能力。它把 TradingAgents 的多智能体投研流程改造成面向真实持仓截图的日内/隔夜操作流程：先解析持仓，再集中采集行情、资金流、板块、新闻和基本面数据，随后通过多空辩论、研究总监裁决、交易员方案、三方风控和组合经理最终决策，输出可执行的当前持仓操作建议与今日非持仓买入/轮动候选。
+**TradingAgents-HoldingsSkill** 是面向 A 股/ETF 持仓截图的日内/隔夜操作建议 Skill。它强调建议质量优先：先完成持仓解析、行情/资金面/消息面/板块位置核验、质量门控和风控约束，再输出建议；前后端只负责把已经展示给用户的建议归档，上传失败不改变建议本身。
 
-前后端只是增强层：后端负责归档每次 Skill 执行后的建议 Markdown、解析持仓 JSON 和原始截图，并保留旧的 run/Alpha 复盘能力；前端默认展示分析归档列表和详情，方便复盘和远程访问。
+前后端当前为归档模式：
 
-## 基于的 TradingAgents 仓库
-
-本项目参考并融合了以下三个 TradingAgents 系列仓库的设计思想：
-
-- [`TauricResearch/TradingAgents`](https://github.com/TauricResearch/TradingAgents)：多智能体金融研究流程、分析师分工、研究/交易/风控协作框架。
-- [`KylinMountain/TradingAgents-AShare`](https://github.com/KylinMountain/TradingAgents-AShare)：面向 A 股市场的 claim-driven 多空辩论、集中式数据收集、风险修正循环、双周期分析等设计。
-- [`simonlin1212/TradingAgents-astock`](https://github.com/simonlin1212/TradingAgents-astock)：A 股数据源路由、7 类分析师、质量门控、信号数据层、沪深 300 Alpha 记忆等设计。
-
-本项目不是上述仓库的直接 fork，而是在它们的架构思想基础上，把能力收敛到“每日真实持仓操作建议”这个 Skill 场景，并配套了可选的本地持久化和看板。
+- 后端：保存持仓截图、解析后的持仓 JSON、建议过程 Markdown。
+- 前端：单页归档工作台，展示归档列表、渲染后的 Markdown、持仓数据和原始截图。
+- 鉴权：单一静态 Bearer Token，前端登录密码即 `ADVISOR_TOKEN`。
 
 ## 架构
 
 ```
-┌──────────────┐   先显示建议，再归档(Phase 6) ┌───────────┐   查询    ┌────────────┐
-│ TradingAgents│ ─────────────────────▶ │  backend  │ ◀──────▶ │  frontend  │
-│ HoldingsSkill│ ◀────拉取历史(Phase 0) │ FastAPI   │           │  Vue3+TS   │
-└──────────────┘                        │ + SQLite  │           │ + ECharts  │
-                                        │ + AKShare │           └────────────┘
-                                        └───────────┘
-                                          自动抓沪深300
+┌──────────────┐   先展示建议，再上传归档   ┌───────────┐   查询归档   ┌────────────┐
+│ TradingAgents│ ─────────────────────▶ │  backend  │ ◀────────▶ │  frontend  │
+│ HoldingsSkill│                        │ FastAPI   │             │  Vue3+TS   │
+└──────────────┘                        │ SQLite    │             │  Naive UI  │
+                                        │ artifacts │             │ Markdown   │
+                                        └───────────┘             └────────────┘
 ```
-
-- **Skill**：持仓截图解析 + 公共行情/资金流/板块/新闻/基本面采集 + 多空辩论 + 三方风控 + 操作建议
-- **后端**：Python + FastAPI + SQLite（单文件零运维）+ 文件归档（`backend/data/artifacts/<archive_id>/`）+ AKShare（沪深300）
-- **前端**：Vue 3 + TypeScript + Vite + Naive UI + TailwindCSS + Markdown 渲染 + ECharts（亮/暗主题看板）
-- **鉴权**：单一静态 Bearer Token（单用户场景）；前端登录密码即 `ADVISOR_TOKEN`
-- **部署**：本地可用 docker-compose 构建；服务器推荐拉取 GitHub Actions 发布到 GHCR 的镜像
 
 ## 目录结构
 
@@ -44,129 +27,55 @@
 TradingAgents-HoldingsSkill/
 ├── skill/
 │   └── tradingagents-holdings-advisor/
-│       ├── SKILL.md             # Skill 入口与执行流程
-│       ├── agents/
-│       │   └── openai.yaml      # Codex UI 元数据
+│       ├── SKILL.md
 │       └── references/
-│           ├── data-sources.md          # 数据源路由、行情/资金流/新闻/基本面策略
-│           ├── multi-agent-workflow.md  # 多智能体分析、质量门控、辩论和组合综合
-│           ├── trading-rules.md         # A 股交易约束、仓位和触发规则
-│           ├── debate-reporting.md      # 8 段 transcript 与 claim 输出格式
-│           ├── buy-candidate-selection.md
-│           ├── python-execution.md
-│           ├── persistence.md           # Phase 0/Phase 6 后端集成契约
-│           └── configuration.md
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI 入口 + lifespan + 定时抓沪深300
+│   │   ├── main.py              # FastAPI 入口，只注册归档 API
 │   │   ├── config.py            # 环境变量配置
 │   │   ├── database.py          # SQLAlchemy engine/session/建表
 │   │   ├── auth.py              # 单 Token Bearer 鉴权
-│   │   ├── models.py            # ORM（与 skill 输出契约 1:1）
-│   │   ├── schemas.py           # Pydantic 上传/查询 schema
-│   │   ├── routers/             # archives/runs/portfolio/holdings/candidates/benchmark/watchlist/health
-│   │   ├── services/            # alpha 计算 + 沪深300抓取 + 失败追踪
-│   │   └── seed.py              # 生成 Token
-│   ├── tests/test_smoke.py      # 冒烟测试（上传→alpha→查询全链路）
+│   │   ├── models.py            # ORM，保留历史表兼容已有 SQLite
+│   │   ├── schemas.py           # Pydantic schema
+│   │   ├── routers/archives.py  # 归档上传、列表、详情、删除
+│   │   └── services/pnl.py      # 历史盈亏字段修复
+│   ├── tests/
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
-│   │   ├── api/                 # API 客户端 + 类型定义（types.ts）
-│   │   ├── components/          # DebateTimeline/ClaimTable/VerdictCard/QualityGateTable/AlphaChart
-│   │   ├── views/               # ArchiveList/ArchiveDetail + legacy RunList/RunDetail/Holdings/Candidates/Watchlist
+│   │   ├── api/                 # 归档 API 客户端 + 类型
+│   │   ├── views/ArchiveList.vue# 单页归档工作台
 │   │   └── App.vue main.ts
 │   └── Dockerfile + nginx.conf
 ├── docker-compose.yml
 └── .env.example
 ```
 
-## 数据模型（与 skill 输出契约 1:1）
-
-`archives`（建议 Markdown + 持仓 JSON + 截图文件索引）/ `runs`（旧结构化复盘）/ `run_quality_gates` / `holdings_snapshots`(+alpha) / `holding_indicators` / `claims`(INV-/RISK-) / `research_verdicts` / `trader_proposals` / `risk_revisions`(pass/revise/reject+4类约束) / `pm_finals` / `candidates` / `benchmark_prices`(沪深300) / `watchlist` / `health_log`(失败计数)
-
 ## 快速开始
 
-### 方式一：Docker 一键启动
+### Docker 一键启动
 
 ```bash
-# 1. 生成 Token
-cd backend && python -m app.seed   # 打印 ADVISOR_TOKEN
+cd backend && python -m app.seed
 cd ..
-
-# 2. 写入 .env
 cp .env.example .env
-# 编辑 .env，填入上面的 token
-
-# 3. 启动
+# 编辑 .env，填入 ADVISOR_TOKEN
 docker compose up -d --build
-
-# 后端 http://localhost:8000  (Swagger: /docs)
-# 前端 http://localhost:8080
-# 远程访问: http://<主机IP>:8080，页面输入 ADVISOR_TOKEN 登录
 ```
 
-### 方式二：服务器拉取 GHCR 镜像部署
+- 后端：`http://localhost:8000`
+- 前端：`http://localhost:8080`
+- Swagger：`http://localhost:8000/docs`
 
-GitHub Actions 会在推送到 `main/master` 或手动触发时构建并发布两个镜像：
+### 本地开发
 
-- `ghcr.io/cuteyuchen/tradingagents-holdings-advisor-backend:latest`
-- `ghcr.io/cuteyuchen/tradingagents-holdings-advisor-frontend:latest`
-
-服务器部署目录建议固定为 `/home/cuteyuchen/projects/tradingagents-holdings-advisor`，数据库持久化在该目录下的 `backend/data/advisor.db`。
-
-```bash
-mkdir -p /home/cuteyuchen/projects/tradingagents-holdings-advisor
-cd /home/cuteyuchen/projects/tradingagents-holdings-advisor
-
-# 首次部署：放入 docker-compose.deploy.yml 和 .env
-cp .env.deploy.example .env
-# 编辑 .env，填入 ADVISOR_TOKEN；192.168.1.13 默认使用 18080/18000 避免占用 8080/8000
-
-docker compose -f docker-compose.deploy.yml pull
-docker compose -f docker-compose.deploy.yml up -d
-```
-
-访问：
-
-- 前端：`http://192.168.1.13:18080`
-- 后端：`http://192.168.1.13:18000`
-- 登录密码：`.env` 中的 `ADVISOR_TOKEN`
-
-### 方式三：本地开发
-
-Windows 下可在 VS Code/Cursor 中运行任务 `Start Backend`，或直接执行：
+后端：
 
 ```powershell
 .\backend\scripts\start-dev.ps1
-# 或双击 backend/scripts/start-dev.cmd
 ```
 
-脚本会在缺少依赖时安装后端 `.venv`，自动生成 `backend/.env.local` 中的 `ADVISOR_TOKEN`，并启动后端：
-
-- 后端：`http://localhost:8000`
-- API 文档：`http://localhost:8000/docs`
-- 默认数据库：`backend/data/advisor.db`
-- 启动脚本会使用 `ADVISOR_SQLITE_JOURNAL_MODE=MEMORY`，避免 Windows 编译器终端中 SQLite journal 文件写入失败
-
-如依赖已安装且只想启动后端：
-
-```powershell
-.\backend\scripts\start-dev.ps1 -SkipInstall
-```
-
-默认关闭 `uvicorn --reload`，避免 Windows 编译器终端里出现 multiprocessing 命名管道权限问题。确实需要热重载时可手动执行：
-
-```powershell
-.\backend\scripts\start-dev.ps1 -Reload
-```
-
-如需指定后端目录中的其它数据库文件，`-DbPath` 使用相对 `backend/` 的路径：
-
-```powershell
-.\backend\scripts\start-dev.ps1 -DbPath data/advisor-dev.db
-```
-
-前端如需本地开发，另开终端手动启动：
+前端：
 
 ```bash
 cd frontend
@@ -174,79 +83,52 @@ npm install
 npm run dev
 ```
 
-完整手动启动方式：
-
-```bash
-# 后端
-cd backend
-python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python -m pip install httpx   # 测试用
-set ADVISOR_TOKEN=adv_xxx
-uvicorn app.main:app --reload
-
-# 前端（另一个终端，vite 代理 /api → :8000）
-cd frontend
-npm install
-npm run dev    # http://localhost:5173，也监听 0.0.0.0 支持 http://<主机IP>:5173
-```
-
-## 测试
-
-```bash
-cd backend
-.venv/Scripts/python -m pytest tests/test_smoke.py -q
-```
-
-冒烟测试验证：上传 run → alpha 计算（raw return − 沪深300 同期涨幅）→ 列表 → 详情 → timeline 全链路。
-
 ## API 概览
 
 除 `/healthz` 外，看板 API 均需要 `Authorization: Bearer <ADVISOR_TOKEN>`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/auth/verify` | 校验前端登录密码（Bearer） |
-| POST | `/api/v1/archives` | 上传归档：截图、持仓 JSON、建议 Markdown（Bearer） |
-| GET | `/api/v1/archives` | 归档列表（Bearer） |
-| GET | `/api/v1/archives/{id}` | 单条归档详情：Markdown、持仓 JSON、截图 data_url（Bearer） |
-| DELETE | `/api/v1/archives/{id}` | 删除归档及其文件目录（Bearer） |
-| POST | `/api/v1/runs` | 上传完整 run（Bearer） |
-| GET | `/api/v1/runs` | 决策列表（可按 code 筛选，Bearer） |
-| GET | `/api/v1/runs/{id}` | 单次决策完整详情（Bearer） |
-| GET | `/api/v1/portfolio/current` | 最新持仓快照（Bearer） |
-| GET | `/api/v1/holdings/{code}/timeline` | 标的决策序列 + alpha（Bearer） |
-| GET | `/api/v1/memory/context` | Phase 0 同标的记忆 + 跨标的 lessons（Bearer） |
-| GET | `/api/v1/candidates` | 候选跟踪（Bearer） |
-| GET | `/api/v1/benchmark/hs300` | 沪深300 基准（Bearer） |
-| GET/POST/DELETE | `/api/v1/watchlist` | 自选股管理（Bearer） |
-| GET/POST | `/api/v1/health[/outcome]` | 检查点健康度（Bearer） |
+| GET | `/healthz` | 服务健康检查 |
+| GET | `/api/v1/auth/verify` | 校验前端登录密码 |
+| POST | `/api/v1/archives` | 上传归档：截图、持仓 JSON、建议 Markdown、可选 meta |
+| GET | `/api/v1/archives` | 归档列表 |
+| GET | `/api/v1/archives/{id}` | 单条归档详情：Markdown、持仓 JSON、截图 data_url |
+| DELETE | `/api/v1/archives/{id}` | 删除归档及其文件目录 |
 
-## Alpha 计算
+归档文件落盘到：
 
-上传新 run 时，对每个 holding：
-1. `raw_return = (本次 price − 上次同标的 advice price) / 上次 price`
-2. 从 `benchmark_prices` 取同期沪深300涨幅 `benchmark_return`
-3. `alpha = raw_return − benchmark_return`
-4. 沪深300缺失 → 标 `[数据缺失]`，降低 alpha 置信度
+```
+backend/data/artifacts/<archive_id>/
+├── screenshot.<ext>
+├── holdings.json
+└── advice.md
+```
 
-沪深300由后端启动时回填 + 每个交易日 15:35（Asia/Shanghai）定时刷新。
+## 持仓数量语义
+
+- `qty` 是总持仓。
+- `available_qty` 只是当前可卖/可交易数量。
+- `qty - available_qty` 是不可用数量，可能来自挂单、冻结或 T+1 限制，不能推断为已减仓。
+- 减仓/卖出建议数量不得超过 `available_qty`。
+
+## 测试
+
+```bash
+python -m pytest backend/tests/test_archives.py backend/tests/test_archive_only_routes.py backend/tests/test_smoke.py -q
+npm run typecheck --prefix frontend
+npm run build --prefix frontend
+```
+
+后端测试覆盖归档上传、详情读取、删除、截图 data_url、持仓不可用数量语义，以及旧接口不再暴露。
 
 ## 使用 Skill
 
-`skill/tradingagents-holdings-advisor/` 是本项目主能力目录，按 Codex Skill 规范组织，可以作为 Skill 安装或复制到本地 Skill 目录使用。其中 `references/persistence.md` 定义了上传/拉取契约。设置环境变量即可启用可选的后端记忆与看板：
+`skill/tradingagents-holdings-advisor/` 是主能力目录。配置以下环境变量后，Skill 会在展示建议后自动上传归档：
 
 ```
 ADVISOR_API_URL=http://localhost:8000/api/v1
 ADVISOR_TOKEN=adv_xxx
 ```
 
-- **Phase 0**：Skill 执行开始时拉取同标的最近 5 次决策 + alpha，注入 trading memory
-- **Phase 6**：先把建议展示给用户，再上传归档文件（`advice.md`、`holdings.json`、截图）
-- 未配置时 Skill 仍可独立运行（trading memory 回退到对话历史）
-
-## 边界
-
-- 单 Token 单用户（非多用户/JWT）
-- 单一组合（非多组合）
-- 不做行情实时推送、不连券商自动交易
-- Skill 不强制依赖前后端系统（未配置仍可独立跑）
+未配置后端时，Skill 仍可独立完成分析和建议输出。

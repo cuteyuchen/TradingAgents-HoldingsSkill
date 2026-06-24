@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
+import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
 import {
   Activity,
-  FileText,
   LockKeyhole,
   LogOut,
   Moon,
@@ -12,14 +10,11 @@ import {
 } from 'lucide-vue-next'
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
 import { api, clearToken, getToken, setToken } from './api'
+import ArchiveList from './views/ArchiveList.vue'
 
 type ThemePref = 'system' | 'light' | 'dark'
 
 const THEME_KEY = 'advisor_theme'
-
-const navItems = [
-  { to: '/archives', label: '分析归档', icon: FileText },
-]
 
 const themeOptions = [
   { label: '跟随系统', value: 'system' },
@@ -27,13 +22,14 @@ const themeOptions = [
   { label: '暗色', value: 'dark' },
 ]
 
-const tokenInput = ref(getToken())
-const authChecked = ref(false)
-const authenticated = ref(false)
-const loginLoading = ref(false)
-const loginError = ref('')
-const themePref = ref<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) || 'system')
-const systemDark = ref(false)
+/*********************** 登录与主题状态 *********************/
+const tokenInput = shallowRef(getToken())
+const authChecked = shallowRef(false)
+const authenticated = shallowRef(false)
+const loginLoading = shallowRef(false)
+const loginError = shallowRef('')
+const themePref = shallowRef<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) || 'system')
+const systemDark = shallowRef(false)
 
 const media = window.matchMedia('(prefers-color-scheme: dark)')
 const updateSystemTheme = () => {
@@ -51,6 +47,7 @@ const themeIcon = computed(() => {
   return resolvedTheme.value === 'dark' ? Moon : Sun
 })
 
+/*********************** Naive UI 主题 *********************/
 const themeOverrides = computed<GlobalThemeOverrides>(() => {
   const dark = resolvedTheme.value === 'dark'
   return {
@@ -70,6 +67,7 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
   }
 })
 
+/*********************** 鉴权动作 *********************/
 async function verifyCurrentToken() {
   const existing = getToken()
   if (!existing) {
@@ -120,6 +118,7 @@ function saveTheme(value: ThemePref) {
   localStorage.setItem(THEME_KEY, value)
 }
 
+/*********************** 生命周期 *********************/
 onMounted(() => {
   updateSystemTheme()
   media.addEventListener('change', updateSystemTheme)
@@ -170,17 +169,10 @@ onUnmounted(() => {
 
         <template v-else>
           <header class="topbar">
-            <RouterLink to="/archives" class="brand" aria-label="返回分析归档">
+            <div class="brand" aria-label="持仓投研决策看板">
               <Activity :size="24" />
               <span>持仓投研决策看板</span>
-            </RouterLink>
-
-            <nav class="desktop-nav" aria-label="主导航">
-              <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="nav-link">
-                <component :is="item.icon" :size="17" />
-                <span>{{ item.label }}</span>
-              </RouterLink>
-            </nav>
+            </div>
 
             <div class="top-actions">
               <component :is="themeIcon" :size="18" class="muted" />
@@ -198,15 +190,8 @@ onUnmounted(() => {
           </header>
 
           <main class="content">
-            <RouterView />
+            <ArchiveList />
           </main>
-
-          <nav class="mobile-nav" aria-label="移动端主导航">
-            <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="mobile-nav-link">
-              <component :is="item.icon" :size="19" />
-              <span>{{ item.label }}</span>
-            </RouterLink>
-          </nav>
         </template>
       </div>
     </n-message-provider>
@@ -221,10 +206,11 @@ onUnmounted(() => {
   display: flex;
   min-height: 64px;
   align-items: center;
-  gap: 20px;
+  justify-content: space-between;
+  gap: 16px;
   border-bottom: 1px solid var(--app-border);
   background: color-mix(in srgb, var(--app-surface-strong) 82%, transparent);
-  padding: 0 24px;
+  padding: 0 max(24px, calc((100vw - 1480px) / 2 + 24px));
   box-shadow: 0 1px 0 var(--app-border-soft), 0 14px 40px color-mix(in srgb, var(--app-bg) 72%, transparent);
   backdrop-filter: blur(18px);
 }
@@ -237,7 +223,6 @@ onUnmounted(() => {
   color: var(--app-text);
   font-size: 16px;
   font-weight: 800;
-  text-decoration: none;
   white-space: nowrap;
 }
 
@@ -248,40 +233,6 @@ onUnmounted(() => {
   border-radius: 8px;
   background: var(--app-primary-soft);
   padding: 5px;
-  color: var(--app-primary);
-}
-
-.desktop-nav {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-}
-
-.nav-link {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  gap: 8px;
-  border-radius: 8px;
-  color: var(--app-text-muted);
-  padding: 0 12px;
-  text-decoration: none;
-  transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
-}
-
-.nav-link:hover {
-  background: color-mix(in srgb, var(--app-primary) 10%, transparent);
-  color: var(--app-text);
-}
-
-.nav-link.router-link-active {
-  background: var(--app-primary-soft);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-primary) 18%, transparent);
-  color: var(--app-text);
-}
-
-.nav-link.router-link-active svg {
   color: var(--app-primary);
 }
 
@@ -344,19 +295,11 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 
-.mobile-nav {
-  display: none;
-}
-
 @media (max-width: 768px) {
   .topbar {
     min-height: 58px;
     gap: 10px;
     padding: 0 12px;
-  }
-
-  .desktop-nav {
-    display: none;
   }
 
   .brand span {
@@ -375,46 +318,7 @@ onUnmounted(() => {
   }
 
   .content {
-    padding: 16px 12px 92px;
-  }
-
-  .mobile-nav {
-    position: fixed;
-    z-index: 40;
-    right: 10px;
-    bottom: max(10px, env(safe-area-inset-bottom));
-    left: 10px;
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 4px;
-    border: 1px solid var(--app-border);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--app-surface-strong) 88%, transparent);
-    padding: 6px;
-    box-shadow: var(--app-shadow-strong);
-    backdrop-filter: blur(18px);
-  }
-
-  .mobile-nav-link {
-    display: grid;
-    min-height: 52px;
-    place-items: center;
-    gap: 2px;
-    border-radius: 8px;
-    color: var(--app-text-muted);
-    font-size: 11px;
-    font-weight: 700;
-    text-decoration: none;
-    transition: background 180ms ease, color 180ms ease;
-  }
-
-  .mobile-nav-link.router-link-active {
-    background: var(--app-primary-soft);
-    color: var(--app-text);
-  }
-
-  .mobile-nav-link.router-link-active svg {
-    color: var(--app-primary);
+    padding: 16px 12px 28px;
   }
 }
 </style>

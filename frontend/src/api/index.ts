@@ -4,13 +4,6 @@
 import type {
   ArchiveDetail,
   ArchiveSummary,
-  BenchmarkPrice,
-  Candidate,
-  HealthStatus,
-  HoldingTimeline,
-  RunDetail,
-  RunSummary,
-  WatchlistItem,
 } from './types'
 
 const TOKEN_KEY = 'advisor_token'
@@ -59,37 +52,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 export const api = {
   verifyToken: (): Promise<{ status: string }> => request('/api/v1/auth/verify'),
 
-  // Archives
+  // /*********************** 归档接口 *********************/
   listArchives: (): Promise<ArchiveSummary[]> => request('/api/v1/archives'),
   getArchive: (id: number | string): Promise<ArchiveDetail> => request(`/api/v1/archives/${id}`),
   deleteArchive: (id: number | string): Promise<void> => request(`/api/v1/archives/${id}`, { method: 'DELETE' }),
-
-  // Runs
-  listRuns: (params = ''): Promise<RunSummary[]> => request(`/api/v1/runs${params}`),
-  getRun: (id: number | string): Promise<RunDetail> => request(`/api/v1/runs/${id}`),
-  deleteRun: (id: number | string): Promise<void> => request(`/api/v1/runs/${id}`, { method: 'DELETE' }),
-
-  // Portfolio / holdings
-  currentPortfolio: (): Promise<{ run_id: number | null; timestamp: string | null; holdings: import('./types').Holding[] }> =>
-    request('/api/v1/portfolio/current'),
-  holdingTimeline: (code: string, limit = 5): Promise<HoldingTimeline> =>
-    request(`/api/v1/holdings/${code}/timeline?limit=${limit}`),
-
-  // Candidates
-  listCandidates: (status = ''): Promise<Candidate[]> =>
-    request(`/api/v1/candidates${status ? `?status=${encodeURIComponent(status)}` : ''}`),
-
-  // Benchmark
-  benchmark: (from = '', to = ''): Promise<BenchmarkPrice[]> =>
-    request(`/api/v1/benchmark/hs300?from=${from}&to=${to}`),
-
-  // Watchlist
-  listWatchlist: (): Promise<WatchlistItem[]> => request('/api/v1/watchlist'),
-  addWatchlist: (item: WatchlistItem): Promise<WatchlistItem> =>
-    request('/api/v1/watchlist', { method: 'POST', body: JSON.stringify(item) }),
-  removeWatchlist: (code: string): Promise<void> =>
-    request(`/api/v1/watchlist/${code}`, { method: 'DELETE' }),
-
-  // Health
-  health: (): Promise<HealthStatus[]> => request('/api/v1/health'),
 }
