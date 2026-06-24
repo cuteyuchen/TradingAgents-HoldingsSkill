@@ -26,6 +26,8 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 ### Phase 1 — Analyst Team (quick)
 
 4. **Fast Snapshot + Centralized Data Collection**: Build `evidence_snapshot.json` with `scripts/market_snapshot.py`, then fetch any remaining non-quote evidence once for all holdings in a single batch pass. See `data-sources.md`. Never fetch the same data point twice.
+   - Treat `schema_version`, `source_chain`, `missing_fields`, `errors`, and `quality_gate` as the verified data contract inherited from the upstream TradingAgents v0.3.0 data-access hardening.
+   - The snapshot already includes quote fallback chains, major indices, sector heat, northbound snapshot, market news, per-holding fund flow, concept tags, and quote-derived VPA when available.
    - Routine runs target about 10 minutes end to end (`target_advice_sec` = 600), but this is a progress target, not a hard cutoff.
    - Start with shared batch quote/index/sector requests, then split holdings
      into up to `max_ticker_workers` ticker-worker subagents or Python worker
@@ -50,7 +52,7 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 
 ### Phase 2 — Quality Gate (quick)
 
-8. **Quality Gate** (two-layer): Grade all evidence before any debate begins. See Quality Gate section below.
+8. **Quality Gate** (two-layer): Grade all evidence before any debate begins. See Quality Gate section below. Start from `evidence_snapshot.quality_gate`; then tighten the grade if later analyst reports expose additional missing mandatory fields.
 
 ### Phase 3 — Claim-Driven Bull/Bear Debate (quick)
 
@@ -75,9 +77,11 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 **Quality note**: Under time/data pressure, do not skip mandatory evidence or the quality gate. If mandatory evidence is unavailable, block trading advice and state the missing data plus next collection step.
 
 **Action output note**: Regardless of compression level, final output must include
-both tables: (1) current holding operation advice, and (2) today's new
-buy/rotation advice. The buy/rotation table is for non-held symbols only; add or
-hold decisions for existing holdings belong in the holding table.
+both tables: (1) current holding operation advice, and (2) today's
+buy/rotation advice. The buy/rotation table may include non-held symbols or a
+current holding labeled `加仓现有持仓`/`条件加仓`, but it must never contradict the
+holding table. Existing holdings marked `持有不加仓`, `减仓`, or `卖出` must not
+reappear as buy candidates.
 
 ## Intent Parsing
 
@@ -130,6 +134,16 @@ Non-core holdings use a single track matching the parsed horizon (or medium by d
 ### Phase 2: Quality Gate (数据质量门控)
 
 Runs after all analysts complete, before any debate begins. All thresholds below are defined in `configuration.md` (single source of truth).
+
+Start with the snapshot-level gate:
+
+| Snapshot Signal | Required Action |
+|---|---|
+| `quote:*` in `missing_fields` | Block executable action for that holding |
+| `market.hot_sectors` or `concept_blocks:*` missing | Block executable new-buy candidates; watch-only triggers are allowed |
+| `fund_flow:*` missing | Block aggressive add/average-down decisions |
+| `market.northbound.history` absent | Do not infer northbound trend; use only real-time snapshot |
+| `quality_gate.grade` D/F | Stop or heavily constrain action advice before debate |
 
 **Layer 1 — Hard Checks (numeric thresholds):**
 
@@ -331,10 +345,11 @@ Every execution should include detailed debate for material decisions:
 - Always include a buy/rotation candidate module. If buys are blocked by exposure, timing, or data quality, output watch-only candidates with exact triggers.
 - If the market is strong but the user's heavy holdings are weak, use strength to reduce weak holdings rather than add.
 - New buy candidates must fit the portfolio cash plan; do not add exposure before planned weak-position trims when account exposure is above 85%.
-- New buy/rotation candidates must not duplicate current holdings. If a held
-  symbol is the best expression of a hot sector, record it only as "持有/加仓/不加仓"
-  in the current-holding action table; select a different non-held candidate or
-  state that no new buy is allowed today.
+- Buy/rotation candidates may duplicate current holdings only as
+  `加仓现有持仓`/`条件加仓` and only when the current-holding action table gives
+  the same add verdict. If a held symbol is the best expression of a hot sector
+  but the holding verdict is `持有不加仓`, `减仓`, or `卖出`, select a different
+  non-held candidate or state that no buy is allowed today.
 
 ## Final Decision Vocabulary
 

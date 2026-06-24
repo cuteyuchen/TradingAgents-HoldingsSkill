@@ -4,3 +4,4 @@ sqlalchemy>=2.0.36
 pydantic>=2.11
 python-dotenv>=1.0.1
 python-multipart>=0.0.20
+requests>=2.32

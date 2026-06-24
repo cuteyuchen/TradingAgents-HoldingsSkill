@@ -9,15 +9,15 @@ description: Use when the user asks for intraday stock or ETF operation advice, 
 
 Give intraday A-share/HK-related stock and ETF operation advice from the user's real holdings, current quotes, market context, news, fundamentals, capital flow, signal data, VPA analysis, and A-share trading constraints.
 
-This skill is adapted from the design patterns in three open-source TradingAgents-style investment research systems:
+This skill is adapted from the design patterns in three open-source TradingAgents-style investment research systems. Current upstream checkpoints reviewed for this version:
 
-- **`TauricResearch/TradingAgents`**: the base multi-agent research graph, analyst specialization, researcher/trader/risk collaboration loop, and final portfolio decision framing.
-- **`simonlin1212/TradingAgents-astock`**: 7 A-share analysts (including policy/hot-money/lockup watchers), two-layer data quality gate, signal data tools layer (northbound/dragon-tiger/lockup/concept blocks/fund flow/industry comparison/hot stocks), 7-source direct-connect data architecture, quality-gated structured output, trading memory with CSI 300 alpha benchmark.
-- **`KylinMountain/TradingAgents-AShare`**: Claim-driven bull/bear debate (structured claims with IDs, evidence, confidence, status tracking), centralized DataCollector (fetch once, share across agents), risk revision loop (Risk Manager can send Trader back for revision), intent parsing from natural language, VPA (Volume Price Analysis) pre-computation, dual model strategy (quick vs deep thinking).
+- **`TauricResearch/TradingAgents@85946c2` / v0.3.0**: base multi-agent graph, analyst specialization, researcher/trader/risk collaboration loop, verified data-access contract, deterministic instrument identity, provider chain visibility, stale-data rejection, structured report output.
+- **`simonlin1212/TradingAgents-astock@4cbe274` / v0.2.15**: A-share analyst expansion, two-layer quality gate, signal tools (northbound, dragon-tiger, lockup, concept blocks, fund flow, industry comparison, hot stocks), direct HTTP data-source routing, Eastmoney `_em_get()` throttling, CSI 300 alpha benchmark, and confirmed deprecation of Baidu PAE fund-flow routes.
+- **`KylinMountain/TradingAgents-AShare@ccbd6ca`**: claim-driven bull/bear debate, centralized DataCollector (fetch once, share across agents), risk revision loop, intent parsing, VPA pre-computation, dual model strategy, progress feedback, and consecutive-failure disable/grey-out discipline.
 
 Core rule: holdings source must stay clean. If the user provides a screenshot, use that screenshot as the holdings source. If no screenshot is provided, use current conversation history or memory. Never query local development systems, broker caches, databases, or test data unless the user explicitly asks.
 
-Screenshot parsing is never the final deliverable by itself. When the user asks to parse, analyze, read, or upload a holdings screenshot, treat it as a full portfolio-advice run unless the user explicitly says "只解析/不要建议/只输出JSON". The workflow must still complete evidence collection, quality gate, multi-agent bull/bear debate, trader proposal, three-way risk debate, portfolio synthesis, today's holding actions, and non-held buy/rotation candidates.
+Screenshot parsing is never the final deliverable by itself. When the user asks to parse, analyze, read, or upload a holdings screenshot, treat it as a full portfolio-advice run unless the user explicitly says "只解析/不要建议/只输出JSON". The workflow must still complete evidence collection, quality gate, multi-agent bull/bear debate, trader proposal, three-way risk debate, portfolio synthesis, today's holding actions, and buy/rotation candidates. Buy advice may be a new position, a rotation target, or an add-on to an existing holding when the holding-level verdict also says add.
 
 ## Bundled References
 
@@ -34,7 +34,7 @@ Read these supporting files when needed:
 
 ## Bundled Scripts
 
-- `scripts/market_snapshot.py`: use at the start of every multi-holding or intraday run to build a reusable evidence snapshot, and use `--refresh-final` immediately before final advice to refresh quote fields without rerunning the full analysis.
+- `scripts/market_snapshot.py`: use at the start of every multi-holding or intraday run to build a reusable verified evidence snapshot. It fetches quote fallback chains, major indices, sector heat, northbound snapshot, market news, per-holding fund flow, concept tags, quote-derived VPA, missing fields, source chains, and a quality gate. Use `--refresh-final` immediately before final advice to refresh quote fields without rerunning the full analysis.
 
 ## Required Cadence
 
@@ -52,7 +52,7 @@ When invoked by the user or external automation, run this workflow at:
 Advice quality is the first priority. Time pressure, repeated data failures, or slow optional sources must not produce a low-quality trading recommendation:
 
 - After `consecutive_failure_threshold` (default 3) consecutive failures for the same checkpoint, output an explicit blocking warning in the evidence pack (e.g. `[关键数据未完成: 10:00 checkpoint 数据拉取连续3次失败，暂不给交易建议]`).
-- When the persistence system is configured, record each failure count so the dashboard can surface the issue.
+- When the persistence system is configured, record failure context in the visible evidence and archive payload so the dashboard can surface the issue. The active persistence contract remains archive-only.
 - If mandatory quote, holdings, risk, or quality-gate evidence is missing, stop before action advice and output: missing data, why it blocks the recommendation, and how to fetch/confirm it next. Do not replace this with a low-quality trading plan.
 
 A skill does not schedule itself. If automatic daily execution is requested, say an external scheduler/reminder must trigger the agent at those times.
@@ -69,7 +69,7 @@ complete. Do not skip required data to meet the time target.
 Default fast path:
 
 1. Build one normalized market snapshot with `scripts/market_snapshot.py` after holdings and codes are confirmed.
-2. Use that snapshot as the shared evidence source for analysts, debate, trader proposal, risk review, and candidate scoring; do not refetch the same quote/sector/news fields inside each role.
+2. Use that snapshot as the shared evidence source for analysts, debate, trader proposal, risk review, and candidate scoring; do not refetch the same quote/sector/news fields inside each role. Treat `source_chain`, `missing_fields`, and `quality_gate` as the verified data contract for this run.
 3. Immediately before final visible advice, run `scripts/market_snapshot.py --refresh-final <snapshot.json>` or an equivalent quote refresh. Update only quote-sensitive fields such as current price, pct change, quote time, trigger distance, and market session; do not rerun the full debate unless the refreshed quote invalidates a hard risk constraint.
 4. If the final refresh fails, keep the already completed evidence, mark `[最终行情刷新失败: source/reason]`, and block only quote-dependent new execution that can no longer be verified.
 
@@ -78,14 +78,15 @@ Default fast path:
 2. **Identify holdings source**: screenshot > typed current holdings > history/memory.
 3. **Extract holdings**: name, code if visible, total quantity (`qty`), available quantity (`available_qty`), cost, current price, market value, P/L, total exposure. `available_qty` only means currently sellable/usable quantity; `qty - available_qty` is unavailable because of pending orders, freeze, or T+1 limits, and must never be treated as already reduced/sold. Any reduce/sell recommendation must size from `available_qty`, not total `qty`. If the screenshot shows both account total assets and total market value, compute corrected unused funds as `total_assets - total_market_value`; do not trust the broker "available cash" field as the full remaining cash when pending orders may not have returned funds. Exclude "新标准券"/standard bond/treasury reverse repo rows from stock or ETF holdings; record their amount as unused or repo-occupied funds instead. `pnl` must be the decimal return ratio. For 同花顺/券商持仓截图, the 盈亏 column commonly has two lines: the first line is 盈亏金额 (for example `-19,490.87`) and the second line is 盈亏率 (for example `-27.730%`). Store the first line in `pnl_amount`, convert the second line to decimal `pnl` (`-0.2773`), and do not create a correction record for this normal two-line mapping. If no percent line is visible, compute `pnl = (current price - cost) / cost` from screenshot price/cost and keep the amount line in `pnl_amount`.
 4. **Resolve symbols carefully**: If a broker display name is ambiguous, first use public symbol/quote sources to match by name plus screenshot price. If there is no unique match within the 2% price tolerance, ask the user to confirm/input the code and do not upload the archive until confirmed. See `references/data-sources.md` symbol resolution.
-5. **Mandatory snapshot + quote collection**: After codes are confirmed, run the fast snapshot path from `references/python-execution.md`. During trading hours use live quotes; after market close use the latest completed trading session data. If every quote route is unavailable, record the missing source chain and stop before trading advice with `[暂不能给出交易建议: 缺少quote]`.
+5. **Mandatory snapshot + quote collection**: After codes are confirmed, run the fast snapshot path from `references/python-execution.md`. During trading hours use live quotes; after market close use the latest completed trading session data. If every quote route is unavailable, record the missing source chain and stop before trading advice with `[暂不能给出交易建议: 缺少quote]`. Baidu PAE must never be used as a fund-flow source; use Eastmoney push2 for fund flow and Baidu only for concept/classification when available.
 6. **Two-layer quality gate**: Grade all evidence before debate using the numeric thresholds in `references/configuration.md` (Layer 1: hard checks, Layer 2: LLM review). See `references/multi-agent-workflow.md` quality gate section.
 7. **Run the multi-agent reasoning**: Run the full analyst pass for top-risk names, lighter pass for small positions. Apply dual-horizon analysis for core holdings. Apply claim-driven bull/bear debate. See `references/multi-agent-workflow.md`.
 8. **Apply trading rules**: T+1, daily limits, lot size, time-of-day, total exposure, loser/winner priority, dual-horizon sleeve sizing. Check risk revision loop. See `references/trading-rules.md`.
 9. **Select 1-2 buy/rotation candidates**: Use the three-layer hot sector scanner and scoring system. Every candidate must include a recommendation reason covering news/catalyst, capital flow, and current sector position/rotation stage. If buys are blocked, still output conditional watch-only triggers and the blocking reason. See `references/buy-candidate-selection.md`.
-   - Today's buy/rotation candidates must not duplicate current holdings. If a
-     held symbol is a hold/add decision, keep it in the holding action table and
-     choose a different non-held candidate or state that no new buy is allowed.
+   - Candidates may include `新开仓`, `加仓现有持仓`, or `轮动观察`.
+   - If a candidate code already exists in current holdings, the holding table
+     must also say `加仓` or `条件加仓` for that same code. Never show a holding as
+     `持有不加仓`/`减仓`/`卖出` and later recommend buying the same code.
 10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Investment claims must use `INV-` IDs; three-way risk claims must use `RISK-1/RISK-2/RISK-3` with aggressive/neutral/conservative speakers. Show unresolved claims explicitly. See `references/debate-reporting.md`.
 11. **Risk Manager review**: Check if Trader proposal needs revision. Apply hard/soft constraints. See `references/trading-rules.md` risk revision loop.
 12. **Final quote refresh + action-first advice**: Refresh quote fields immediately before output, then produce market read, portfolio conclusion, holding table, buy candidate plan, rebalance plan, checkpoint-specific execution rules.
@@ -142,6 +143,8 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not use the broker "available cash" field as the full remaining cash when `total_assets` and `total_market_value` are visible. Corrected unused funds must be `total_assets - total_market_value`, because pending-order funds may not yet have returned to available cash.
 - Do not parse "新标准券", standard bond, treasury reverse repo, or 国债逆回购 rows as stock/ETF holdings. Treat their amount as unused/repo-occupied funds and keep them out of holding action tables.
 - Do not skip public quote collection for confirmed codes. During market close, use the latest completed trading session data rather than stale intraday assumptions; if all quote sources fail, record `[暂不能给出交易建议: 缺少quote]` in the visible advice and archive, but do not call legacy health-reporting endpoints.
+- Do not use Baidu PAE `fundflow` or `fundsortlist` for资金流; upstream confirmed those routes are unavailable. Use Eastmoney push2 for individual/sector fund flow and record `[数据缺失: fund_flow]` if it fails.
+- Do not treat missing northbound history from public APIs as a trend. Use real-time northbound snapshot plus locally accumulated CSV history only; if local history is empty, state that no trend can be inferred yet.
 - Do not output intraday advice from a quote snapshot older than `final_quote_refresh_max_age_sec` during trading hours. Refresh quotes immediately before the final action table, or block quote-dependent execution if refresh cannot verify current prices.
 - Do not average down heavy losers without market, sector, and capital-flow confirmation.
 - Do not give generic "observe" answers; include triggers, quantities/percentages, and priority.
@@ -155,9 +158,11 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not ignore unresolved claims in the final verdict; the Research Manager must address each one.
 - Do not recommend a buy that violates the risk revision loop's hard constraints.
 - Do not give today's buy recommendation without a reason that covers news/catalyst, capital flow, and current sector position/rotation stage.
-- Do not list the same code as a current holding action and as today's
-  buy/rotation candidate. Existing-holding add/hold decisions belong in the
-  holding table; new-buy candidates must be non-held symbols.
+- Do not contradict yourself across the holding table and buy/rotation plan.
+  A current holding may appear in the buy/rotation plan only as `加仓现有持仓`
+  or `条件加仓`, and only when the holding table gives the same add verdict.
+  If the holding table says `持有不加仓`, `减仓`, or `卖出`, do not recommend
+  buying that code later in the report.
 - Do not make more than 5 concurrent Eastmoney requests; follow the rate limiting discipline in `references/data-sources.md` and the throttling parameters in `references/configuration.md`.
 - Do not silently swallow a persistence upload failure; if `ADVISOR_API_URL` is configured and the upload fails, mark `[未持久化: 原因]` at the end of the advice.
 - Do not convert key data failures into a lower-quality trading plan. If mandatory evidence is incomplete, block action advice and state the missing data plus next collection step.
@@ -170,7 +175,8 @@ Before final advice, verify:
 - Intent is parsed and stated (ticker/horizon/focus/objective).
 - Every live quote maps to the correct code or is marked uncertain.
 - Every uncertain code has either a public-source match within tolerance or a user confirmation before upload.
-- Every confirmed holding has a quote source, quote time, and market session in `indicators.quote`; otherwise the run must stop before trading advice and explain the blocker.
+- Every confirmed holding has a quote source, quote time, and market session in `holdings[].quote`; otherwise the run must stop before trading advice and explain the blocker.
+- The market snapshot includes `schema_version`, `source_chain`, exact `missing_fields`, and `quality_gate.grade`.
 - During trading hours, final action tables use quotes refreshed within `final_quote_refresh_max_age_sec`; include `final_quote_refresh_at` or the quote time in the evidence pack.
 - At least one broad index, relevant sector, and capital-flow check was considered.
 - VPA signals were computed for material holdings.
@@ -182,6 +188,7 @@ Before final advice, verify:
 - Unresolved claims are explicitly listed and addressed in the verdict.
 - Advice contains explicit action, trigger level, risk control, and a buy/rotation candidate plan.
 - Every buy/rotation candidate includes a reason covering news/catalyst, capital flow, and current sector position/rotation stage.
-- Current holding actions and today's new-buy/rotation plan are both present,
-  and candidate codes do not overlap with holding codes.
+- Current holding actions and today's buy/rotation plan are both present. Any
+  candidate that overlaps with a holding code is explicitly labeled
+  `加仓现有持仓`/`条件加仓` and matches the holding-level action.
 - If past decisions exist for any holding, trading memory was checked and alpha referenced.

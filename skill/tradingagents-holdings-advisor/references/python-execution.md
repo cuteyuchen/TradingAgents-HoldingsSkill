@@ -2,7 +2,7 @@
 
 Use Python when manual API calls or calculations would make the intraday analysis slow, fragile, or incomplete.
 
-This file integrates the centralized data collection pattern from `TradingAgents-AShare`'s DataCollector (fetch once, serve many), the concurrency control from `TradingAgents-astock`'s Eastmoney throttling, and VPA pre-computation from both repos.
+This file integrates the centralized data collection pattern from `TradingAgents-AShare`'s DataCollector (fetch once, serve many), the concurrency control from `TradingAgents-astock`'s Eastmoney throttling, `TradingAgents`' verified data-access contract, and VPA pre-computation from both A-share repos.
 
 ## When To Use Python
 
@@ -70,7 +70,7 @@ Prefer this order:
 1. **Standard library + already installed packages**.
 2. **Small widely used packages**: `requests`, `beautifulsoup4`, `lxml`, `pandas`, `numpy`.
 3. **Finance data packages** only when justified by the data need:
-   - `akshare`: A-share/HK comprehensive data (Eastmoney/Sina/THS aggregator).
+   - `akshare`: A-share/HK comprehensive data aggregator. Do not install it just for data already available through direct HTTP routes in `market_snapshot.py`.
    - `stockstats`: Technical indicator computation from OHLCV DataFrames.
    - `mootdx`: Direct connection to Tongdaxin servers (K-line, F10).
    - Check whether direct public APIs are insufficient before installing.
@@ -101,7 +101,7 @@ Recommended collection sequence:
 |---|---|
 | Shared prefetch | Run `market_snapshot.py`, symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
 | Ticker workers | Split holdings into up to `max_ticker_workers` bundles; fetch K-line, VPA, news, fundamentals, fund-flow fallback per bundle |
-| Candidate workers | Scan non-held candidate ETFs/stocks from hot sectors in parallel with ticker workers |
+| Candidate workers | Scan non-held new-position ETFs/stocks and existing-holding add-on eligibility from hot sectors in parallel with ticker workers |
 | Merge + quality gate | Normalize evidence, mark missing fields, grade whether action advice is allowed |
 | Final refresh + synthesis + archive | Refresh quote fields, show advice first, then archive Markdown/holdings/screenshot if persistence is configured |
 
@@ -151,14 +151,25 @@ with ThreadPoolExecutor(max_workers=4) as pool:
 
 `market_snapshot.py` emits:
 
+- `schema_version`: snapshot contract version.
 - `timestamp`: initial snapshot time.
-- `holdings[]`: normalized holdings with quote fields when available.
+- `source_chain`: configured provider chain per data type.
+- `holdings[]`: normalized holdings with quote, fund-flow, concept-block, VPA, and per-holding quality fields when available.
+- `holdings[].quote.source_chain`: exact quote routes attempted for the code.
+- `market.major_indices`: shared broad-market quote snapshot.
+- `market.hot_sectors`: shared sector heat / fund-flow ranking.
+- `market.northbound`: real-time northbound snapshot plus local CSV history only.
+- `market.news`: shared market news headlines.
 - `missing_fields[]`: exact missing quote/data keys.
+- `errors[]`: fetch errors preserved for audit/debugging.
+- `quality_gate`: A/B/C/D/F grade plus `action_allowed`, `new_buy_allowed`, and blockers.
 - `final_quote_refresh_at`: present only after final refresh.
 
 If `holdings[].quote.source` is `[数据缺失: quote]`, do not issue an executable
 buy/sell/reduce instruction for that holding. State the missing source chain and
 the next collection step.
+
+If `quality_gate.new_buy_allowed` is false because sector, concept, or capital-flow evidence is missing, output only conditional watch triggers for new candidates. Do not turn missing hot-sector data into a weak executable buy.
 
 ### Eastmoney Throttling
 
@@ -178,7 +189,7 @@ Route requests to minimize Eastmoney load:
 | Data Type | Route To | Reason |
 |---|---|---|
 | Real-time quotes | Tencent `qt.gtimg.cn` first | No rate limit, GBK encoding |
-| K-line OHLCV | mootdx TCP 7709 first | Direct connection, no HTTP overhead |
+| K-line OHLCV | Sina/direct HTTP first, then mootdx/Eastmoney | Avoid stale latest-day gaps and look-ahead bias |
 | Technical indicators | Local computation via stockstats | No network needed |
 | VPA indicators | Local computation via numpy | No network needed |
 | Fund flow | Eastmoney push2 | Unique data, no alternative |
@@ -186,7 +197,7 @@ Route requests to minimize Eastmoney load:
 | Lockup calendar | Eastmoney datacenter | Unique data, no alternative |
 | News | CLS telegraph or Sina first | Reduce Eastmoney dependency |
 | Fundamentals | Tencent + Sina | Reduce Eastmoney dependency |
-| Northbound flow | THS hsgtApi first | Reduce Eastmoney dependency |
+| Northbound flow | Real-time snapshot + local CSV history | Public historical routes can be stale or empty |
 
 ### Centralized Data Prefetch Pattern
 
@@ -200,6 +211,7 @@ Inspired by `TradingAgents-AShare`'s DataCollector:
    - Sector fund flow ranking.
    - Northbound flow snapshot.
    - Global context (US/HK/commodities).
+   - `source_chain`, `missing_fields`, and `quality_gate` for verified access auditing.
 3. **Batch-fetch per-holding data** (fetched once per holding):
    - Quotes for all confirmed holdings in one batch URL. Use live quotes during trading hours; after close, use latest completed trading session data.
    - K-line history for technical indicators + VPA.
@@ -342,6 +354,12 @@ Python scripts must be read-only with respect to holdings:
 ## Output Contract
 
 When Python is used, normalize results before reasoning:
+
+The current bundled script's minimum verified contract is `schema_version`,
+`timestamp`, `source_chain`, `holdings[]`, `market`, `missing_fields[]`,
+`errors[]`, and `quality_gate`. The richer example below shows optional fields
+that may be appended by OCR, deeper fundamentals, K-line workers, or archive
+packaging; do not require those optional fields before the script can be useful.
 
 ```python
 ####################### 标准化输出格式 #######################

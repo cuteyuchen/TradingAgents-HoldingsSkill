@@ -111,10 +111,14 @@ Never add simply because:
 
 Every daily execution must include 1-2 buy/rotation candidates, even if the action is "watch only".
 
-The buy/rotation candidate module is for non-held symbols only. Current holdings
-must be handled in the holding action table. If a current holding deserves
-"加仓", state that as a holding action; if it deserves "持有不加仓", do not repeat
-it as a buy candidate later in the report.
+The buy/rotation candidate module may include either non-held symbols or
+existing holdings that deserve more exposure. Label candidate rows clearly:
+`新开仓`, `加仓现有持仓`, `条件加仓`, or `轮动观察`.
+
+For current holdings, the candidate row must match the holding action table:
+if a holding deserves "加仓", it may also appear as `加仓现有持仓`; if it deserves
+"持有不加仓", "减仓", or "卖出", do not repeat it as a buy candidate later in the
+report.
 
 Before recommending a buy:
 
@@ -134,10 +138,10 @@ For each candidate, include:
 - Stop-loss price or condition (止损条件).
 - Invalidating condition that cancels the trade (取消条件).
 
-Do not recommend a fresh buy when:
+Do not recommend a fresh buy or add-on buy when:
 
-- The candidate code already exists in the current holdings, unless the report
-  is explicitly a holding-level add instruction rather than a new-buy candidate.
+- The candidate code already exists in the current holdings and the holding
+  action is not `加仓` or `条件加仓`.
 - The candidate is below open and previous close.
 - The sector is rising but the candidate is lagging.
 - Main funds are materially outflowing.

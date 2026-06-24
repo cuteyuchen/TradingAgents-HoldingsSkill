@@ -41,11 +41,14 @@ These parameters control `scripts/market_snapshot.py` and the final quote refres
 | Parameter | Default | Notes |
 |---|---|---|
 | `market_snapshot_script` | `scripts/market_snapshot.py` | Build the initial normalized evidence snapshot from holdings JSON or codes |
+| `snapshot_schema_version` | `2026-06-25.verified-snapshot.v1` | Minimum contract includes `source_chain`, `missing_fields`, `errors`, and `quality_gate` |
 | `snapshot_required_for_multi_holding` | true | Use the script for every screenshot or multi-holding run after codes are confirmed |
 | `quote_cache_ttl_sec` | 15 | In-run quote cache; avoids duplicate quote calls while keeping intraday data fresh |
 | `sector_cache_ttl_sec` | 180 | Sector/heat cache; refresh if analysis runs long or sector mood shifts |
 | `news_cache_ttl_sec` | 1800 | News/event cache; do not repeatedly query within a single run |
 | `fundamental_cache_ttl_sec` | 86400 | Fundamentals/lockup data rarely needs intraday refetch |
+| `northbound_cache_path` | `~/.tradingagents/cache/northbound_daily.csv` | Local-only history accumulation; do not infer trend from stale public history |
+| `baidu_pae_fundflow_enabled` | false | Baidu PAE is classification-only; fund-flow uses Eastmoney push2 |
 | `final_quote_refresh_required` | true | Refresh current quotes immediately before final visible advice |
 | `final_quote_refresh_max_age_sec` | 30 | During trading hours, action tables must use quotes refreshed within this age |
 | `final_refresh_rerun_debate_threshold_pct` | 1.5 | Rerun affected trader/risk logic only if refreshed price moves enough to invalidate triggers or stops |
@@ -76,6 +79,10 @@ Numeric thresholds for evidence grading. Inspired by `TradingAgents-astock`'s me
 | `mandatory_fields_missing_caution` | 3 | Missing 3+ mandatory fields for a heavy holding → caution, cap at B |
 | `llm_review_trigger` | < 4 reports fail Layer 1 | Layer 2 LLM review only runs when fewer than 4 reports fail hard checks (token saving) |
 | `heavy_holding_weight` | 2.0x | Heavy holdings weighted higher in overall grade |
+| `snapshot_quality_gate_required` | true | `market_snapshot.py` must emit `quality_gate` and exact `missing_fields` before action synthesis |
+| `quote_missing_blocks_action` | true | Missing quote blocks executable buy/sell/reduce for affected holdings |
+| `sector_missing_blocks_new_buy` | true | Missing sector/concept/hot-sector data blocks executable new-buy candidates |
+| `fund_flow_missing_blocks_aggressive_add` | true | Missing fund-flow blocks aggressive add/average-down decisions |
 
 | Overall Grade | Meaning | Action Bias |
 |---|---|---|

@@ -90,6 +90,109 @@ class MarketSnapshotTest(unittest.TestCase):
         finally:
             tmp.unlink(missing_ok=True)
 
+    def test_eastmoney_requests_go_through_throttled_session(self):
+        market_snapshot = load_module()
+        calls = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def get(self, url, params=None, headers=None, timeout=None):
+                calls.append({"url": url, "params": params, "timeout": timeout})
+                return FakeResponse()
+
+        original_session = market_snapshot._SESSION
+        original_interval = market_snapshot.EM_MIN_INTERVAL_SEC
+        original_uniform = market_snapshot.random.uniform
+        try:
+            market_snapshot._SESSION = FakeSession()
+            market_snapshot.EM_MIN_INTERVAL_SEC = 0
+            market_snapshot.random.uniform = lambda _a, _b: 0
+            market_snapshot._em_get("https://push2.eastmoney.com/api/test", params={"x": "1"}, timeout=3)
+        finally:
+            market_snapshot._SESSION = original_session
+            market_snapshot.EM_MIN_INTERVAL_SEC = original_interval
+            market_snapshot.random.uniform = original_uniform
+
+        self.assertEqual(calls[0]["url"], "https://push2.eastmoney.com/api/test")
+        self.assertEqual(calls[0]["params"], {"x": "1"})
+        self.assertEqual(calls[0]["timeout"], 3)
+
+    def test_baidu_concept_route_does_not_use_removed_fundflow_endpoint(self):
+        market_snapshot = load_module()
+        calls = []
+
+        class FakeResponse:
+            def json(self):
+                return {"Result": {"concepts": ["人工智能", "算力"]}}
+
+        class FakeSession:
+            def get(self, url, params=None, headers=None, timeout=None):
+                calls.append({"url": url, "params": params})
+                return FakeResponse()
+
+        original_session = market_snapshot._SESSION
+        try:
+            market_snapshot._SESSION = FakeSession()
+            result = market_snapshot.fetch_concept_blocks("600519", timeout_sec=1)
+        finally:
+            market_snapshot._SESSION = original_session
+
+        self.assertEqual(result["items"], ["人工智能", "算力"])
+        self.assertNotIn("fundflow", calls[0]["url"])
+        self.assertNotIn("fundsortlist", calls[0]["url"])
+
+    def test_snapshot_records_quote_source_chain_and_missing_fields(self):
+        market_snapshot = load_module()
+        holdings = [{"code": "600519", "name": "贵州茅台"}, {"code": "000001", "name": "平安银行"}]
+
+        def quote_fetcher(_holdings):
+            return {
+                "quotes": {
+                    "600519": {"code": "600519", "price": 1200.0, "source": "Sina hq.sinajs.cn"},
+                },
+                "source_chains": {
+                    "600519": ["Tencent qt.gtimg.cn", "Sina hq.sinajs.cn"],
+                    "000001": ["Tencent qt.gtimg.cn", "Sina hq.sinajs.cn", "Eastmoney push2"],
+                },
+                "errors": ["Tencent quote failed"],
+            }
+
+        def context_fetcher():
+            return ({"major_indices": [{"code": "000001"}], "hot_sectors": [], "northbound": {}, "news": []}, ["market.hot_sectors"], [])
+
+        def holding_enricher(holding):
+            holding["data_quality"] = market_snapshot.grade_holding_quality(holding)
+            return holding, [], []
+
+        snapshot = market_snapshot.build_snapshot(holdings, quote_fetcher, context_fetcher, holding_enricher)
+
+        self.assertEqual(snapshot["holdings"][0]["quote"]["source_chain"], ["Tencent qt.gtimg.cn", "Sina hq.sinajs.cn"])
+        self.assertEqual(snapshot["holdings"][1]["quote"]["source"], "[数据缺失: quote]")
+        self.assertIn("quote:000001", snapshot["missing_fields"])
+        self.assertIn("Tencent quote failed", snapshot["errors"])
+
+    def test_quality_gate_blocks_actions_without_quote_and_new_buys_without_sector(self):
+        market_snapshot = load_module()
+        no_quote = {
+            "holdings": [{"data_quality": "F"}],
+            "missing_fields": ["quote:600519", "market.hot_sectors"],
+        }
+        blocked = market_snapshot.assess_quality(no_quote)
+        self.assertEqual(blocked["grade"], "F")
+        self.assertFalse(blocked["action_allowed"])
+        self.assertFalse(blocked["new_buy_allowed"])
+
+        no_sector = {
+            "holdings": [{"data_quality": "A"}],
+            "missing_fields": ["market.hot_sectors"],
+        }
+        sector_blocked = market_snapshot.assess_quality(no_sector)
+        self.assertTrue(sector_blocked["action_allowed"])
+        self.assertFalse(sector_blocked["new_buy_allowed"])
+
 
 if __name__ == "__main__":
     unittest.main()

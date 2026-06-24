@@ -29,23 +29,29 @@ Every buy or watch-only candidate must include a reason block with these three f
 
 Do not output a buy recommendation if any of the three reason fields is empty. If one field is missing because data cannot be fetched, convert the idea to "暂不建议买入" and state the exact missing source.
 
-## Candidate / Holding Separation Rule
+## Candidate / Holding Consistency Rule
 
-Today's buy/rotation candidates are for **new money or rotation targets that are
-not already in the current holdings**. This is a hard UX and trading-rule
-constraint:
+Today's buy/rotation candidates can be **new positions, rotation targets, or
+add-on plans for current holdings**. The hard rule is consistency, not forced
+separation:
 
-- Do not output a candidate whose `code` is already present in the current
-  holding list.
-- Do not show the same symbol as "持有/不加仓" in the holding table and "买入/观察买入"
-  in the candidate table.
-- If the best expression of a hot sector is already held, put the instruction in
-  the holding action table only, e.g. "持有不加仓", "突破后加仓现有持仓", or "跌破减仓".
-- The candidate table must then choose a different non-held ETF/stock, or state
-  "今日不新增买入" with the exact condition that would reopen new-buy eligibility.
+- Use `候选类型` to label every row as `新开仓`, `加仓现有持仓`, `条件加仓`, or
+  `轮动观察`.
+- A candidate whose `code` is already present in the current holding list is
+  allowed only when the holding action table also says `加仓` or `条件加仓` for
+  that same code.
+- Do not show the same symbol as `持有不加仓`, `减仓`, or `卖出` in the holding
+  table and `买入/观察买入` in the candidate table.
+- If the best expression of a hot sector is already held and evidence supports
+  adding, show it both as a holding-level add decision and as a candidate row
+  labeled `加仓现有持仓`.
+- If the held symbol should not be added, keep it out of the candidate table and
+  choose a different non-held ETF/stock, or state "今日不新增买入" with the exact
+  condition that would reopen buy eligibility.
 - Before upload, compare `candidates[].code` against `holdings[].code`. Any
-  duplicate candidate must be removed or converted into a holding-level trader
-  proposal; do not persist conflicting rows.
+  duplicate candidate must have `candidate_type`/`type` equivalent to
+  `加仓现有持仓` or `条件加仓` and must match the holding-level trader proposal;
+  otherwise remove it or convert it into a non-conflicting holding action.
 
 ## Hot Sector Scanner — Three-Layer Architecture
 
@@ -107,8 +113,9 @@ For each hot sector, find the best expression:
 Remove candidates that:
 - Are below both open and previous close (弱势).
 - Have main funds materially outflowing while price rises (假突破).
-- Are already in the user's portfolio (重复); this is a hard removal rule, not a
-  soft preference.
+- Are already in the user's portfolio while the holding-level verdict is
+  `持有不加仓`, `减仓`, or `卖出`. Existing holdings are allowed only as
+  `加仓现有持仓`/`条件加仓` candidates when the holding verdict also says add.
 - Have fresh negative announcement, reduction, pledge, ST/delist risk.
 - Have turnover rate > 25% (possible distribution).
 - Have VPA divergence signals (量价背离).
@@ -173,8 +180,8 @@ Buy recommendations must not conflict with the portfolio plan:
 - If the user is overexposed, candidate size should come only from cash raised by reducing weak holdings.
 - Do not recommend averaging down current losers as the only buy idea.
 - If the strongest existing holding is already the best expression of the hot
-  sector, say so in the holding table and still keep the candidate table
-  non-held. Do not repeat that held symbol as a buy candidate.
+  sector, it may be the buy candidate only when the plan is explicitly
+  `加仓现有持仓`/`条件加仓` and the holding table gives the same add instruction.
 - If two candidates are given, make one safer ETF-style candidate and one higher-risk stock-style candidate when evidence supports it.
 - If the risk revision loop rejected the original plan, the revised candidate must incorporate the hard constraints.
 

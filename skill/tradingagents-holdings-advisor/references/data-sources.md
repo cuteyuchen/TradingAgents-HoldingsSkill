@@ -1,6 +1,13 @@
 # Data Sources
 
-Use this file when collecting data for intraday portfolio advice. The data architecture is inspired by `TradingAgents-astock`'s 7-source direct-connect model and `TradingAgents-AShare`'s centralized DataCollector pattern.
+Use this file when collecting data for intraday portfolio advice. The data architecture is inspired by `TradingAgents-astock`'s direct HTTP A-share model, `TradingAgents-AShare`'s centralized DataCollector pattern, and `TauricResearch/TradingAgents`' verified data-access contract.
+
+## Upstream Update Notes
+
+- `TradingAgents` v0.3.0 emphasizes deterministic instrument identity, explicit provider chains, stale data rejection, and structured report output. Mirror this by keeping `source_chain`, `quote_time`, `market_session`, `missing_fields`, and `quality_gate` in every snapshot.
+- `TradingAgents-astock` v0.2.15 confirms Baidu PAE fund-flow endpoints are down. Use Baidu only for concept/industry classification; use Eastmoney push2 for individual and sector fund flow.
+- `TradingAgents-astock` also confirms public northbound historical APIs can return stale/empty values. Use real-time northbound data plus local CSV accumulation; do not infer a trend when local history is empty.
+- `TradingAgents-AShare` contributes the fetch-once/share-many pattern and failure-disable discipline. The skill itself still does not schedule jobs or read local project databases.
 
 ## Holdings Source Priority
 
@@ -36,11 +43,29 @@ Fetch all data once, share across all analyst roles. Never fetch the same data p
 
 **Recommended collection order:**
 1. Resolve all ticker symbols first (name → code mapping).
-2. Run `scripts/market_snapshot.py` to batch-fetch quotes for all holdings and create the shared evidence JSON.
-3. Batch-fetch index/sector data (shared across all holdings).
-4. Fetch per-holding data (news, fundamentals, capital flow) sequentially with rate limiting.
-5. Pre-compute technical indicators and VPA from K-line data before analysts need them.
+2. Run `scripts/market_snapshot.py` to create the shared verified evidence JSON.
+3. Use the snapshot's quote fallback chain (Tencent → Sina → Eastmoney), major indices, sector heat, northbound snapshot, market news, fund flow, concept tags, quote-derived VPA, `missing_fields`, and `quality_gate`.
+4. Fetch any remaining per-holding slow evidence (deep fundamentals, announcements, lockup, dragon-tiger) only once and append it to the same evidence pack.
+5. Pre-compute technical indicators and VPA from K-line data before analysts need them when K-line routes are available; otherwise use snapshot quote-derived VPA and mark the missing OHLCV fields.
 6. Immediately before final advice, refresh quote fields with `market_snapshot.py --refresh-final`; do not refetch slower news/fundamental data unless the first pass marked a mandatory gap.
+
+## Verified Snapshot Contract
+
+`scripts/market_snapshot.py` emits a run-level contract:
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | Snapshot contract version; use it to distinguish old quote-only output from verified snapshots |
+| `source_chain` | Configured provider chain per data type |
+| `holdings[].quote.source_chain` | Providers attempted for that code's quote |
+| `market.major_indices` | 上证/深证/创业板/科创等主要指数快照 |
+| `market.hot_sectors` | Eastmoney sector heat / fund-flow ranking when available |
+| `market.northbound` | Real-time northbound snapshot plus local CSV history only |
+| `holdings[].fund_flow` | Eastmoney push2 individual fund flow; never Baidu PAE |
+| `holdings[].concept_blocks` | Baidu classification when available; no fund-flow use |
+| `holdings[].vpa` | Quote-derived VPA baseline; OHLCV-derived VPA may be appended by deeper workers |
+| `missing_fields[]` | Exact missing keys such as `quote:600519`, `market.hot_sectors`, `fund_flow:000001` |
+| `quality_gate` | A/B/C/D/F grade plus `action_allowed`, `new_buy_allowed`, and blockers |
 
 ## Freshness And Cache Windows
 
@@ -66,8 +91,8 @@ all analysts or debates unless the refreshed data changes a hard decision input.
 | Data Need | Primary Source | Fallback Chain | Notes |
 |---|---|---|---|
 | Real-time quote (实时行情) | Tencent Finance `qt.gtimg.cn` | Sina `hq.sinajs.cn` → Eastmoney push2 API | Price, pct change, open/high/low/prev close, turnover, volume ratio, quote time, market session |
-| K-line / OHLCV | AkShare `stock_zh_a_hist` (Eastmoney) | mootdx (TCP 7709) → Sina daily → Tencent `stock_zh_a_hist_tx` | For support/resistance and trend; avoid look-ahead bias |
-| ETF K-line | AkShare `fund_etf_hist_em` | `fund_etf_hist_sina` | Separate endpoint for ETFs vs stocks |
+| K-line / OHLCV | Sina daily / direct HTTP | mootdx (TCP 7709) → Eastmoney historical | For support/resistance and trend; avoid look-ahead bias; supplement stale latest day |
+| ETF K-line | Sina / Eastmoney ETF historical | -- | Separate endpoint for ETFs vs stocks |
 | Technical indicators | Derived from OHLCV via stockstats | Manual calculation from K-line | RSI, MACD, MA(5/10/20/60), EMA, Bollinger, ATR, VWMA, MFI |
 
 ### Tier 2: Fundamental & Valuation Data
@@ -85,14 +110,22 @@ Inspired by `TradingAgents-astock`'s 8 signal data tools:
 
 | Data Need | Primary Source | Fallback | Notes |
 |---|---|---|---|
-| Northbound flow (北向资金) | THS `hsgtApi` | Eastmoney northbound data | Real-time minute-level flow; if historical unavailable, use "real-time snapshot + local CSV accumulation" pattern |
+| Northbound flow (北向资金) | THS/Eastmoney real-time snapshot | local CSV history only | Do not trust stale public history; if CSV is empty, state history unavailable |
 | Dragon-Tiger Board (龙虎榜) | Eastmoney `datacenter-web` | News search fallback | Seat details, institutional participation, net buy/sell per seat |
-| Individual fund flow (个股资金流) | Eastmoney push2 fund flow | -- | Super-large/large/medium/small order breakdown |
-| Concept blocks (概念板块) | Baidu `finance.pae.baidu.com` | Eastmoney concept rank | Sector/concept/region classification per stock |
+| Individual fund flow (个股资金流) | Eastmoney push2 fund flow | -- | Super-large/large/medium/small order breakdown; Baidu PAE fund-flow routes are prohibited |
+| Concept blocks (概念板块) | Baidu `finance.pae.baidu.com` | Eastmoney concept rank | Sector/concept/region classification per stock only |
 | Hot stocks (热门股) | THS hot stocks with editor annotations | Xueqiu hot follow | Topic attribution, theme tags |
-| ZT pool (涨停板) | AkShare `stock_zt_pool_em` | Eastmoney limit-up list | Limit-up chain analysis, sector clustering |
+| ZT pool (涨停板) | Eastmoney limit-up list | THS hot stocks | Limit-up chain analysis, sector clustering |
 | Insider transactions (股东研究) | mootdx F10 `stock_main_stock_holder` | Eastmoney shareholder changes | 6-month activity, top holder changes |
 | Lockup calendar (解禁日历) | Eastmoney `datacenter-web` | Announcement search | Historical + next 90 days, reduction filings |
+
+### Deprecated Or Prohibited Routes
+
+| Route | Status | Required Behavior |
+|---|---|---|
+| Baidu PAE `fundflow` / `fundsortlist` | Confirmed unavailable upstream | Do not call; use Eastmoney push2 fund flow |
+| Eastmoney/THS stale northbound history | Can return 2024 stale/empty data | Do not use for trend; use real-time + local CSV accumulation |
+| Repeated ad hoc quote calls inside analyst roles | Breaks verified snapshot contract | Use the shared snapshot and final refresh only |
 
 ### Tier 4: News & Sentiment Data
 
@@ -155,12 +188,12 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 | Technical indicators | Local compute via stockstats | Manual calc from K-line | No network needed |
 | VPA indicators | Local compute via numpy | Skip VPA, mark `[数据缺失: vpa]` | No network needed |
 | Fund flow (个股) | Eastmoney push2 | Record `[数据缺失: fund flow]` | Unique to Eastmoney |
-| Northbound flow | THS `hsgtApi` → Eastmoney | Use real-time snapshot + local CSV accumulation | Reduce Eastmoney dependency |
+| Northbound flow | THS/Eastmoney real-time → local CSV history | Use real-time snapshot + local CSV accumulation | Do not infer historical trend from stale public endpoints |
 | Dragon-Tiger Board | Eastmoney datacenter | News search fallback, lower confidence | Unique to Eastmoney |
 | Lockup calendar | Eastmoney datacenter | Announcement search | Unique to Eastmoney |
 | News / announcements | CLS telegraph → Sina → Eastmoney | Record `[数据缺失: news]` | Reduce Eastmoney dependency |
 | Fundamentals | Tencent valuation + Sina statements → Eastmoney F10 → THS EPS | Record `[数据缺失: fundamentals]` | Reduce Eastmoney dependency |
-| Sector/concept blocks | Baidu `finance.pae.baidu.com` → Eastmoney sector | Record `[数据缺失: sector]` | Baidu has richer concept classification |
+| Sector/concept blocks | Baidu `finance.pae.baidu.com` → Eastmoney sector | Record `[数据缺失: sector]` | Baidu is classification-only; never fund flow |
 
 **Routing rules:**
 
@@ -168,6 +201,7 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 - Eastmoney is used as **primary only** for data unique to it (fund flow, dragon-tiger, lockup); for everything else it is last-resort to protect the rate budget.
 - Any failed fetch records `[数据缺失: source/field]`. If the missing field is mandatory for the action decision, block the affected trading advice instead of lowering the evidence standard. Never retry endlessly (see `fallback_action` in `configuration.md`).
 - Quote collection is mandatory after codes are confirmed. During trading hours, use live quote fields; outside trading hours, use the latest completed trading session's open/high/low/close/turnover data and set `market_session` to `closed_latest_session`.
+- New-buy candidates require both sector/concept position and capital-flow evidence. If `market.hot_sectors`, `concept_blocks:*`, or fund-flow evidence is missing, output watch-only triggers instead of an executable new buy.
 
 ## Symbol Resolution
 
