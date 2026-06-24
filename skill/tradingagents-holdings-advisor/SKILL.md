@@ -32,6 +32,10 @@ Read these supporting files when needed:
 - `references/configuration.md`: **Single source of truth** for all tunable parameters — pipeline phases, debate rounds, quality-gate thresholds, trading rules, dual-horizon, trading memory, Eastmoney throttling, dedup TTL, persistence. Other files reference values here; when a value appears in two places, this file wins.
 - `references/persistence.md`: Current archive contract for the companion persistence system (`ADVISOR_API_URL` + `ADVISOR_TOKEN`). The skill uses `/api/v1/archives` only.
 
+## Bundled Scripts
+
+- `scripts/market_snapshot.py`: use at the start of every multi-holding or intraday run to build a reusable evidence snapshot, and use `--refresh-final` immediately before final advice to refresh quote fields without rerunning the full analysis.
+
 ## Required Cadence
 
 When invoked by the user or external automation, run this workflow at:
@@ -62,12 +66,19 @@ bundles when there are multiple holdings. If the run exceeds 10 minutes, state
 which key data is still being collected and continue until mandatory evidence is
 complete. Do not skip required data to meet the time target.
 
+Default fast path:
+
+1. Build one normalized market snapshot with `scripts/market_snapshot.py` after holdings and codes are confirmed.
+2. Use that snapshot as the shared evidence source for analysts, debate, trader proposal, risk review, and candidate scoring; do not refetch the same quote/sector/news fields inside each role.
+3. Immediately before final visible advice, run `scripts/market_snapshot.py --refresh-final <snapshot.json>` or an equivalent quote refresh. Update only quote-sensitive fields such as current price, pct change, quote time, trigger distance, and market session; do not rerun the full debate unless the refreshed quote invalidates a hard risk constraint.
+4. If the final refresh fails, keep the already completed evidence, mark `[最终行情刷新失败: source/reason]`, and block only quote-dependent new execution that can no longer be verified.
+
 0. **Parse intent + local context (Phase 0)**: Parse the current request and use only current screenshot/input plus conversation-provided prior decisions or user-provided archive content for trading memory. Do not call legacy persistence endpoints for history. The current backend integration for the skill is archive-only; see `references/persistence.md`.
 1. **Parse intent**: Identify target tickers, investment horizon, focus areas, risk profile, specific objective from natural language. See `references/multi-agent-workflow.md` intent parsing section.
 2. **Identify holdings source**: screenshot > typed current holdings > history/memory.
 3. **Extract holdings**: name, code if visible, total quantity (`qty`), available quantity (`available_qty`), cost, current price, market value, P/L, total exposure. `available_qty` only means currently sellable/usable quantity; `qty - available_qty` is unavailable because of pending orders, freeze, or T+1 limits, and must never be treated as already reduced/sold. Any reduce/sell recommendation must size from `available_qty`, not total `qty`. If the screenshot shows both account total assets and total market value, compute corrected unused funds as `total_assets - total_market_value`; do not trust the broker "available cash" field as the full remaining cash when pending orders may not have returned funds. Exclude "新标准券"/standard bond/treasury reverse repo rows from stock or ETF holdings; record their amount as unused or repo-occupied funds instead. `pnl` must be the decimal return ratio. For 同花顺/券商持仓截图, the 盈亏 column commonly has two lines: the first line is 盈亏金额 (for example `-19,490.87`) and the second line is 盈亏率 (for example `-27.730%`). Store the first line in `pnl_amount`, convert the second line to decimal `pnl` (`-0.2773`), and do not create a correction record for this normal two-line mapping. If no percent line is visible, compute `pnl = (current price - cost) / cost` from screenshot price/cost and keep the amount line in `pnl_amount`.
 4. **Resolve symbols carefully**: If a broker display name is ambiguous, first use public symbol/quote sources to match by name plus screenshot price. If there is no unique match within the 2% price tolerance, ask the user to confirm/input the code and do not upload the archive until confirmed. See `references/data-sources.md` symbol resolution.
-5. **Mandatory quote collection**: After codes are confirmed, fetch public market quotes in batch. During trading hours use live quotes; after market close use the latest completed trading session data. If every quote route is unavailable, record health failure and stop before trading advice with `[暂不能给出交易建议: 缺少quote]`. See `references/python-execution.md`.
+5. **Mandatory snapshot + quote collection**: After codes are confirmed, run the fast snapshot path from `references/python-execution.md`. During trading hours use live quotes; after market close use the latest completed trading session data. If every quote route is unavailable, record the missing source chain and stop before trading advice with `[暂不能给出交易建议: 缺少quote]`.
 6. **Two-layer quality gate**: Grade all evidence before debate using the numeric thresholds in `references/configuration.md` (Layer 1: hard checks, Layer 2: LLM review). See `references/multi-agent-workflow.md` quality gate section.
 7. **Run the multi-agent reasoning**: Run the full analyst pass for top-risk names, lighter pass for small positions. Apply dual-horizon analysis for core holdings. Apply claim-driven bull/bear debate. See `references/multi-agent-workflow.md`.
 8. **Apply trading rules**: T+1, daily limits, lot size, time-of-day, total exposure, loser/winner priority, dual-horizon sleeve sizing. Check risk revision loop. See `references/trading-rules.md`.
@@ -77,7 +88,7 @@ complete. Do not skip required data to meet the time target.
      choose a different non-held candidate or state that no new buy is allowed.
 10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Investment claims must use `INV-` IDs; three-way risk claims must use `RISK-1/RISK-2/RISK-3` with aggressive/neutral/conservative speakers. Show unresolved claims explicitly. See `references/debate-reporting.md`.
 11. **Risk Manager review**: Check if Trader proposal needs revision. Apply hard/soft constraints. See `references/trading-rules.md` risk revision loop.
-12. **Output action-first advice**: Market read, portfolio conclusion, holding table, buy candidate plan, rebalance plan, checkpoint-specific execution rules.
+12. **Final quote refresh + action-first advice**: Refresh quote fields immediately before output, then produce market read, portfolio conclusion, holding table, buy candidate plan, rebalance plan, checkpoint-specific execution rules.
 13. **Trading memory reflection**: If past decisions exist in the conversation or in archive content explicitly provided by the user, reference them and compute alpha vs CSI 300 when benchmark data is available. Do not invent or fetch history through removed/legacy persistence endpoints.
 14. **Display advice, then archive (Phase 6, if persistence configured)**: First show the final advice to the user. After the advice is visible, upload `advice.md`, `holdings.json`, and the original screenshot file via `references/persistence.md`. On failure, append `[未持久化: 原因]` without changing the already displayed advice. Skip silently if not configured.
 
@@ -131,6 +142,7 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not use the broker "available cash" field as the full remaining cash when `total_assets` and `total_market_value` are visible. Corrected unused funds must be `total_assets - total_market_value`, because pending-order funds may not yet have returned to available cash.
 - Do not parse "新标准券", standard bond, treasury reverse repo, or 国债逆回购 rows as stock/ETF holdings. Treat their amount as unused/repo-occupied funds and keep them out of holding action tables.
 - Do not skip public quote collection for confirmed codes. During market close, use the latest completed trading session data rather than stale intraday assumptions; if all quote sources fail, record `[暂不能给出交易建议: 缺少quote]` in the visible advice and archive, but do not call legacy health-reporting endpoints.
+- Do not output intraday advice from a quote snapshot older than `final_quote_refresh_max_age_sec` during trading hours. Refresh quotes immediately before the final action table, or block quote-dependent execution if refresh cannot verify current prices.
 - Do not average down heavy losers without market, sector, and capital-flow confirmation.
 - Do not give generic "observe" answers; include triggers, quantities/percentages, and priority.
 - Do not omit today's buy/rotation candidates; if no buy is allowed, output a conditional watch-only plan with exact triggers.
@@ -159,6 +171,7 @@ Before final advice, verify:
 - Every live quote maps to the correct code or is marked uncertain.
 - Every uncertain code has either a public-source match within tolerance or a user confirmation before upload.
 - Every confirmed holding has a quote source, quote time, and market session in `indicators.quote`; otherwise the run must stop before trading advice and explain the blocker.
+- During trading hours, final action tables use quotes refreshed within `final_quote_refresh_max_age_sec`; include `final_quote_refresh_at` or the quote time in the evidence pack.
 - At least one broad index, relevant sector, and capital-flow check was considered.
 - VPA signals were computed for material holdings.
 - Hot sectors/themes were scanned using the three-layer architecture; if source failure blocks sector position判断, new-buy advice is blocked rather than filled with a weak substitute.

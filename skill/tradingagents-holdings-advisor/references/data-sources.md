@@ -36,10 +36,28 @@ Fetch all data once, share across all analyst roles. Never fetch the same data p
 
 **Recommended collection order:**
 1. Resolve all ticker symbols first (name → code mapping).
-2. Batch-fetch quotes for all holdings in one request where possible.
+2. Run `scripts/market_snapshot.py` to batch-fetch quotes for all holdings and create the shared evidence JSON.
 3. Batch-fetch index/sector data (shared across all holdings).
 4. Fetch per-holding data (news, fundamentals, capital flow) sequentially with rate limiting.
 5. Pre-compute technical indicators and VPA from K-line data before analysts need them.
+6. Immediately before final advice, refresh quote fields with `market_snapshot.py --refresh-final`; do not refetch slower news/fundamental data unless the first pass marked a mandatory gap.
+
+## Freshness And Cache Windows
+
+Use different refresh windows by data type so the final advice is current without
+restarting the whole run:
+
+| Data Type | In-Run Cache | Final Refresh Rule |
+|---|---:|---|
+| Holding quotes / candidate quotes | 15 sec | Must refresh within 30 sec before final action table during trading hours |
+| Major indices / breadth | 30 sec | Refresh if run exceeds 10 min or market moves sharply |
+| Sector ranks / sector fund flow | 3 min | Refresh before final advice if candidate decision depends on sector position |
+| Individual fund flow | 3-5 min | Refresh only for material holdings or buy candidates |
+| News / policy / announcements | 30 min | Do not repeat unless first pass failed or a breaking-news source indicates update |
+| Fundamentals / lockup / holder data | 1 day | Never refetch inside one intraday run unless missing |
+
+If the cache window expires, refresh the specific data type only. Do not rerun
+all analysts or debates unless the refreshed data changes a hard decision input.
 
 ## Source Matrix
 

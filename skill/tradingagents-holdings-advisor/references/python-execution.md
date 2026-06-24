@@ -16,6 +16,51 @@ Use Python scripts when any applies:
 - A repeatable market snapshot is needed for 09:25, 10:00, 12:00, or 14:30 runs.
 - Candidate scoring requires programmatic comparison across multiple stocks/ETFs.
 
+## Fast Market Snapshot Script
+
+For screenshot or multi-holding runs, use the bundled script first after codes
+are confirmed:
+
+```bash
+python skill/tradingagents-holdings-advisor/scripts/market_snapshot.py \
+  --holdings holdings.json \
+  --output evidence_snapshot.json
+```
+
+If only codes are known:
+
+```bash
+python skill/tradingagents-holdings-advisor/scripts/market_snapshot.py \
+  --codes 600519,000001,512480 \
+  --output evidence_snapshot.json
+```
+
+Use `--no-network` only for tests or source outages. A no-network snapshot is not
+enough for quote-dependent trading advice; it should produce a blocker for
+actions that need current prices.
+
+### Mandatory Final Quote Refresh
+
+Before writing the final visible action table, refresh quote fields against the
+current snapshot:
+
+```bash
+python skill/tradingagents-holdings-advisor/scripts/market_snapshot.py \
+  --refresh-final evidence_snapshot.json \
+  --output evidence_snapshot.final.json
+```
+
+Rules:
+
+- Use `evidence_snapshot.final.json` for the final holding action table and buy
+  candidate triggers.
+- Update only quote-sensitive fields after refresh: current price, pct change,
+  quote time, market session, trigger distance, stop/invalidation distance.
+- Do not rerun the full debate unless refreshed prices moved enough to invalidate
+  a hard trigger, stop, or risk constraint (`final_refresh_rerun_debate_threshold_pct`).
+- If final refresh fails, state `[最终行情刷新失败: source/reason]` and block only
+  quote-dependent execution that cannot be verified.
+
 ## Dependency Policy
 
 Installing dependencies is allowed when necessary for data collection or parsing.
@@ -54,15 +99,18 @@ Recommended collection sequence:
 
 | Stage | Work |
 |---|---|
-| Shared prefetch | Symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
+| Shared prefetch | Run `market_snapshot.py`, symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
 | Ticker workers | Split holdings into up to `max_ticker_workers` bundles; fetch K-line, VPA, news, fundamentals, fund-flow fallback per bundle |
 | Candidate workers | Scan non-held candidate ETFs/stocks from hot sectors in parallel with ticker workers |
 | Merge + quality gate | Normalize evidence, mark missing fields, grade whether action advice is allowed |
-| Synthesis + archive | Show advice first, then archive Markdown/holdings/screenshot if persistence is configured |
+| Final refresh + synthesis + archive | Refresh quote fields, show advice first, then archive Markdown/holdings/screenshot if persistence is configured |
 
 Rules:
 
 - Start with batch quote/index/sector requests before per-ticker work.
+- Treat the snapshot JSON as the single source of current run evidence. Analysts
+  should read from it instead of issuing their own duplicate quote/sector/news
+  calls.
 - Partition holdings by risk priority, not by screen order: heavy losers and
   largest market-value names get first worker slots.
 - Use `ThreadPoolExecutor(max_workers=max_ticker_workers)` or separate
@@ -77,6 +125,8 @@ Rules:
   affected trading advice instead of filling with a weak substitute.
 - If elapsed time exceeds `progress_notice_sec`, state which mandatory data is
   still being fetched and why it is needed for advice quality.
+- If elapsed time makes initial quotes older than `final_quote_refresh_max_age_sec`,
+  refresh quotes before output rather than restarting the whole analysis.
 - Upload/archive is never allowed to consume time before the user sees the
   final advice; persistence happens only after visible output.
 
@@ -96,6 +146,19 @@ with ThreadPoolExecutor(max_workers=4) as pool:
     for f in as_completed(futures):
         evidence["holdings"].extend(f.result())
 ```
+
+### Script Output Use
+
+`market_snapshot.py` emits:
+
+- `timestamp`: initial snapshot time.
+- `holdings[]`: normalized holdings with quote fields when available.
+- `missing_fields[]`: exact missing quote/data keys.
+- `final_quote_refresh_at`: present only after final refresh.
+
+If `holdings[].quote.source` is `[数据缺失: quote]`, do not issue an executable
+buy/sell/reduce instruction for that holding. State the missing source chain and
+the next collection step.
 
 ### Eastmoney Throttling
 

@@ -34,6 +34,23 @@ gate can pass or explicitly block trading advice.
 | `max_retry_per_source` | 1 | Try the route once, then the configured fallback once; do not grind |
 | `must_output_action_tables` | true | Only after mandatory data and quality gate pass; otherwise output blocker + missing data + next fetch step |
 
+## Fast Snapshot Parameters
+
+These parameters control `scripts/market_snapshot.py` and the final quote refresh path. They improve speed without reducing evidence quality by fetching once, sharing evidence across roles, and refreshing quote-sensitive fields at the end.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `market_snapshot_script` | `scripts/market_snapshot.py` | Build the initial normalized evidence snapshot from holdings JSON or codes |
+| `snapshot_required_for_multi_holding` | true | Use the script for every screenshot or multi-holding run after codes are confirmed |
+| `quote_cache_ttl_sec` | 15 | In-run quote cache; avoids duplicate quote calls while keeping intraday data fresh |
+| `sector_cache_ttl_sec` | 180 | Sector/heat cache; refresh if analysis runs long or sector mood shifts |
+| `news_cache_ttl_sec` | 1800 | News/event cache; do not repeatedly query within a single run |
+| `fundamental_cache_ttl_sec` | 86400 | Fundamentals/lockup data rarely needs intraday refetch |
+| `final_quote_refresh_required` | true | Refresh current quotes immediately before final visible advice |
+| `final_quote_refresh_max_age_sec` | 30 | During trading hours, action tables must use quotes refreshed within this age |
+| `final_refresh_rerun_debate_threshold_pct` | 1.5 | Rerun affected trader/risk logic only if refreshed price moves enough to invalidate triggers or stops |
+| `snapshot_no_network_mode` | `--no-network` | Use only for tests or when public sources are unavailable; visible advice must then block quote-dependent actions |
+
 ## Debate Parameters
 
 Control how deep the claim-driven debate goes. Inspired by `TradingAgents-AShare`.

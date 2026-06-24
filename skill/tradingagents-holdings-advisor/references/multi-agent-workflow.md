@@ -9,7 +9,7 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 | Phase | Name | Reasoning Mode | Steps |
 |---|---|---|---|
 | **Phase 0** | Intent Parsing + Local Context | quick | Parse intent; extract portfolio; use only current input, conversation context, or user-provided archive content for trading memory |
-| **Phase 1** | Analyst Team | quick | Centralized data collection; rank by risk; full pass for top-risk, lighter pass for small |
+| **Phase 1** | Analyst Team | quick | Fast market snapshot; centralized data collection; rank by risk; full pass for top-risk, lighter pass for small |
 | **Phase 2** | Quality Gate | quick | Two-layer grade on all evidence before any debate |
 | **Phase 3** | Claim-Driven Bull/Bear Debate | quick | Structured claims with tracking |
 | **Phase 4** | Research → Trader → Risk Revision | mixed (research/risk mgr = deep, trader = quick) | Verdict, executable proposal, revision loop |
@@ -25,12 +25,15 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 
 ### Phase 1 — Analyst Team (quick)
 
-4. **Centralized Data Collection**: Fetch all data once for all holdings in a single batch pass. See `data-sources.md`. Never fetch the same data point twice.
+4. **Fast Snapshot + Centralized Data Collection**: Build `evidence_snapshot.json` with `scripts/market_snapshot.py`, then fetch any remaining non-quote evidence once for all holdings in a single batch pass. See `data-sources.md`. Never fetch the same data point twice.
    - Routine runs target about 10 minutes end to end (`target_advice_sec` = 600), but this is a progress target, not a hard cutoff.
    - Start with shared batch quote/index/sector requests, then split holdings
      into up to `max_ticker_workers` ticker-worker subagents or Python worker
      bundles. Each worker fetches K-line/VPA/news/fundamentals/fund-flow
      fallbacks for its assigned tickers and returns normalized evidence.
+   - Analyst, debate, trader, risk, and portfolio roles must consume the shared
+     snapshot/evidence table. They must not independently refetch quote, sector,
+     news, or candidate data unless the snapshot marks a mandatory gap.
    - Run candidate-sector scanning in separate candidate workers where useful.
    - Eastmoney remains globally throttled across all workers; do not exceed the
      configured semaphore and request interval.
@@ -65,8 +68,9 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 
 ### Phase 6 — Memory Reflection + Archive (quick)
 
-14. **Trading Memory Reflection**: Compare with past decisions on same tickers, compute alpha vs CSI 300 benchmark. See `trading-rules.md` Trading Memory section.
-15. **Archive Upload** (if enabled): First display the final advice. Then upload `advice.md`, `holdings.json`, and the original screenshot to the companion system via `persistence.md`. On failure, mark `[未持久化: 原因]` and do not change the already displayed advice.
+14. **Final Quote Refresh**: Run `scripts/market_snapshot.py --refresh-final evidence_snapshot.json` immediately before the final visible advice. Update quote-sensitive fields only. Rerun affected trader/risk logic only when refreshed prices invalidate a hard trigger, stop, or risk constraint.
+15. **Trading Memory Reflection**: Compare with past decisions on same tickers, compute alpha vs CSI 300 benchmark. See `trading-rules.md` Trading Memory section.
+16. **Archive Upload** (if enabled): First display the final advice. Then upload `advice.md`, `holdings.json`, and the original screenshot to the companion system via `persistence.md`. On failure, mark `[未持久化: 原因]` and do not change the already displayed advice.
 
 **Quality note**: Under time/data pressure, do not skip mandatory evidence or the quality gate. If mandatory evidence is unavailable, block trading advice and state the missing data plus next collection step.
 
