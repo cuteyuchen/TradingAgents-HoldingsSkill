@@ -8,7 +8,7 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 
 | Phase | Name | Reasoning Mode | Steps |
 |---|---|---|---|
-| **Phase 0** | Intent Parsing + Local Context | quick | Parse intent; extract portfolio; use only current input, conversation context, or user-provided archive content for trading memory |
+| **Phase 0** | Intent Parsing + Archive Context | quick | Parse intent; extract portfolio; after code confirmation fetch archive context when configured |
 | **Phase 1** | Analyst Team | quick | Fast market snapshot; centralized data collection; rank by risk; full pass for top-risk, lighter pass for small |
 | **Phase 2** | Quality Gate | quick | Two-layer grade on all evidence before any debate |
 | **Phase 3** | Claim-Driven Bull/Bear Debate | quick | Structured claims with tracking |
@@ -16,12 +16,12 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 | **Phase 5** | Portfolio Synthesis | deep | Three-way risk debate + portfolio-level final decision |
 | **Phase 6** | Reflection + Archive | quick | Reflect on available past decisions; after visible advice, upload archive files |
 
-### Phase 0 — Intent Parsing + Local Context (quick)
+### Phase 0 — Intent Parsing + Archive Context (quick)
 
 1. **Intent Parsing**: Parse the user's natural language to identify: target tickers, investment horizon (短线/中线/长线), focus areas (技术/基本面/政策/资金), risk profile, and specific questions. If the user says "分析茅台短线", extract ticker=600519, horizon=short, focus=technical+momentum. See Intent Parsing section below.
    - If the user says "解析持仓/解析截图/上传持仓", default the objective to "完成持仓解析并给出今日操作建议". Do not downgrade the task to extraction only unless the user explicitly says not to provide advice.
 2. **Extract the whole portfolio** from screenshot/typed input/history.
-3. **Local Context Only**: Use prior decisions only when they are already in the conversation or when the user explicitly provides an archive/detail payload. Do not call legacy persistence endpoints for Phase 0 history. The current skill integration with the companion system is archive-only; see `persistence.md`.
+3. **Archive Context**: After current codes are confirmed, call `GET /archives/context?codes=...&limit=5` when `ADVISOR_API_URL` and `ADVISOR_TOKEN` are configured. Use the result for same-day consistency, historical reduction detection, and trading memory. Do not call legacy persistence endpoints for Phase 0 history. The current skill integration with the companion system is archive-only; see `persistence.md`.
 
 ### Phase 1 — Analyst Team (quick)
 
@@ -287,15 +287,17 @@ These run as part of the portfolio synthesis, not as separate graph nodes. See `
 
 ## Trading Memory System
 
-Inspired by TradingAgents-astock's memory log, maintain awareness of past decisions without relying on removed/legacy backend interfaces. The current companion-system contract for the skill is archive-only; it stores advice Markdown, normalized holdings JSON, and the original screenshot after advice is visible.
+Inspired by TradingAgents-astock's memory log, maintain awareness of past decisions without relying on removed/legacy backend interfaces. The current companion-system contract for the skill is archive-only: Phase 0 may read `/archives/context`, and Phase 6 stores advice Markdown, normalized holdings JSON, and the original screenshot after advice is visible.
 
 1. **Record**: After each execution, the Phase 6 archive stores the visible advice, parsed holdings JSON, and screenshot. If persistence is not configured, reference prior decisions from conversation history.
-2. **Reflect**: If the same ticker appears in available conversation history or user-provided archive content, compare:
+2. **Reflect**: If the same ticker appears in available conversation history, user-provided archive content, or `/archives/context`, compare:
    - What was the previous decision and price?
    - What is the raw return since then?
    - What is the alpha return vs CSI 300 (`alpha_benchmark`) when benchmark data is available? Missing benchmark → `[数据缺失]` + lower confidence.
    - Was the decision correct? What can be learned?
-3. **Inject**: Feed only actually available recalled decisions + lessons into the Portfolio Manager's context. If alpha was negative, apply `negative_alpha_sizing` (reduce confidence, tighten sizing).
+3. **Consistency Check**: If `same_day_advice` shows an earlier add/buy and the current plan wants reduce/sell, require material-change evidence before the reversal; otherwise output hold/watch/conditional reduce.
+4. **Reduction Check**: Compare current `qty` and `available_qty` with `timeline_by_code`; if the position already decreased, do not repeat the old reduce size.
+5. **Inject**: Feed only actually available recalled decisions + lessons into the Portfolio Manager's context. If alpha was negative, apply `negative_alpha_sizing` (reduce confidence, tighten sizing).
 
 When past advice exists for a holding, reference it and the alpha in the final advice regardless of which store it came from.
 

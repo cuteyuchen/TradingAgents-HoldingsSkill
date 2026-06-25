@@ -2,7 +2,8 @@
 
 This file defines the current archive-only contract between this skill and the
 companion backend/frontend. It intentionally documents only endpoints the skill
-is allowed to use. Do not call non-archive backend endpoints from the skill.
+is allowed to use. Do not call non-archive or legacy history endpoints from the
+skill.
 
 ## Activation
 
@@ -13,8 +14,8 @@ Persistence is active when **both** environment variables are set:
 | `ADVISOR_API_URL` | `https://trade.cuteyuchen.top/api/v1` | Backend API base URL, no trailing slash |
 | `ADVISOR_TOKEN` | `adv_aBcD...` | Bearer token for archive read/write auth |
 
-If either is unset, finish the advice normally and skip archive upload. Never
-block advice on persistence being unavailable.
+If either is unset, finish the advice normally and skip archive context lookup
+and archive upload. Never block advice on persistence being unavailable.
 
 ## Active Endpoint Surface
 
@@ -22,24 +23,63 @@ The skill may use only the archive endpoints below:
 
 | Method | Endpoint | Skill usage |
 |---|---|---|
+| `GET` | `{ADVISOR_API_URL}/archives/context?codes=600519,000858&limit=5&include_advice=false` | Phase 0 read-only lookup for recent holdings snapshots and advice consistency |
 | `POST` | `{ADVISOR_API_URL}/archives` | Upload the already-visible advice Markdown, normalized holdings JSON, and original screenshot |
 | `GET` | `{ADVISOR_API_URL}/archives` | Optional manual verification or user-requested archive list |
 | `GET` | `{ADVISOR_API_URL}/archives/{id}` | Optional manual verification or user-requested archive detail |
 
-`DELETE /archives/{id}` exists for the frontend archive manager, but the skill
-must not delete archives unless the user explicitly asks.
+`DELETE /archives/{id}` exists for the frontend archive manager and explicit
+user cleanup requests. The skill must not delete archives during advice
+generation.
 
 Do **not** use non-archive backend endpoints in skill execution. They may exist
 for the frontend or legacy structured views, but they are outside this skill's
 active integration contract.
+
+## Phase 0 Archive Context
+
+After parsing the current screenshot/input and confirming the instrument codes,
+call the read-only context endpoint when `ADVISOR_API_URL` and `ADVISOR_TOKEN`
+are configured:
+
+```text
+GET {ADVISOR_API_URL}/archives/context?codes=600519,000858&limit=5&include_advice=false
+Authorization: Bearer {ADVISOR_TOKEN}
+```
+
+Use it only as historical context, never as the current holdings source. The
+current screenshot/input still wins for `qty`, `available_qty`, cost, price,
+and today's action sizing.
+
+Response fields:
+
+| Field | Meaning |
+|---|---|
+| `archives[]` | Newest matching archive summaries with normalized holdings and `advice_excerpt` |
+| `timeline_by_code` | Newest-first holding snapshots grouped by code |
+| `latest_by_code` | Latest known snapshot per code |
+| `same_day_advice[]` | Today's prior advice excerpts for consistency checks |
+
+If `include_advice=true`, each archive may include full `advice_md`; use this
+only when excerpts are insufficient because it can be large.
+
+Use the context to:
+
+- Avoid same-day ungrounded reversals. If an earlier same-day archive advised
+  add/buy and the current plan wants reduce/sell, require material-change
+  evidence before allowing the reversal.
+- Detect already-executed reductions. If current `qty` or `available_qty` is
+  lower than the recent timeline, size any new reduce/sell only from current
+  `available_qty` and do not repeat the old reduction amount.
+- Reference recent advice in the trading memory note when relevant.
 
 ## Archive Upload
 
 First display the final advice to the user. Only after the advice is visible,
 upload an archive so the dashboard can render the same Markdown, parsed
 holdings, and original screenshot later. Upload is archival only: it must not
-participate in advice generation and must not change the already displayed
-recommendation.
+change the already displayed recommendation. The Phase 0 context lookup above
+may inform consistency, but archive upload itself remains post-advice only.
 
 **Request:** `POST {ADVISOR_API_URL}/archives` with header
 `Authorization: Bearer {ADVISOR_TOKEN}` and multipart form fields:
@@ -129,6 +169,27 @@ def upload_archive(
     except Exception as exc:
         print(f"[未持久化: {exc}]")
         return None
+```
+
+## Context Lookup via Python
+
+```python
+import os
+import requests
+
+def fetch_archive_context(codes: list[str], limit: int = 5) -> dict | None:
+    url = os.getenv("ADVISOR_API_URL")
+    token = os.getenv("ADVISOR_TOKEN")
+    if not url or not token or not codes:
+        return None
+    r = requests.get(
+        f"{url}/archives/context",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"codes": ",".join(codes), "limit": limit},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
 ```
 
 ## Failure Policy

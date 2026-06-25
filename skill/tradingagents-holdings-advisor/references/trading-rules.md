@@ -90,6 +90,14 @@ sell/reduce order.
 
 Do not propose precise stop-loss on a position that may hit limit-down and become untradeable without warning about execution risk.
 
+Before any new reduce/sell recommendation, compare the archive context timeline
+for the last 5 matching snapshots when available. If the current `qty` or
+`available_qty` is lower than the most recent archived quantity, assume the user
+may already have executed part of a previous reduction. Do not repeat the old
+reduction amount. Recompute the new reduce/sell size only from the current
+`available_qty`, and state that the current position is already lower than the
+recent archive if it affects sizing.
+
 ## Add Rules
 
 Only consider adding when most are true:
@@ -208,10 +216,58 @@ After each execution, record the decision so future runs can reflect on it:
 - Key reasons for the decision.
 - **Storage**: if the persistence system is configured (`ADVISOR_API_URL` set), the Phase 6 archive upload (see `persistence.md`) stores the visible Markdown, holdings JSON, and screenshot automatically. Otherwise, reference prior decisions from conversation history.
 
+### Archive Context Retrieval
+
+When `ADVISOR_API_URL` and `ADVISOR_TOKEN` are configured, Phase 0 may call
+`GET /archives/context?codes=...&limit=5` after current codes are confirmed.
+This is the only allowed backend history lookup. It is archive-only and
+read-only; do not call legacy `/runs`, `/memory/context`, portfolio, watchlist,
+or health endpoints.
+
+Use the returned:
+- `timeline_by_code` for recent position size, available quantity, cost, price,
+  and P/L changes.
+- `latest_by_code` for the last known archive snapshot.
+- `same_day_advice` and `advice_excerpt` for same-day consistency.
+
+Current screenshot/input still wins over archive history for today's holdings.
+
+### Same-Day Consistency Guard
+
+Do not produce an unjustified same-day reversal. If an earlier same-day archive
+recommended `买入`, `加仓`, or `条件加仓`, a later recommendation of `减仓`,
+`卖出`, or `清仓` for the same code must cite material-change evidence:
+
+- Price broke the earlier trigger, stop, open/previous close support, or another
+  stated invalidation level.
+- Index or relevant sector reversed materially from the earlier archive.
+- Individual or sector fund flow turned materially negative.
+- Major negative announcement, policy, lockup, reduction, or fundamental red
+  flag appeared after the earlier archive.
+- The current quality gate found a new critical gap that invalidates execution.
+
+Without one of those evidence classes, change the action to `维持`, `观察`, or
+`条件减仓`, and specify the exact evidence that would permit a later reversal.
+
+### Historical Reduction Check
+
+Before suggesting a fresh reduce/sell:
+
+1. Compare current `qty`, `available_qty`, cost, and price with the last 5
+   archive context snapshots.
+2. Read the latest relevant advice excerpt for prior reduce/sell/add/hold
+   intent.
+3. If current `qty` is already lower than the recent archive quantity, treat it
+   as a possible executed reduction and do not size from the old quantity.
+4. If current `available_qty` is lower than prior available quantity, cap all
+   execution by current `available_qty`; if it is 0, output no executable sell.
+5. Only recommend another reduction when remaining exposure is still above
+   limits or new risk evidence appears after the last archive.
+
 ### Reflecting on Past Decisions
 
 When the same ticker appears in a future run:
-1. **Retrieve**: What was the previous decision? At what price? Use conversation history or archive content explicitly provided by the user. Do not call legacy persistence history endpoints during Phase 0.
+1. **Retrieve**: What was the previous decision? At what price? Use conversation history, user-provided archive content, or the configured archive context endpoint. Do not call legacy persistence history endpoints during Phase 0.
 2. **Compute raw return**: Current price vs previous advice price.
 3. **Compute alpha**: Raw return minus CSI 300 (沪深300) return over the same period. If the benchmark price for the window is missing, mark `[数据缺失]` and lower alpha confidence (`alpha_window_fallback`).
 4. **Assess**: Was the decision correct? What went right/wrong?
@@ -220,8 +276,8 @@ When the same ticker appears in a future run:
 ### Injecting Memory
 
 Feed into the Portfolio Manager's context:
-- Available same-ticker decisions with performance from conversation history or user-provided archive content.
-- Available cross-ticker lessons from conversation history or user-provided archive content.
+- Available same-ticker decisions with performance from conversation history, user-provided archive content, or `/archives/context`.
+- Available cross-ticker lessons from conversation history, user-provided archive content, or archive advice excerpts.
 - If alpha was negative, apply `negative_alpha_sizing` (reduce confidence and tighten sizing).
 
 Do not fetch memory via legacy backend endpoints. When past advice exists for a holding, reference it and the alpha in the final advice.

@@ -83,10 +83,15 @@ def test_archive_upload_detail_and_delete():
     assert response.json()[0]["has_screenshot"] is True
     assert response.json()[0]["holdings_count"] == 1
 
+    response = client.delete(f"/api/v1/archives/{archive_id}")
+    assert response.status_code == 401, response.text
+    assert os.path.exists(archive_dir)
+
     response = client.delete(f"/api/v1/archives/{archive_id}", headers=headers)
     assert response.status_code == 204, response.text
     assert not os.path.exists(archive_dir)
     assert client.get(f"/api/v1/archives/{archive_id}", headers=headers).status_code == 404
+    assert client.delete(f"/api/v1/archives/{archive_id}", headers=headers).status_code == 404
 
     try:
         os.remove(os.environ["ADVISOR_DB_PATH"])

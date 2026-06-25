@@ -1,12 +1,13 @@
 """File-backed analysis archives for advice Markdown, holdings JSON, and screenshot."""
 import base64
 import json
+import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -91,6 +92,90 @@ def _holdings_count(data: Any) -> int:
     if isinstance(data, dict) and isinstance(data.get("holdings"), list):
         return len(data["holdings"])
     return 0
+
+
+def _normalize_code(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    match = re.search(r"(\d{6})", text)
+    return match.group(1) if match else text
+
+
+def _holdings_list(data: Any) -> list[dict[str, Any]]:
+    rows = data.get("holdings") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return []
+    return [item for item in rows if isinstance(item, dict)]
+
+
+def _holding_identity(item: dict[str, Any]) -> tuple[str, str | None]:
+    code = _normalize_code(item.get("code") or item.get("symbol"))
+    name = item.get("name")
+    return code, str(name) if name is not None else None
+
+
+def _extract_advice_excerpt(advice_md: str, max_lines: int = 18) -> str:
+    keywords = ("买入", "加仓", "持有", "减仓", "卖出", "触发", "止损", "候选", "轮动", "观察")
+    selected: list[str] = []
+    for raw_line in advice_md.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if any(keyword in line for keyword in keywords):
+            selected.append(line)
+        if len(selected) >= max_lines:
+            break
+    if not selected:
+        selected = [line.strip() for line in advice_md.splitlines() if line.strip()][:6]
+    return "\n".join(selected)
+
+
+def _archive_codes(archive: models.Archive) -> set[str]:
+    return {
+        code
+        for code, _name in (_holding_identity(item) for item in _holdings_list(archive.holdings_json))
+        if code
+    }
+
+
+def _archive_context_payload(
+    archive: models.Archive,
+    advice_md: str,
+    include_advice: bool,
+) -> dict[str, Any]:
+    holdings = []
+    for item in _holdings_list(archive.holdings_json):
+        code, name = _holding_identity(item)
+        holdings.append(
+            {
+                "code": code,
+                "name": name,
+                "qty": item.get("qty"),
+                "available_qty": item.get("available_qty"),
+                "unavailable_qty": item.get("unavailable_qty"),
+                "cost": item.get("cost"),
+                "price": item.get("price"),
+                "market_value": item.get("market_value"),
+                "pnl": item.get("pnl"),
+                "pnl_amount": item.get("pnl_amount"),
+                "data_quality": item.get("data_quality"),
+                "availability_note": item.get("availability_note"),
+            }
+        )
+    payload = {
+        "id": archive.id,
+        "timestamp": archive.timestamp.isoformat(),
+        "checkpoint": archive.checkpoint,
+        "holdings_source": archive.holdings_source,
+        "data_quality_grade": archive.data_quality_grade,
+        "title": archive.title,
+        "holdings_count": len(holdings),
+        "has_screenshot": bool(archive.screenshot_filename),
+        "holdings": holdings,
+        "advice_excerpt": _extract_advice_excerpt(advice_md),
+    }
+    if include_advice:
+        payload["advice_md"] = advice_md
+    return payload
 
 
 # /*********************** 请求解析 *********************/
@@ -213,6 +298,85 @@ def list_archives(
         )
         for row in rows
     ]
+
+
+@router.get("/context")
+def get_archive_context(
+    codes: str | None = Query(None, description="Comma-separated stock codes"),
+    limit: int = Query(5, ge=1, le=20),
+    include_advice: bool = Query(False),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_token),
+) -> dict[str, Any]:
+    requested_codes = {
+        normalized
+        for raw in (codes or "").split(",")
+        if (normalized := _normalize_code(raw))
+    }
+    query = db.query(models.Archive).order_by(models.Archive.timestamp.desc(), models.Archive.id.desc())
+    rows = query.all() if requested_codes else query.limit(limit).all()
+
+    selected: list[models.Archive] = []
+    for row in rows:
+        if requested_codes and not (_archive_codes(row) & requested_codes):
+            continue
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+
+    archive_payloads: list[dict[str, Any]] = []
+    timeline_by_code: dict[str, list[dict[str, Any]]] = {}
+    latest_by_code: dict[str, dict[str, Any]] = {}
+    same_day_advice: list[dict[str, Any]] = []
+    today = datetime.now(UTC).date()
+
+    for row in selected:
+        advice_md = _read_text(_archive_dir(row.id) / row.advice_filename)
+        advice_excerpt = _extract_advice_excerpt(advice_md)
+        archive_payloads.append(_archive_context_payload(row, advice_md, include_advice))
+        if row.timestamp.date() == today:
+            same_day_advice.append(
+                {
+                    "archive_id": row.id,
+                    "timestamp": row.timestamp.isoformat(),
+                    "checkpoint": row.checkpoint,
+                    "data_quality_grade": row.data_quality_grade,
+                    "title": row.title,
+                    "advice_excerpt": advice_excerpt,
+                }
+            )
+
+        for item in _holdings_list(row.holdings_json):
+            code, name = _holding_identity(item)
+            if not code or (requested_codes and code not in requested_codes):
+                continue
+            timeline_item = {
+                "archive_id": row.id,
+                "timestamp": row.timestamp.isoformat(),
+                "checkpoint": row.checkpoint,
+                "data_quality_grade": row.data_quality_grade,
+                "title": row.title,
+                "code": code,
+                "name": name,
+                "qty": item.get("qty"),
+                "available_qty": item.get("available_qty"),
+                "unavailable_qty": item.get("unavailable_qty"),
+                "cost": item.get("cost"),
+                "price": item.get("price"),
+                "market_value": item.get("market_value"),
+                "pnl": item.get("pnl"),
+                "pnl_amount": item.get("pnl_amount"),
+                "advice_excerpt": advice_excerpt,
+            }
+            timeline_by_code.setdefault(code, []).append(timeline_item)
+            latest_by_code.setdefault(code, timeline_item)
+
+    return {
+        "archives": archive_payloads,
+        "timeline_by_code": timeline_by_code,
+        "latest_by_code": latest_by_code,
+        "same_day_advice": same_day_advice,
+    }
 
 
 @router.get("/{archive_id}")

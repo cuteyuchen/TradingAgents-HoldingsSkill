@@ -481,7 +481,7 @@ If a row is named "新标准券"/standard bond/treasury reverse repo/国债逆�
 append it to `holdings[]`; put it in `excluded_items[]` and account repo/unused
 funds fields.
 
-For quote failures, record the failed source chain in `missing_fields` and the visible evidence pack. If all quote routes fail for a confirmed holding, do not issue trading advice for that holding. Do not call legacy backend health-reporting endpoints; the active skill persistence contract is archive upload only.
+For quote failures, record the failed source chain in `missing_fields` and the visible evidence pack. If all quote routes fail for a confirmed holding, do not issue trading advice for that holding. Do not call legacy backend health-reporting endpoints; the active skill persistence contract is archive-only (`/archives/context` read in Phase 0, `/archives` upload after visible advice).
 
 ## Error Handling
 

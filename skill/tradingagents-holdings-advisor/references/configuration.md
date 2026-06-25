@@ -127,6 +127,9 @@ How much history to recall and how alpha is measured. See `trading-rules.md` and
 |---|---|---|
 | `memory_same_ticker_entries` | 5 | Recall last 5 same-ticker decisions (sliding window) |
 | `memory_cross_ticker_lessons` | 3 | Recall 3 cross-ticker lessons |
+| `archive_context_limit` | 5 | Fetch at most 5 recent archive snapshots per Phase 0 context lookup |
+| `same_day_reverse_requires_material_change` | true | Same-day add/buy -> reduce/sell reversal requires explicit material-change evidence |
+| `historical_reduction_check` | true | Before reduce/sell, compare current position against recent archive quantities and available quantities |
 | `alpha_benchmark` | CSI 300 (沪深300, 000300) | Benchmark for alpha calculation |
 | `alpha_window_fallback` | mark `[数据缺失]` | If benchmark price missing for the window, mark missing and lower alpha confidence |
 | `negative_alpha_sizing` | more conservative | Negative alpha → reduce confidence and tighten sizing on next decision |
@@ -162,8 +165,9 @@ When the companion persistence system is configured. See `persistence.md`.
 | Parameter | Default | Notes |
 |---|---|---|
 | `persistence_enabled` | false | Set true when `ADVISOR_API_URL` + `ADVISOR_TOKEN` are configured |
+| `archive_context_on_start` | true when persistence is configured | After current codes are confirmed, call `/archives/context` for recent advice and holdings timeline |
 | `archive_after_display` | true | Upload archive only after final advice is already visible to the user |
-| `fetch_history_on_start` | false | Use conversation or user-provided archive content only |
+| `fetch_history_on_start` | archive-context only | Use `/archives/context`; do not call legacy `/runs` or `/memory/context` |
 | `upload_failure_policy` | warn, do not block | On upload failure, finish advice to user and mark `[未持久化: 原因]`; never silently swallow |
 | `consecutive_failure_threshold` | 3 | After 3 consecutive data-fetch failures for a checkpoint, output a blocking quality warning and let the system flag that checkpoint grey (health linkage) |
 

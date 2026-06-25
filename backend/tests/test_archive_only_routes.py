@@ -33,6 +33,7 @@ def test_only_archive_auth_and_health_routes_are_exposed():
     assert client.get("/healthz").status_code == 200
     assert client.get("/api/v1/auth/verify", headers=headers).status_code == 200
     assert client.get("/api/v1/archives", headers=headers).status_code == 200
+    assert client.get("/api/v1/archives/context", headers=headers).status_code == 200
 
     removed_routes = [
         "/api/v1/runs",

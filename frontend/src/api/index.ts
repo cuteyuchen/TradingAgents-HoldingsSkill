@@ -2,6 +2,7 @@
 // are served from the same origin via docker-compose.
 
 import type {
+  ArchiveContext,
   ArchiveDetail,
   ArchiveSummary,
 } from './types'
@@ -56,4 +57,16 @@ export const api = {
   listArchives: (): Promise<ArchiveSummary[]> => request('/api/v1/archives'),
   getArchive: (id: number | string): Promise<ArchiveDetail> => request(`/api/v1/archives/${id}`),
   deleteArchive: (id: number | string): Promise<void> => request(`/api/v1/archives/${id}`, { method: 'DELETE' }),
+  getArchiveContext: (params: {
+    codes?: string[]
+    limit?: number
+    include_advice?: boolean
+  } = {}): Promise<ArchiveContext> => {
+    const query = new URLSearchParams()
+    if (params.codes?.length) query.set('codes', params.codes.join(','))
+    if (params.limit) query.set('limit', String(params.limit))
+    if (params.include_advice) query.set('include_advice', 'true')
+    const suffix = query.toString()
+    return request(`/api/v1/archives/context${suffix ? `?${suffix}` : ''}`)
+  },
 }
