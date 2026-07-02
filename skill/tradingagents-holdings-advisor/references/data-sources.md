@@ -132,7 +132,7 @@ Inspired by `TradingAgents-astock`'s 8 signal data tools:
 | Data Need | Primary Source | Fallback Chain | Notes |
 |---|---|---|---|
 | Stock news (个股新闻) | Eastmoney search/news | Sina Finance news | Company-specific, last 7 days preferred |
-| Global/macro news | CLS `cls.cn` telegraph (电报) | Eastmoney 7x24 → CCTV `news_cctv` | Separate company, sector, macro, overseas |
+| Global/macro news | CLS `cls.cn` telegraph (电报) | Eastmoney 7x24 → CCTV `news_cctv` | Separate company, sector, macro, overseas. Eastmoney fallback uses `getFastNewsList?client=web&biz=web_724&fastColumn=102&sortEnd=0&pageSize=5&req_trace=...`; the current page script is `https://kuaixun.eastmoney.com/emresource/main/js/kuaixun.js?v=2026.07.02.10`. |
 | Policy news | State/media/sector policy sources | Eastmoney/CLS filtered | Classify as supportive, restrictive, neutral |
 | Announcements (公告) | Eastmoney announcements | Sina/official filings | Company filings, regulatory notices |
 

@@ -524,8 +524,20 @@ def fetch_market_news(timeout_sec: float = 8.0) -> list[dict[str, Any]]:
         return items
 
     url = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
-    params = {"client": "web", "biz": "web_724", "fastColumn": "102", "pageSize": "5", "req_trace": str(uuid.uuid4())}
-    rows = (_em_get(url, params=params, headers={"Referer": "https://kuaixun.eastmoney.com/"}, timeout=timeout_sec).json().get("data", {}) or {}).get("fastNewsList") or []
+    params = {
+        "client": "web",
+        "biz": "web_724",
+        "fastColumn": "102",
+        "sortEnd": "0",
+        "pageSize": "5",
+        "req_trace": str(uuid.uuid4()),
+    }
+    payload = _em_get(url, params=params, headers={"Referer": "https://kuaixun.eastmoney.com/"}, timeout=timeout_sec).json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("fastNewsList") if isinstance(data, dict) else None
+    if not rows:
+        message = payload.get("message") if isinstance(payload, dict) else f"unexpected payload type: {type(payload).__name__}"
+        raise ValueError(f"Eastmoney 7x24 news failed: {message}")
     return [{"title": row.get("title"), "source": "Eastmoney 7x24", "time": row.get("showTime")} for row in rows[:5]]
 
 

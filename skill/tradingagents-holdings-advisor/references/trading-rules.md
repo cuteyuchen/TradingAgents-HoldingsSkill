@@ -34,12 +34,29 @@ For ETFs, use ETF-specific liquidity and tracking index strength, but still resp
 | Account exposure > 85% | Raise cash before considering new buys |
 | Market weak and holdings weak | Reduce first, no averaging down |
 | Market strong but heavy holdings weak | Use strength/liquidity to reduce weak holdings |
-| Heavy loser underperforms index/sector | Reduce; do not add until price reclaims key level with flow confirmation |
+| Heavy loser underperforms index/sector | Evidence-gated split: hold, conditional reduce, reduce, or conditional add; loss alone is not enough |
 | Winner stronger than index | Hold or partial take-profit; do not sell first just to raise cash |
 | Small position with no red flag | Usually hold unless it distracts capital |
 | New red-flag announcement | Reduce even if intraday price is stable |
 | Data quality C or worse | Smaller action size; avoid new buys |
 | Past decision on same ticker was wrong | Reduce confidence; apply more conservative sizing |
+
+## Loss Position Decision Gate
+
+亏损不是减仓的充分条件。Treat loss as a risk input, not the final action. For
+every losing holding, classify the action from current evidence:
+
+| Evidence Pattern | Allowed Action |
+|---|---|
+| Price is above open/previous close, sector is firm, fund flow is stable or improving, and no fresh red-flag news | Hold; if account exposure allows, use conditional add only after the trigger confirms |
+| Price is mixed, sector is not breaking down, fund flow is unclear, and no hard risk exists | Hold or watch; set a conditional reduce trigger below support/open/previous close |
+| Price is below open and previous close, underperforms index/sector, and fund flow or VPA confirms weakness | Conditional reduce or staged reduce from `available_qty` |
+| Fresh negative announcement, lockup/reduction pressure, ST/delist risk, thesis broken, or limit-down liquidity risk | Reduce or sell as risk control, even if the position is already losing |
+
+Sell/reduce recommendations for losing holdings must name the confirming
+evidence: relative weakness, broken support, capital outflow, sector rollover,
+negative news, oversized exposure, or T+1/price-limit risk. If those evidence
+items are absent, default to hold/watch with explicit invalidation triggers.
 
 ## Dual-Horizon Position Rules
 
