@@ -193,6 +193,135 @@ class MarketSnapshotTest(unittest.TestCase):
         self.assertTrue(sector_blocked["action_allowed"])
         self.assertFalse(sector_blocked["new_buy_allowed"])
 
+    def test_eastmoney_news_fallback_uses_sort_end_zero(self):
+        market_snapshot = load_module()
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload=None, should_raise=False):
+                self.payload = payload or {}
+                self.should_raise = should_raise
+
+            def json(self):
+                if self.should_raise:
+                    raise RuntimeError("CLS unavailable")
+                return self.payload
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def get(self, url, params=None, headers=None, timeout=None):
+                calls.append({"url": url, "params": params})
+                if "cls.cn" in url:
+                    return FakeResponse(should_raise=True)
+                return FakeResponse(
+                    {
+                        "code": "1",
+                        "message": "success",
+                        "data": {
+                            "fastNewsList": [
+                                {"title": "贵金属概念走强", "showTime": "2026-07-02 10:38:26"},
+                            ],
+                        },
+                    }
+                )
+
+        original_session = market_snapshot._SESSION
+        original_interval = market_snapshot.EM_MIN_INTERVAL_SEC
+        original_uniform = market_snapshot.random.uniform
+        try:
+            market_snapshot._SESSION = FakeSession()
+            market_snapshot.EM_MIN_INTERVAL_SEC = 0
+            market_snapshot.random.uniform = lambda _a, _b: 0
+            result = market_snapshot.fetch_market_news(1)
+        finally:
+            market_snapshot._SESSION = original_session
+            market_snapshot.EM_MIN_INTERVAL_SEC = original_interval
+            market_snapshot.random.uniform = original_uniform
+
+        self.assertEqual(result, [{"title": "贵金属概念走强", "source": "Eastmoney 7x24", "time": "2026-07-02 10:38:26"}])
+        self.assertEqual(calls[-1]["params"]["sortEnd"], "0")
+
+    def test_eastmoney_news_parameter_error_is_recorded_as_market_news_missing(self):
+        market_snapshot = load_module()
+
+        def quote_fetcher(_holdings):
+            return {"600519": {"code": "600519", "price": 1200.0, "source": "fake"}}
+
+        def holding_enricher(holding):
+            holding["data_quality"] = market_snapshot.grade_holding_quality(holding)
+            return holding, [], []
+
+        original_indices = market_snapshot._fetch_tencent_symbol_list
+        original_hot = market_snapshot.fetch_hot_sectors
+        original_northbound = market_snapshot.fetch_northbound_flow
+        original_news = market_snapshot.fetch_market_news
+        try:
+            market_snapshot._fetch_tencent_symbol_list = lambda _symbols, _timeout: {"000001": {"code": "000001"}}
+            market_snapshot.fetch_hot_sectors = lambda _timeout: [{"name": "贵金属"}]
+            market_snapshot.fetch_northbound_flow = lambda _timeout: {"source": "fake", "history": [{"date": "2026-07-02"}]}
+            market_snapshot.fetch_market_news = lambda _timeout: (_ for _ in ()).throw(
+                ValueError("Eastmoney 7x24 news failed: Required String parameter 'sortEnd' is not present")
+            )
+
+            snapshot = market_snapshot.build_snapshot(
+                [{"code": "600519", "name": "贵州茅台"}],
+                quote_fetcher,
+                lambda: market_snapshot.fetch_market_context(1),
+                holding_enricher,
+            )
+        finally:
+            market_snapshot._fetch_tencent_symbol_list = original_indices
+            market_snapshot.fetch_hot_sectors = original_hot
+            market_snapshot.fetch_northbound_flow = original_northbound
+            market_snapshot.fetch_market_news = original_news
+
+        self.assertIn("market.news", snapshot["missing_fields"])
+        self.assertTrue(any("Required String parameter 'sortEnd'" in error for error in snapshot["errors"]))
+
+    def test_eastmoney_news_data_null_raises_diagnostic_error(self):
+        market_snapshot = load_module()
+
+        class FakeResponse:
+            def __init__(self, payload=None, should_raise=False):
+                self.payload = payload or {}
+                self.should_raise = should_raise
+
+            def json(self):
+                if self.should_raise:
+                    raise RuntimeError("CLS unavailable")
+                return self.payload
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def get(self, url, params=None, headers=None, timeout=None):
+                if "cls.cn" in url:
+                    return FakeResponse(should_raise=True)
+                return FakeResponse({"code": 0, "message": "Required String parameter 'sortEnd' is not present", "data": None})
+
+        original_session = market_snapshot._SESSION
+        original_interval = market_snapshot.EM_MIN_INTERVAL_SEC
+        original_uniform = market_snapshot.random.uniform
+        try:
+            market_snapshot._SESSION = FakeSession()
+            market_snapshot.EM_MIN_INTERVAL_SEC = 0
+            market_snapshot.random.uniform = lambda _a, _b: 0
+            with self.assertRaisesRegex(ValueError, "sortEnd"):
+                market_snapshot.fetch_market_news(1)
+        finally:
+            market_snapshot._SESSION = original_session
+            market_snapshot.EM_MIN_INTERVAL_SEC = original_interval
+            market_snapshot.random.uniform = original_uniform
+
+    def test_trading_rules_make_loss_an_evidence_input_not_an_auto_reduce_trigger(self):
+        rules = (SCRIPT_PATH.parents[1] / "references" / "trading-rules.md").read_text(encoding="utf-8")
+
+        self.assertIn("亏损不是减仓的充分条件", rules)
+        self.assertNotIn("Heavy loser underperforms index/sector | Reduce;", rules)
+
 
 if __name__ == "__main__":
     unittest.main()
