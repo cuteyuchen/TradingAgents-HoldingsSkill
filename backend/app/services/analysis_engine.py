@@ -1,8 +1,9 @@
-"""Portfolio-aware analysis job runner built around the repository's holdings Skill rules."""
+"""Portfolio-aware analysis job runner built around the holdings Skill rules."""
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,9 +11,9 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal
-from ..v2_models import AnalysisJob, AnalysisRun, HoldingItem, ModelProfile, PortfolioSnapshot
-from .market_data import collect_market_snapshot
-from .model_client import ModelCallError, call_model, parse_json_result
+from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
+from .market_data import collect_market_snapshot, refresh_snapshot_quotes
+from .model_client import call_model, parse_json_result
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +23,10 @@ CORE_RULES = """
 - 本次确认的持仓快照是当前持仓的唯一真实来源，历史只能用于一致性检查。
 - qty 是总持仓，available_qty 是当前可卖数量；减仓/卖出数量不得超过 available_qty。
 - qty-available_qty 可能来自挂单、冻结或 T+1，不能推断为已经卖出。
-- 亏损是风险输入，不是自动卖出理由。必须结合技术、资金、事件和组合风险。
+- 亏损是风险输入，不是自动卖出理由，必须结合技术、资金、事件和组合风险。
 - 同日或近期建议发生方向反转，必须指出发生了什么实质变化。
 - 缺少关键行情时，不得编造触发价和具体数量。
-- 输出必须区分事实、推断和风险，并包含失效条件。
+- 事实、推断、风险和失效条件必须区分。
 - 这是研究辅助，不承诺收益，不执行交易。
 """.strip()
 
@@ -82,7 +83,11 @@ def _job_stage(db: Session, job: AnalysisJob, stage: str, progress: int) -> None
 def _profile(db: Session, user_id: int, purpose: str) -> ModelProfile | None:
     return (
         db.query(ModelProfile)
-        .filter(ModelProfile.user_id == user_id, ModelProfile.purpose == purpose, ModelProfile.is_default.is_(True))
+        .filter(
+            ModelProfile.user_id == user_id,
+            ModelProfile.purpose == purpose,
+            ModelProfile.is_default.is_(True),
+        )
         .first()
     )
 
@@ -115,31 +120,37 @@ def _history(db: Session, job: AnalysisJob) -> list[dict[str, Any]]:
         .limit(settings.ANALYSIS_HISTORY_LIMIT)
         .all()
     )
-    return [
-        {
-            "run_id": row.id,
-            "created_at": row.created_at.isoformat(),
-            "summary": row.summary,
-            "final_rating": row.final_rating,
-            "cash_target": row.cash_target,
-            "confidence": row.confidence,
-            "holdings": (row.structured_result_json or {}).get("holdings", []),
-            "history_consistency": (row.structured_result_json or {}).get("history_consistency"),
-        }
-        for row in rows
-    ]
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        result = (row.structured_result_json or {}).get("result", {})
+        history.append(
+            {
+                "run_id": row.id,
+                "created_at": row.created_at.isoformat(),
+                "summary": row.summary,
+                "final_rating": row.final_rating,
+                "cash_target": row.cash_target,
+                "confidence": row.confidence,
+                "holdings": result.get("holdings", []),
+                "history_consistency": result.get("history_consistency"),
+            }
+        )
+    return history
 
 
 def _call_json(profile: ModelProfile, system: str, payload: dict[str, Any], instruction: str) -> dict[str, Any]:
-    result = call_model(
+    response = call_model(
         profile,
         [
             {"role": "system", "content": system},
-            {"role": "user", "content": instruction + "\n\n输入数据：\n" + json.dumps(payload, ensure_ascii=False, default=str)},
+            {
+                "role": "user",
+                "content": instruction + "\n\n输入数据：\n" + json.dumps(payload, ensure_ascii=False, default=str),
+            },
         ],
         json_mode=True,
     )
-    return parse_json_result(result)
+    return parse_json_result(response)
 
 
 def _blocked_result(snapshot: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
@@ -175,39 +186,63 @@ def _blocked_result(snapshot: dict[str, Any], market: dict[str, Any]) -> dict[st
     }
 
 
+def _numeric_quantity(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str) or "%" in value:
+        return None
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:股|份)?\s*", value)
+    return float(match.group(1)) if match else None
+
+
 def _normalize_final(result: dict[str, Any], holdings: list[dict[str, Any]], quality_grade: str) -> dict[str, Any]:
-    result.setdefault("data_quality_grade", quality_grade)
-    result.setdefault("market_read", "")
-    result.setdefault("portfolio_conclusion", "")
-    result.setdefault("final_rating", "watch_only")
-    result.setdefault("cash_target", "未给出")
-    result.setdefault("confidence", "low")
-    result.setdefault("holdings", [])
-    result.setdefault("candidates", [])
-    result.setdefault("history_consistency", "")
-    result.setdefault("bull_case", [])
-    result.setdefault("bear_case", [])
-    result.setdefault("unresolved_claims", [])
-    result.setdefault("risk_warnings", [])
-    result.setdefault("evidence", [])
+    defaults = {
+        "data_quality_grade": quality_grade,
+        "market_read": "",
+        "portfolio_conclusion": "",
+        "final_rating": "watch_only",
+        "cash_target": "未给出",
+        "confidence": "low",
+        "holdings": [],
+        "candidates": [],
+        "history_consistency": "",
+        "bull_case": [],
+        "bear_case": [],
+        "unresolved_claims": [],
+        "risk_warnings": [],
+        "evidence": [],
+    }
+    for key, value in defaults.items():
+        result.setdefault(key, value)
+
     by_code = {item["code"]: item for item in holdings}
     output_rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for row in result.get("holdings") or []:
-        if not isinstance(row, dict):
+    for raw in result.get("holdings") or []:
+        if not isinstance(raw, dict):
             continue
+        row = dict(raw)
         code = str(row.get("code") or "").strip()
         if code not in by_code or code in seen:
             continue
         seen.add(code)
         source = by_code[code]
+        available = source.get("available_qty")
         row["name"] = row.get("name") or source.get("name")
-        row["max_sellable_qty"] = source.get("available_qty")
-        if str(row.get("action", "")).lower() in {"reduce", "sell"} and source.get("available_qty") in (None, 0):
-            row["action"] = "watch"
-            row["quantity"] = None
-            row["reason"] = (str(row.get("reason") or "") + " 当前无可卖数量，动作降级为观察。").strip()
+        row["max_sellable_qty"] = available
+        action = str(row.get("action") or "watch").lower()
+        if action in {"reduce", "sell"}:
+            if available in (None, 0):
+                row["action"] = "watch"
+                row["quantity"] = None
+                row["reason"] = (str(row.get("reason") or "") + " 当前无可卖数量，动作降级为观察。").strip()
+            else:
+                numeric = _numeric_quantity(row.get("quantity"))
+                if numeric is not None and numeric > float(available):
+                    row["quantity"] = str(available)
+                    row["reason"] = (str(row.get("reason") or "") + " 卖出数量已按当前可用数量上限修正。").strip()
         output_rows.append(row)
+
     for code, source in by_code.items():
         if code not in seen:
             output_rows.append(
@@ -225,6 +260,20 @@ def _normalize_final(result: dict[str, Any], holdings: list[dict[str, Any]], qua
                 }
             )
     result["holdings"] = output_rows
+
+    holding_actions = {row["code"]: str(row.get("action") or "watch").lower() for row in output_rows}
+    filtered_candidates: list[dict[str, Any]] = []
+    for candidate in result.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        code = str(candidate.get("code") or "").strip()
+        if code in holding_actions and holding_actions[code] not in {"add"}:
+            result["risk_warnings"].append(
+                f"候选 {code} 与当前持仓动作冲突，已从买入候选中移除。"
+            )
+            continue
+        filtered_candidates.append(candidate)
+    result["candidates"] = filtered_candidates
     return result
 
 
@@ -247,16 +296,18 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
         "",
         "## 今日持仓操作",
         "",
-        "| 标的 | 操作 | 条件/触发 | 数量 | 关键原因 | 风险/失效 |",
-        "|---|---|---|---:|---|---|",
+        "| 标的 | 操作 | 条件/触发 | 数量 | 最大可卖 | 关键原因 | 风险/失效 |",
+        "|---|---|---|---:|---:|---|---|",
     ]
     for row in result.get("holdings", []):
         name = f"{row.get('name') or ''}（{row.get('code') or ''}）"
         risk = row.get("risk") or row.get("stop_loss") or "-"
         lines.append(
             f"| {name} | {row.get('action') or '-'} | {row.get('trigger') or '-'} | {row.get('quantity') or '-'} | "
+            f"{row.get('max_sellable_qty') if row.get('max_sellable_qty') is not None else '-'} | "
             f"{str(row.get('reason') or '-').replace('|', '｜')} | {str(risk).replace('|', '｜')} |"
         )
+
     lines.extend(["", "## 买入与轮动候选", ""])
     candidates = result.get("candidates") or []
     if candidates:
@@ -267,6 +318,7 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
             )
     else:
         lines.append("- 当前没有通过风险门控的新增候选。")
+
     lines.extend(["", "## 历史一致性", "", result.get("history_consistency") or "暂无历史上下文。"])
     lines.extend(["", "## 多空证据", "", "### 多头", ""])
     lines.extend([f"- {item}" for item in result.get("bull_case", [])] or ["- 暂无"])
@@ -276,9 +328,14 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
     warnings = list(result.get("risk_warnings", [])) + list(result.get("unresolved_claims", []))
     lines.extend([f"- {item}" for item in warnings] or ["- 暂无"])
     lines.extend(["", "## 数据证据", ""])
-    lines.extend([f"- {item}" for item in result.get("evidence", [])] or [f"- {item}" for item in market.get("source_chain", [])])
+    lines.extend(
+        [f"- {item}" for item in result.get("evidence", [])]
+        or [f"- {item}" for item in market.get("source_chain", [])]
+    )
     lines.extend(
         [
+            "",
+            f"- 最终行情刷新：{market.get('final_quote_refresh_status', '未执行')} / {market.get('final_quote_refresh_at', '-')}",
             "",
             "## 持仓资金摘要",
             "",
@@ -328,12 +385,19 @@ def run_analysis_job(job_id: int) -> None:
         if market.get("quality_grade") == "F":
             final = _blocked_result(snapshot, market)
             final_profile = None
+            market = refresh_snapshot_quotes(market, codes)
         else:
             quick_profile = _profile(db, job.user_id, "analysis")
             deep_profile = _profile(db, job.user_id, "deep_analysis") or quick_profile
             if quick_profile is None and deep_profile is None:
                 raise RuntimeError("default_analysis_model_not_configured")
-            input_payload = {"snapshot": snapshot, "market": market, "recent_history": history, "checkpoint": job.checkpoint}
+
+            input_payload = {
+                "snapshot": snapshot,
+                "market": market,
+                "recent_history": history,
+                "checkpoint": job.checkpoint,
+            }
             evidence: dict[str, Any] = {}
             debate: dict[str, Any] = {}
             if job.mode == "deep":
@@ -342,7 +406,8 @@ def run_analysis_job(job_id: int) -> None:
                     quick_profile or deep_profile,
                     CORE_RULES,
                     input_payload,
-                    "从市场、技术、资金可用性、组合集中度和历史一致性五个角度形成证据包。输出 JSON："
+                    "从行情、技术、主力资金、近期公告、资金可用性、组合集中度和历史一致性形成证据包。"
+                    "输出 JSON："
                     '{"market_read":"", "holding_evidence":[], "portfolio_risks":[], "data_gaps":[], "quality_grade":"A-F"}',
                 )
                 _job_stage(db, job, "investment_debate", 55)
@@ -353,13 +418,23 @@ def run_analysis_job(job_id: int) -> None:
                     "进行 Claim 驱动的多空辩论。输出 JSON："
                     '{"bull_case":[], "bear_case":[], "resolved_claims":[], "unresolved_claims":[], "manager_verdict":""}',
                 )
-            _job_stage(db, job, "portfolio_synthesis", 72)
+
+            _job_stage(db, job, "final_quote_refresh", 68)
+            market = refresh_snapshot_quotes(market, codes)
+            input_payload["market"] = market
+            _job_stage(db, job, "portfolio_synthesis", 76)
             final_profile = deep_profile or quick_profile
             final = _call_json(
                 final_profile,
                 CORE_RULES,
-                {"input": input_payload, "evidence_pack": evidence, "debate": debate, "required_schema": FINAL_SCHEMA},
-                "生成可执行但风险受控的最终组合结论。严格按 required_schema 返回 JSON；每个当前持仓都必须出现。",
+                {
+                    "input": input_payload,
+                    "evidence_pack": evidence,
+                    "debate": debate,
+                    "required_schema": FINAL_SCHEMA,
+                },
+                "基于最终刷新后的行情生成风险受控的组合结论。严格按 required_schema 返回 JSON；"
+                "每个当前持仓都必须出现。",
             )
             if debate:
                 final.setdefault("bull_case", debate.get("bull_case", []))
@@ -367,7 +442,7 @@ def run_analysis_job(job_id: int) -> None:
                 final.setdefault("unresolved_claims", debate.get("unresolved_claims", []))
             final = _normalize_final(final, snapshot["holdings"], market.get("quality_grade", "C"))
 
-        _job_stage(db, job, "report_rendering", 88)
+        _job_stage(db, job, "report_rendering", 90)
         markdown = render_markdown(final, market, snapshot, job)
         run = AnalysisRun(
             job_id=job.id,
@@ -379,7 +454,12 @@ def run_analysis_job(job_id: int) -> None:
             final_rating=final.get("final_rating"),
             cash_target=final.get("cash_target"),
             confidence=final.get("confidence"),
-            structured_result_json={"result": final, "market_snapshot": market, "input_snapshot": snapshot, "history_used": history},
+            structured_result_json={
+                "result": final,
+                "market_snapshot": market,
+                "input_snapshot": snapshot,
+                "history_used": history,
+            },
             markdown_text=markdown,
         )
         db.add(run)
