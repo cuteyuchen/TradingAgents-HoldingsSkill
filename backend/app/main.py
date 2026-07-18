@@ -15,17 +15,22 @@ logger = logging.getLogger("advisor")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DB and ensure the access token exists."""
+    """Initialize legacy and V2 tables and keep V1 archive auth compatible."""
     init_db()
     token = auth.ensure_token()
-    logger.info("ADVISOR_TOKEN in use: %s", token[:12] + "...")
+    logger.info("Legacy ADVISOR_TOKEN in use: %s", token[:12] + "...")
+    if settings.APP_SECRET_KEY == "dev-only-change-me":
+        logger.warning("APP_SECRET_KEY uses the development default; set a stable secret in production.")
     yield
 
 
 app = FastAPI(
-    title="Daily Holdings Trading Advisor Archive API",
-    description="Stores completed advice archives with screenshot, parsed holdings JSON, and advice Markdown.",
-    version="0.1.0",
+    title="TradingAgents Holdings Advisor API",
+    description=(
+        "V1 archive compatibility API plus V2 user authentication and per-user "
+        "model configuration foundations."
+    ),
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -37,15 +42,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# /*********************** 归档接口注册 *********************/
+# V1 compatibility routes.
 from .routers import archives  # noqa: E402
 
 app.include_router(archives.router)
 
+# V2 product routes.
+from .routers import auth_v2, model_settings_v2  # noqa: E402
+
+app.include_router(auth_v2.router)
+app.include_router(model_settings_v2.router)
+
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": app.version}
 
 
 @app.get("/api/v1/auth/verify")
