@@ -3,6 +3,10 @@ import os
 from functools import lru_cache
 
 
+def _bool_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+
 class Settings:
     """Runtime settings for the legacy archive API and the V2 application."""
 
@@ -14,32 +18,25 @@ class Settings:
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_TOKEN_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_MINUTES", "15"))
     JWT_REFRESH_TOKEN_DAYS: int = int(os.getenv("JWT_REFRESH_TOKEN_DAYS", "30"))
-    ALLOW_REGISTRATION: bool = os.getenv("ALLOW_REGISTRATION", "true").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    ALLOW_REGISTRATION: bool = _bool_env("ALLOW_REGISTRATION", "true")
 
-    # Database: SQLite single file for local/self-hosted use. PostgreSQL support
-    # will be introduced after the V2 schema is fully migrated through Alembic.
+    # Database and files.
     DB_PATH: str = os.getenv(
         "ADVISOR_DB_PATH",
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data",
-            "advisor.db",
-        ),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "advisor.db"),
     )
     ARTIFACTS_DIR: str = os.getenv(
         "ADVISOR_ARTIFACTS_DIR",
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "data",
-            "artifacts",
-        ),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "artifacts"),
     )
     SQLITE_JOURNAL_MODE: str = os.getenv("ADVISOR_SQLITE_JOURNAL_MODE", "").upper()
+    MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(12 * 1024 * 1024)))
+
+    # Analysis and scheduler.
+    ANALYSIS_HISTORY_LIMIT: int = int(os.getenv("ANALYSIS_HISTORY_LIMIT", "5"))
+    SCHEDULER_ENABLED: bool = _bool_env("SCHEDULER_ENABLED", "true")
+    SCHEDULER_INTERVAL_SECONDS: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
+    PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "http://localhost:8080").rstrip("/")
 
     # Server.
     HOST: str = os.getenv("ADVISOR_HOST", "0.0.0.0")
