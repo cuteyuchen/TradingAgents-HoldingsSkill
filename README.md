@@ -140,15 +140,7 @@ OpenAI Compatible 可接入 vLLM、LM Studio、llama.cpp、自定义中转服务
 
 ## 自动分析
 
-在“系统设置 → 自动分析”配置：
-
-- 组合。
-- 时区。
-- 小时和分钟。
-- 快速或深度分析。
-- 持仓过期天数。
-- 是否通知。
-- 连续失败阈值。
+在“系统设置 → 自动分析”配置：组合、时区、执行时间、分析模式、持仓过期天数、是否通知和连续失败阈值。
 
 执行前系统会：
 
@@ -162,15 +154,7 @@ OpenAI Compatible 可接入 vLLM、LM Studio、llama.cpp、自定义中转服务
 
 ## 钉钉与企业微信
 
-支持：
-
-- 钉钉自定义机器人 Webhook。
-- 钉钉加签 Secret。
-- 企业微信群机器人 Webhook。
-- 测试发送。
-- 分析完成后发送摘要和报告链接。
-
-服务端只允许钉钉和企业微信官方 Webhook 域名，避免通过通知配置访问任意内网地址。通知失败不会改变分析报告的成功状态。
+支持钉钉自定义机器人、钉钉加签 Secret、企业微信群机器人、测试发送，以及分析完成后的摘要和报告链接。服务端只允许官方 Webhook 域名，通知失败不会改变分析报告的成功状态。
 
 ## API 概览
 
@@ -227,9 +211,7 @@ GET    /api/v1/archives/{id}
 DELETE /api/v1/archives/{id}
 ```
 
-## 本地开发
-
-后端：
+## 本地开发与测试
 
 ```bash
 cd backend
@@ -238,39 +220,39 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 alembic upgrade head
+pytest tests -q
 uvicorn app.main:app --reload
 ```
-
-前端：
 
 ```bash
 cd frontend
 npm install
+npm run typecheck
+npm run build
 npm run dev
 ```
 
-## 测试
-
 ```bash
-cd backend
-pip install pytest
-pytest tests -q
-
-cd ../frontend
-npm install
-npm run typecheck
-npm run build
-
-cd ..
 docker compose build
+docker compose up -d
 ```
 
-GitHub Actions 会执行：
+GitHub Actions 会执行 Alembic 空库升级与重复升级、全部后端测试、前端 TypeScript 类型检查与构建，以及 Docker Compose 镜像构建。
 
-- Alembic 在空数据库升级并重复升级。
-- 全部后端测试。
-- 前端 TypeScript 类型检查与构建。
-- Docker Compose 镜像构建。
+## Codex 验证清单
+
+自动化测试使用模拟模型和模拟市场快照验证核心约束。交付前建议 Codex 在独立环境补充以下真实链路测试：
+
+1. 使用实际视觉模型解析至少三种不同券商截图，核对代码、总持仓、可用数量、成本、盈亏金额与盈亏率。
+2. 分别验证项目实际准备使用的 OpenAI Compatible、Anthropic 或 Gemini 模型接口。
+3. 在交易时段和收盘后验证腾讯行情、东财 K 线、资金流与公告字段。
+4. 验证行情不可用时是否降级为 `watch_only`，且不产生具体买卖数量。
+5. 构造 `available_qty=0` 和卖出数量超过可用数量的结果，确认服务端会阻断或修正。
+6. 连续上传不同持仓，检查历史上下文、已执行减仓识别和反向建议说明。
+7. 使用真实钉钉与企业微信机器人验证普通 Webhook、钉钉加签和报告链接。
+8. 验证定时任务在交易日、非交易日、过期持仓和连续失败时的行为。
+9. 使用已有 V1 SQLite 数据库升级，核对旧归档数量、截图文件和兼容接口。
+10. 重启容器后确认用户、模型密钥、Webhook、持仓快照和报告均可恢复。
 
 ## 目录结构
 
@@ -284,6 +266,7 @@ backend/
 │   │   ├── holdings_service.py  # 持仓解析与校验
 │   │   ├── market_data.py       # 集中市场证据快照
 │   │   ├── analysis_engine.py   # 分析任务编排
+│   │   ├── skill_runtime.py     # 从仓库 Skill 加载版本化规则
 │   │   ├── scheduler.py         # 自动分析
 │   │   └── notifications.py     # 钉钉/企微
 │   ├── v2_models.py
@@ -303,6 +286,7 @@ frontend/src/
 
 skill/tradingagents-holdings-advisor/
 ├── SKILL.md
+├── runtime.json               # 后端实际加载的规则与版本
 ├── references/
 └── scripts/
 ```
