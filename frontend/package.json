@@ -1,6 +1,6 @@
 {
   "name": "advisor-frontend",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,8 @@
     "lucide-vue-next": "^0.468.0",
     "markdown-it": "^14.1.0",
     "naive-ui": "^2.40.3",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
