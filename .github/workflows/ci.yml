@@ -19,7 +19,7 @@ jobs:
         working-directory: backend
     env:
       APP_SECRET_KEY: ci-secret-key-at-least-32-bytes-long
-      ADVISOR_TOKEN: ci-legacy-token
+      ADVISOR_TOKEN: test_token_xxx
       ADVISOR_SQLITE_JOURNAL_MODE: MEMORY
       SCHEDULER_ENABLED: "false"
     steps:
