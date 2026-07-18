@@ -1,6 +1,8 @@
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: advisor-backend
     environment:
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
@@ -17,6 +19,7 @@ services:
       - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-true}
       - SCHEDULER_INTERVAL_SECONDS=${SCHEDULER_INTERVAL_SECONDS:-60}
       - PUBLIC_APP_URL=${PUBLIC_APP_URL:-http://localhost:8080}
+      - HOLDINGS_SKILL_DIR=/app/skill/tradingagents-holdings-advisor
     volumes:
       - advisor-data:/app/data
     ports:
