@@ -8,6 +8,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import event
+
+from ..v2_models import AnalysisRun
+
 
 class SkillRuntimeError(RuntimeError):
     pass
@@ -16,7 +20,7 @@ class SkillRuntimeError(RuntimeError):
 def _candidate_paths() -> list[Path]:
     configured = os.getenv("HOLDINGS_SKILL_DIR")
     current = Path(__file__).resolve()
-    candidates = []
+    candidates: list[Path] = []
     if configured:
         candidates.append(Path(configured))
     # Docker layout: /app/app/services -> /app/skill
@@ -73,3 +77,11 @@ def runtime_metadata() -> dict[str, Any]:
         "runtime_sha256": runtime["runtime_sha256"],
         "upstream_references": runtime.get("upstream_references", []),
     }
+
+
+@event.listens_for(AnalysisRun, "before_insert")
+def _attach_skill_runtime_metadata(_mapper, _connection, target: AnalysisRun) -> None:
+    """Persist the exact Skill version and hash used for every report."""
+    payload = dict(target.structured_result_json or {})
+    payload["skill_runtime"] = runtime_metadata()
+    target.structured_result_json = payload
