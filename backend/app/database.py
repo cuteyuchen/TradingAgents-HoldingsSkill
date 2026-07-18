@@ -29,6 +29,7 @@ def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
         finally:
             cursor.close()
 
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
@@ -45,12 +46,21 @@ def init_db() -> None:
 
 
 def _apply_lightweight_migrations() -> None:
-    """SQLite-friendly schema updates for the legacy no-Alembic tables.
+    """SQLite-friendly compatibility updates for existing local databases.
 
-    New V2 schema changes will move to Alembic. This compatibility block remains
-    temporarily so existing advisor.db files continue to start safely.
+    Docker deployments run Alembic before application startup. This block remains
+    intentionally small so developers who launch uvicorn directly can also open an
+    older advisor.db without losing data.
     """
     inspector = inspect(engine)
+
+    if inspector.has_table("users"):
+        user_columns = {c["name"] for c in inspector.get_columns("users")}
+        if "timezone" not in user_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'"
+                ))
 
     if inspector.has_table("runs"):
         run_columns = {c["name"] for c in inspector.get_columns("runs")}
