@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import math
+import random
 import re
+import threading
+import time
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,6 +14,8 @@ import requests
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
+_EM_LOCK = threading.Lock()
+_EM_LAST_CALL = 0.0
 
 
 def normalize_code(value: str) -> str:
@@ -45,6 +50,25 @@ def _decode(data: bytes) -> str:
         except UnicodeDecodeError:
             pass
     return data.decode("utf-8", errors="replace")
+
+
+def _em_get(url: str, *, params: dict[str, Any], timeout: float = 12.0) -> requests.Response:
+    """Serialize Eastmoney requests to reduce temporary IP blocking."""
+    global _EM_LAST_CALL
+    with _EM_LOCK:
+        elapsed = time.monotonic() - _EM_LAST_CALL
+        if elapsed < 0.8:
+            time.sleep(0.8 - elapsed)
+        time.sleep(random.uniform(0.05, 0.2))
+        response = requests.get(
+            url,
+            params=params,
+            headers={"User-Agent": USER_AGENT, "Referer": "https://quote.eastmoney.com/"},
+            timeout=timeout,
+        )
+        _EM_LAST_CALL = time.monotonic()
+    response.raise_for_status()
+    return response
 
 
 def _parse_tencent_line(line: str) -> dict[str, Any] | None:
@@ -111,14 +135,7 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
         "fields1": "f1,f2,f3,f4,f5,f6,f7,f8",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
     }
-    response = requests.get(
-        "https://push2his.eastmoney.com/api/qt/stock/kline/get",
-        params=params,
-        headers={"User-Agent": USER_AGENT, "Referer": "https://quote.eastmoney.com/"},
-        timeout=12,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    payload = _em_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", params=params).json()
     rows = ((payload.get("data") or {}).get("klines") or [])
     closes: list[float] = []
     volumes: list[float] = []
@@ -133,7 +150,16 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
             continue
         closes.append(close)
         volumes.append(volume or 0)
-        parsed_rows.append({"date": fields[0], "open": _float(fields[1]), "close": close, "high": _float(fields[3]), "low": _float(fields[4]), "volume": volume})
+        parsed_rows.append(
+            {
+                "date": fields[0],
+                "open": _float(fields[1]),
+                "close": close,
+                "high": _float(fields[3]),
+                "low": _float(fields[4]),
+                "volume": volume,
+            }
+        )
     latest = parsed_rows[-1] if parsed_rows else None
     ma5 = sum(closes[-5:]) / min(len(closes), 5) if closes else None
     ma20 = sum(closes[-20:]) / min(len(closes), 20) if closes else None
@@ -161,34 +187,139 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
     }
 
 
+def fetch_fund_flow(code: str) -> dict[str, Any]:
+    """Fetch the latest main/small/medium/large/super-large net flow row."""
+    params = {
+        "lmt": "1",
+        "klt": "1",
+        "secid": eastmoney_secid(code),
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56",
+    }
+    payload = _em_get("https://push2his.eastmoney.com/api/qt/stock/fflow/kline/get", params=params).json()
+    rows = ((payload.get("data") or {}).get("klines") or [])
+    if not rows:
+        return {"code": normalize_code(code), "source": "Eastmoney push2his fund flow", "error": "fund_flow_missing"}
+    fields = str(rows[-1]).split(",")
+    return {
+        "code": normalize_code(code),
+        "date": fields[0] if fields else None,
+        "main_net": _float(fields[1]) if len(fields) > 1 else None,
+        "small_net": _float(fields[2]) if len(fields) > 2 else None,
+        "medium_net": _float(fields[3]) if len(fields) > 3 else None,
+        "large_net": _float(fields[4]) if len(fields) > 4 else None,
+        "super_large_net": _float(fields[5]) if len(fields) > 5 else None,
+        "source": "Eastmoney push2his fund flow",
+    }
+
+
+def fetch_announcements(code: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Fetch recent company announcements as an event-risk evidence source."""
+    params = {
+        "sr": "-1",
+        "page_size": str(limit),
+        "page_index": "1",
+        "ann_type": "A",
+        "client_source": "web",
+        "stock_list": normalize_code(code),
+        "f_node": "0",
+        "s_node": "0",
+    }
+    payload = _em_get("https://np-anotice-stock.eastmoney.com/api/security/ann", params=params).json()
+    rows = ((payload.get("data") or {}).get("list") or [])
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        title = row.get("title") or row.get("notice_title")
+        if not title:
+            continue
+        output.append(
+            {
+                "title": title,
+                "notice_date": row.get("notice_date") or row.get("display_time"),
+                "art_code": row.get("art_code"),
+                "source": "Eastmoney announcements",
+            }
+        )
+    return output
+
+
 def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
+    normalized_codes = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
     quotes: dict[str, Any]
     errors: list[str] = []
     try:
-        quotes = fetch_quotes(codes + ["000001"])
+        quotes = fetch_quotes(normalized_codes + ["000001"])
     except Exception as exc:
-        quotes = {normalize_code(code): {"code": normalize_code(code), "error": str(exc), "stale": True} for code in codes}
+        quotes = {code: {"code": code, "error": str(exc), "stale": True} for code in normalized_codes}
         errors.append(f"quote: {exc}")
+
     technicals: dict[str, Any] = {}
-    for code in codes:
+    fund_flows: dict[str, Any] = {}
+    announcements: dict[str, Any] = {}
+    for index, code in enumerate(normalized_codes):
         try:
-            technicals[normalize_code(code)] = fetch_kline(code)
+            technicals[code] = fetch_kline(code)
         except Exception as exc:
-            technicals[normalize_code(code)] = {"code": normalize_code(code), "error": str(exc), "source": "Eastmoney push2his"}
+            technicals[code] = {"code": code, "error": str(exc), "source": "Eastmoney push2his"}
             errors.append(f"kline {code}: {exc}")
-    holding_quotes = {normalize_code(code): quotes.get(normalize_code(code), {}) for code in codes}
+        try:
+            fund_flows[code] = fetch_fund_flow(code)
+        except Exception as exc:
+            fund_flows[code] = {"code": code, "error": str(exc), "source": "Eastmoney push2his fund flow"}
+            errors.append(f"fund_flow {code}: {exc}")
+        # Limit announcement calls for very large portfolios. The first holdings are
+        # normally the largest because the confirmed snapshot preserves screen order.
+        if index < 8:
+            try:
+                announcements[code] = fetch_announcements(code)
+            except Exception as exc:
+                announcements[code] = []
+                errors.append(f"announcements {code}: {exc}")
+
+    holding_quotes = {code: quotes.get(code, {}) for code in normalized_codes}
     complete_quotes = sum(1 for item in holding_quotes.values() if item.get("price") is not None)
-    ratio = complete_quotes / len(codes) if codes else 0
-    grade = "A" if ratio == 1 and not errors else "B" if ratio >= 0.8 else "C" if ratio >= 0.5 else "F"
+    ratio = complete_quotes / len(normalized_codes) if normalized_codes else 0
+    # Quotes are mandatory. Optional technical/fund/event failures lower A to B but
+    # do not block the run unless quote coverage itself becomes insufficient.
+    if ratio == 1:
+        grade = "A" if not errors else "B"
+    elif ratio >= 0.8:
+        grade = "B"
+    elif ratio >= 0.5:
+        grade = "C"
+    else:
+        grade = "F"
     return {
         "captured_at": datetime.now(CHINA_TZ).isoformat(timespec="seconds"),
         "quotes": holding_quotes,
         "technicals": technicals,
+        "fund_flows": fund_flows,
+        "announcements": announcements,
         "indices": {"sh000001": quotes.get("000001", {})},
         "quality_grade": grade,
         "errors": errors,
-        "source_chain": ["Tencent qt.gtimg.cn", "Eastmoney push2his"],
+        "source_chain": [
+            "Tencent qt.gtimg.cn",
+            "Eastmoney push2his K-line",
+            "Eastmoney push2his fund flow",
+            "Eastmoney announcements",
+        ],
     }
+
+
+def refresh_snapshot_quotes(snapshot: dict[str, Any], codes: list[str]) -> dict[str, Any]:
+    """Refresh quote-sensitive fields immediately before the visible decision."""
+    refreshed = dict(snapshot)
+    refreshed["final_quote_refresh_at"] = datetime.now(CHINA_TZ).isoformat(timespec="seconds")
+    try:
+        quotes = fetch_quotes(codes)
+        refreshed["quotes"] = {normalize_code(code): quotes.get(normalize_code(code), {}) for code in codes}
+        refreshed["final_quote_refresh_status"] = "ok"
+    except Exception as exc:
+        refreshed["final_quote_refresh_status"] = "failed"
+        refreshed["final_quote_refresh_error"] = str(exc)
+        refreshed.setdefault("errors", []).append(f"final_quote_refresh: {exc}")
+    return refreshed
 
 
 def is_a_share_trading_day(now: datetime | None = None) -> bool:
