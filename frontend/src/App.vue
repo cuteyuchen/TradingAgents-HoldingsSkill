@@ -1,324 +1,160 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
-  Activity,
-  LockKeyhole,
+  BarChart3,
+  BellRing,
+  LayoutDashboard,
   LogOut,
   Moon,
-  Monitor,
+  Settings,
   Sun,
+  Upload,
 } from 'lucide-vue-next'
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
-import { api, clearToken, getToken, setToken } from './api'
-import ArchiveList from './views/ArchiveList.vue'
 
-type ThemePref = 'system' | 'light' | 'dark'
+import { api, clearSession, hasSession } from './api'
+import type { User } from './api/types'
 
+const route = useRoute()
+const router = useRouter()
 const THEME_KEY = 'advisor_theme'
+type ThemePref = 'light' | 'dark'
 
-const themeOptions = [
-  { label: '跟随系统', value: 'system' },
-  { label: '亮色', value: 'light' },
-  { label: '暗色', value: 'dark' },
+const themePref = ref<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) || 'dark')
+const user = ref<User | null>(null)
+const loadingUser = ref(false)
+const isLogin = computed(() => route.name === 'login')
+const theme = computed<GlobalTheme>(() => (themePref.value === 'dark' ? darkTheme : lightTheme))
+const themeOverrides = computed<GlobalThemeOverrides>(() => ({
+  common: {
+    primaryColor: themePref.value === 'dark' ? '#60A5FA' : '#1769aa',
+    primaryColorHover: themePref.value === 'dark' ? '#93C5FD' : '#2683cf',
+    primaryColorPressed: themePref.value === 'dark' ? '#3B82F6' : '#0f568f',
+    borderRadius: '10px',
+    fontFamily: 'Inter, "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  },
+}))
+
+const navigation = [
+  { name: 'dashboard', label: '总览', icon: LayoutDashboard },
+  { name: 'upload', label: '今日持仓', icon: Upload },
+  { name: 'reports', label: '分析报告', icon: BarChart3 },
+  { name: 'settings', label: '系统设置', icon: Settings },
 ]
 
-/*********************** 登录与主题状态 *********************/
-const tokenInput = shallowRef(getToken())
-const authChecked = shallowRef(false)
-const authenticated = shallowRef(false)
-const loginLoading = shallowRef(false)
-const loginError = shallowRef('')
-const themePref = shallowRef<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) || 'system')
-const systemDark = shallowRef(false)
-
-const media = window.matchMedia('(prefers-color-scheme: dark)')
-const updateSystemTheme = () => {
-  systemDark.value = media.matches
-}
-
-const resolvedTheme = computed<'light' | 'dark'>(() => {
-  if (themePref.value === 'system') return systemDark.value ? 'dark' : 'light'
-  return themePref.value
-})
-
-const naiveTheme = computed<GlobalTheme>(() => (resolvedTheme.value === 'dark' ? darkTheme : lightTheme))
-const themeIcon = computed(() => {
-  if (themePref.value === 'system') return Monitor
-  return resolvedTheme.value === 'dark' ? Moon : Sun
-})
-
-/*********************** Naive UI 主题 *********************/
-const themeOverrides = computed<GlobalThemeOverrides>(() => {
-  const dark = resolvedTheme.value === 'dark'
-  return {
-    common: {
-      primaryColor: dark ? '#60A5FA' : '#0C5CAB',
-      primaryColorHover: dark ? '#93C5FD' : '#0a6fd0',
-      primaryColorPressed: dark ? '#3B82F6' : '#0a4a8a',
-      primaryColorSuppl: dark ? '#60A5FA' : '#0C5CAB',
-      textColor1: dark ? '#fafafa' : '#172033',
-      textColor2: dark ? '#d7deea' : '#344054',
-      textColor3: dark ? '#a3aebf' : '#667085',
-      borderColor: dark ? 'rgba(148, 163, 184, 0.28)' : '#dfe6f1',
-      borderRadius: '8px',
-      fontFamily:
-        '"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif',
-    },
-  }
-})
-
-/*********************** 鉴权动作 *********************/
-async function verifyCurrentToken() {
-  const existing = getToken()
-  if (!existing) {
-    authenticated.value = false
-    authChecked.value = true
-    return
-  }
+async function loadUser() {
+  if (!hasSession() || isLogin.value || loadingUser.value) return
+  loadingUser.value = true
   try {
-    await api.verifyToken()
-    tokenInput.value = existing
-    authenticated.value = true
+    user.value = await api.me()
   } catch {
-    clearToken()
-    authenticated.value = false
+    user.value = null
   } finally {
-    authChecked.value = true
+    loadingUser.value = false
   }
 }
 
-async function login() {
-  const token = tokenInput.value.trim()
-  loginError.value = ''
-  if (!token) {
-    loginError.value = '请输入访问密码'
-    return
-  }
-  loginLoading.value = true
-  setToken(token)
+function toggleTheme() {
+  themePref.value = themePref.value === 'dark' ? 'light' : 'dark'
+  localStorage.setItem(THEME_KEY, themePref.value)
+}
+
+async function logout() {
   try {
-    await api.verifyToken()
-    authenticated.value = true
-  } catch (e) {
-    clearToken()
-    loginError.value = (e as Error).message
-  } finally {
-    loginLoading.value = false
+    await api.logout()
+  } catch {
+    // A local logout must still work when the server is unavailable.
   }
+  clearSession()
+  user.value = null
+  await router.replace({ name: 'login' })
 }
 
-function logout() {
-  clearToken()
-  tokenInput.value = ''
-  authenticated.value = false
-}
+const onSessionChanged = () => void loadUser()
 
-function saveTheme(value: ThemePref) {
-  themePref.value = value
-  localStorage.setItem(THEME_KEY, value)
-}
-
-/*********************** 生命周期 *********************/
 onMounted(() => {
-  updateSystemTheme()
-  media.addEventListener('change', updateSystemTheme)
-  void verifyCurrentToken()
+  void loadUser()
+  window.addEventListener('advisor-session-changed', onSessionChanged)
 })
-
-onUnmounted(() => {
-  media.removeEventListener('change', updateSystemTheme)
-})
+onUnmounted(() => window.removeEventListener('advisor-session-changed', onSessionChanged))
+watch(() => route.name, () => void loadUser())
 </script>
 
 <template>
-  <n-config-provider
-    :theme="naiveTheme"
-    :theme-overrides="themeOverrides"
-    :locale="zhCN"
-    :date-locale="dateZhCN"
-  >
+  <n-config-provider :theme="theme" :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
     <n-message-provider>
-      <n-global-style />
-      <div class="app-shell" :class="resolvedTheme === 'dark' ? 'theme-dark' : 'theme-light'">
-        <div v-if="!authChecked" class="login-wrap">
-          <n-spin size="large" />
-          <div class="muted mt-3">正在校验访问权限…</div>
+      <n-dialog-provider>
+        <n-global-style />
+        <div class="app-root" :class="`theme-${themePref}`">
+          <router-view v-if="isLogin" />
+          <template v-else>
+            <header class="topbar">
+              <div class="brand">
+                <div class="brand-mark"><BellRing :size="22" /></div>
+                <div>
+                  <strong>持仓投研决策系统</strong>
+                  <span>TradingAgents Holdings</span>
+                </div>
+              </div>
+              <nav class="top-nav" aria-label="主导航">
+                <router-link v-for="item in navigation" :key="item.name" :to="{ name: item.name }" class="nav-link">
+                  <component :is="item.icon" :size="17" />
+                  <span>{{ item.label }}</span>
+                </router-link>
+              </nav>
+              <div class="user-actions">
+                <div class="user-copy">
+                  <strong>{{ user?.username || user?.email || '用户' }}</strong>
+                  <span>{{ user?.email }}</span>
+                </div>
+                <n-button quaternary circle :aria-label="themePref === 'dark' ? '切换亮色' : '切换暗色'" @click="toggleTheme">
+                  <template #icon><Sun v-if="themePref === 'dark'" :size="18" /><Moon v-else :size="18" /></template>
+                </n-button>
+                <n-button quaternary circle aria-label="退出登录" @click="logout">
+                  <template #icon><LogOut :size="18" /></template>
+                </n-button>
+              </div>
+            </header>
+            <main class="app-content">
+              <router-view />
+            </main>
+          </template>
         </div>
-
-        <div v-else-if="!authenticated" class="login-wrap">
-          <section class="login-card panel-card">
-            <div class="login-icon" aria-hidden="true">
-              <LockKeyhole :size="28" />
-            </div>
-            <h1>持仓投研决策看板</h1>
-            <p>请输入后端配置的 ADVISOR_TOKEN 作为远程访问密码。</p>
-            <n-input
-              v-model:value="tokenInput"
-              type="password"
-              show-password-on="mousedown"
-              placeholder="访问密码"
-              size="large"
-              @keyup.enter="login"
-            />
-            <n-alert v-if="loginError" type="error" :show-icon="false">{{ loginError }}</n-alert>
-            <n-button type="primary" size="large" block :loading="loginLoading" @click="login">
-              登录看板
-            </n-button>
-          </section>
-        </div>
-
-        <template v-else>
-          <header class="topbar">
-            <div class="brand" aria-label="持仓投研决策看板">
-              <Activity :size="24" />
-              <span>持仓投研决策看板</span>
-            </div>
-
-            <div class="top-actions">
-              <component :is="themeIcon" :size="18" class="muted" />
-              <n-select
-                :value="themePref"
-                :options="themeOptions"
-                size="small"
-                class="theme-select"
-                @update:value="saveTheme"
-              />
-              <n-button quaternary circle aria-label="退出登录" @click="logout">
-                <template #icon><LogOut :size="18" /></template>
-              </n-button>
-            </div>
-          </header>
-
-          <main class="content">
-            <ArchiveList />
-          </main>
-        </template>
-      </div>
+      </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>
 </template>
 
 <style scoped>
+.app-root { min-height: 100dvh; background: var(--app-bg); color: var(--app-text); }
 .topbar {
-  position: sticky;
-  z-index: 30;
-  top: 0;
-  display: flex;
-  min-height: 64px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border-bottom: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-surface-strong) 82%, transparent);
-  padding: 0 max(24px, calc((100vw - 1480px) / 2 + 24px));
-  box-shadow: 0 1px 0 var(--app-border-soft), 0 14px 40px color-mix(in srgb, var(--app-bg) 72%, transparent);
+  position: sticky; top: 0; z-index: 50; display: grid; grid-template-columns: minmax(230px, 1fr) auto minmax(230px, 1fr);
+  align-items: center; min-height: 68px; padding: 0 max(20px, calc((100vw - 1500px) / 2));
+  border-bottom: 1px solid var(--app-border); background: color-mix(in srgb, var(--app-surface-strong) 88%, transparent);
   backdrop-filter: blur(18px);
 }
-
-.brand {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  gap: 10px;
-  color: var(--app-text);
-  font-size: 16px;
-  font-weight: 800;
-  white-space: nowrap;
+.brand { display: flex; align-items: center; gap: 11px; }
+.brand-mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 11px; background: var(--app-primary-soft); color: var(--app-primary); }
+.brand div:last-child { display: grid; }
+.brand strong { font-size: 15px; }
+.brand span, .user-copy span { color: var(--app-text-muted); font-size: 11px; }
+.top-nav { display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid var(--app-border-soft); border-radius: 12px; background: var(--app-surface); }
+.nav-link { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 13px; border-radius: 9px; color: var(--app-text-muted); text-decoration: none; font-size: 13px; font-weight: 700; }
+.nav-link:hover, .nav-link.router-link-active { background: var(--app-primary-soft); color: var(--app-primary); }
+.user-actions { display: flex; justify-content: flex-end; align-items: center; gap: 5px; }
+.user-copy { display: grid; margin-right: 5px; text-align: right; }
+.user-copy strong { max-width: 170px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.app-content { width: min(1480px, 100%); margin: 0 auto; padding: 24px; }
+@media (max-width: 980px) {
+  .topbar { grid-template-columns: 1fr auto; padding: 0 12px; }
+  .top-nav { position: fixed; z-index: 60; right: 12px; bottom: 12px; left: 12px; justify-content: space-around; box-shadow: var(--app-shadow-strong); }
+  .nav-link { flex: 1; justify-content: center; padding: 0 6px; }
+  .user-copy { display: none; }
+  .app-content { padding: 16px 12px 88px; }
 }
-
-.brand svg {
-  width: 30px;
-  height: 30px;
-  border: 1px solid color-mix(in srgb, var(--app-primary) 32%, transparent);
-  border-radius: 8px;
-  background: var(--app-primary-soft);
-  padding: 5px;
-  color: var(--app-primary);
-}
-
-.top-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  border: 1px solid var(--app-border-soft);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-surface-strong) 66%, transparent);
-  padding: 2px 4px 2px 10px;
-}
-
-.theme-select {
-  width: 118px;
-}
-
-.content {
-  width: min(1440px, 100%);
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.login-wrap {
-  display: grid;
-  min-height: 100dvh;
-  place-items: center;
-  padding: 24px;
-}
-
-.login-card {
-  display: grid;
-  width: min(420px, 100%);
-  gap: 16px;
-  padding: 28px;
-  box-shadow: var(--app-shadow-strong);
-}
-
-.login-icon {
-  display: grid;
-  width: 56px;
-  height: 56px;
-  place-items: center;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-primary) 18%, transparent);
-  color: var(--app-primary);
-}
-
-.login-card h1 {
-  margin: 0;
-  color: var(--app-text);
-  font-size: 24px;
-  font-weight: 800;
-}
-
-.login-card p {
-  margin: 0;
-  color: var(--app-text-muted);
-  line-height: 1.6;
-}
-
-@media (max-width: 768px) {
-  .topbar {
-    min-height: 58px;
-    gap: 10px;
-    padding: 0 12px;
-  }
-
-  .brand span {
-    max-width: 8.5em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .top-actions {
-    gap: 4px;
-    padding-left: 6px;
-  }
-
-  .theme-select {
-    width: 88px;
-  }
-
-  .content {
-    padding: 16px 12px 28px;
-  }
+@media (max-width: 560px) {
+  .brand span { display: none; }
+  .nav-link span { font-size: 11px; }
 }
 </style>
