@@ -6,12 +6,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from cryptography.fernet import Fernet, InvalidToken
-from pwdlib import PasswordHash
 
 from .config import settings
 
-_password_hash = PasswordHash.recommended()
+_password_hasher = PasswordHasher()
 
 
 class InvalidAccessToken(ValueError):
@@ -19,13 +20,13 @@ class InvalidAccessToken(ValueError):
 
 
 def hash_password(password: str) -> str:
-    return _password_hash.hash(password)
+    return _password_hasher.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     try:
-        return _password_hash.verify(password, password_hash)
-    except Exception:
+        return _password_hasher.verify(password_hash, password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
 
 
