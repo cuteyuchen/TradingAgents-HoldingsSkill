@@ -35,9 +35,9 @@ Base = declarative_base()
 
 
 def init_db() -> None:
-    """Create all tables. Called once at application startup."""
-    # Import models so SQLAlchemy registers them on Base before create_all.
-    from . import models  # noqa: F401
+    """Create legacy and V2 tables. Called once at application startup."""
+    # Import all model modules so SQLAlchemy registers them on Base before create_all.
+    from . import models, v2_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
@@ -45,7 +45,11 @@ def init_db() -> None:
 
 
 def _apply_lightweight_migrations() -> None:
-    """SQLite-friendly schema updates for the no-Alembic single-file setup."""
+    """SQLite-friendly schema updates for the legacy no-Alembic tables.
+
+    New V2 schema changes will move to Alembic. This compatibility block remains
+    temporarily so existing advisor.db files continue to start safely.
+    """
     inspector = inspect(engine)
 
     if inspector.has_table("runs"):
