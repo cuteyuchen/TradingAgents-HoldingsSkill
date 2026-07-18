@@ -4,7 +4,13 @@ services:
     container_name: advisor-backend
     environment:
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-true}
+      - JWT_ACCESS_TOKEN_MINUTES=${JWT_ACCESS_TOKEN_MINUTES:-15}
+      - JWT_REFRESH_TOKEN_DAYS=${JWT_REFRESH_TOKEN_DAYS:-30}
       - ADVISOR_DB_PATH=/app/data/advisor.db
+      - ADVISOR_ARTIFACTS_DIR=/app/data/artifacts
+      - ADVISOR_SQLITE_JOURNAL_MODE=${ADVISOR_SQLITE_JOURNAL_MODE:-WAL}
       - ADVISOR_CORS_ORIGINS=${ADVISOR_CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
     volumes:
       - advisor-data:/app/data
