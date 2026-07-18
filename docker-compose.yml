@@ -12,10 +12,17 @@ services:
       - ADVISOR_ARTIFACTS_DIR=/app/data/artifacts
       - ADVISOR_SQLITE_JOURNAL_MODE=${ADVISOR_SQLITE_JOURNAL_MODE:-WAL}
       - ADVISOR_CORS_ORIGINS=${ADVISOR_CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-12582912}
+      - ANALYSIS_HISTORY_LIMIT=${ANALYSIS_HISTORY_LIMIT:-5}
+      - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-true}
+      - SCHEDULER_INTERVAL_SECONDS=${SCHEDULER_INTERVAL_SECONDS:-60}
+      - PUBLIC_APP_URL=${PUBLIC_APP_URL:-http://localhost:8080}
     volumes:
       - advisor-data:/app/data
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
@@ -23,6 +30,8 @@ services:
     container_name: advisor-frontend
     depends_on:
       - backend
+    environment:
+      - BACKEND_URL=http://backend:8000
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     restart: unless-stopped
