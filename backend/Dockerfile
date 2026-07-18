@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Data volume for the SQLite file.
+# Data volume for the SQLite file and archived artifacts.
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]
 
@@ -19,4 +19,5 @@ ENV ADVISOR_HOST=0.0.0.0
 ENV ADVISOR_PORT=8000
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Apply idempotent schema migrations before serving requests.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
