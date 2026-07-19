@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowRight, Bot, CalendarClock, Camera, Plus, RefreshCw, ShieldAlert } from 'lucide-vue-next'
+import { ArrowRight, Bot, CalendarClock, Camera, Play, Plus, RefreshCw, ShieldAlert } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { AnalysisRunSummary, ModelProfile, Portfolio, Schedule } from '../api/types'
+import type { AnalysisMode, AnalysisRunSummary, ModelProfile, Portfolio, Schedule } from '../api/types'
 
 const router = useRouter()
 const message = useMessage()
@@ -17,6 +17,12 @@ const schedules = ref<Schedule[]>([])
 const createOpen = ref(false)
 const newPortfolioName = ref('我的持仓')
 const creating = ref(false)
+const analysisOpen = ref(false)
+const analysisPortfolio = ref<Portfolio | null>(null)
+const analysisMode = ref<AnalysisMode>('deep')
+const analysisCheckpoint = ref('10:00')
+const analysisNotify = ref(true)
+const startingAnalysis = ref(false)
 
 const defaultPortfolio = computed(() => portfolios.value.find((item) => item.is_default) || portfolios.value[0])
 const latestRun = computed(() => runs.value[0])
@@ -45,8 +51,8 @@ async function load() {
     runs.value = runRows
     profiles.value = profileRows
     schedules.value = scheduleRows
-  } catch (e) {
-    message.error((e as Error).message)
+  } catch (error) {
+    message.error((error as Error).message)
   } finally {
     loading.value = false
   }
@@ -60,10 +66,49 @@ async function createPortfolio() {
     createOpen.value = false
     message.success('组合已创建')
     await load()
-  } catch (e) {
-    message.error((e as Error).message)
+  } catch (error) {
+    message.error((error as Error).message)
   } finally {
     creating.value = false
+  }
+}
+
+function openManualAnalysis(portfolio: Portfolio) {
+  if (!portfolio.latest_snapshot_id) {
+    message.warning('该组合还没有已确认持仓，请先上传并确认持仓截图')
+    void router.push({ name: 'upload', query: { portfolio: portfolio.id } })
+    return
+  }
+  if (!modelReady.value.analysis) {
+    message.warning('请先在系统设置中配置默认分析模型')
+    void router.push({ name: 'settings' })
+    return
+  }
+  analysisPortfolio.value = portfolio
+  analysisOpen.value = true
+}
+
+async function startManualAnalysis() {
+  const portfolio = analysisPortfolio.value
+  if (!portfolio?.latest_snapshot_id || startingAnalysis.value) return
+  startingAnalysis.value = true
+  try {
+    const job = await api.createAnalysisJob(
+      portfolio.latest_snapshot_id,
+      analysisMode.value,
+      analysisCheckpoint.value || undefined,
+      analysisNotify.value,
+    )
+    analysisOpen.value = false
+    message.success('手动分析任务已创建')
+    await router.push({
+      name: 'upload',
+      query: { portfolio: portfolio.id, job: job.id, focus: 'analysis' },
+    })
+  } catch (error) {
+    message.error((error as Error).message)
+  } finally {
+    startingAnalysis.value = false
   }
 }
 
@@ -125,7 +170,7 @@ onMounted(load)
 
     <section class="panel-card">
       <div class="section-title">
-        <div><h2>持仓组合</h2><p>每个组合独立保存截图、快照和分析历史</p></div>
+        <div><h2>持仓组合</h2><p>每个组合独立保存截图、快照和分析历史；已确认持仓可随时手动分析</p></div>
         <n-button secondary @click="createOpen = true"><template #icon><Plus :size="16" /></template>新建组合</n-button>
       </div>
       <div v-if="portfolios.length" class="portfolio-grid">
@@ -134,7 +179,10 @@ onMounted(load)
           <div><strong>{{ portfolio.name }}</strong><p>{{ portfolio.market }} · {{ portfolio.currency }}</p></div>
           <n-tag v-if="portfolio.is_default" size="small" :bordered="false" type="success">默认</n-tag>
           <div class="portfolio-time"><CalendarClock :size="14" />{{ fmt(portfolio.latest_snapshot_time) }}</div>
-          <n-button text type="primary" @click="router.push({ name: 'upload', query: { portfolio: portfolio.id } })">更新持仓</n-button>
+          <div class="portfolio-actions">
+            <n-button secondary size="small" @click="router.push({ name: 'upload', query: { portfolio: portfolio.id } })"><template #icon><Camera :size="14" /></template>更新持仓</n-button>
+            <n-button type="primary" size="small" :disabled="!portfolio.latest_snapshot_id" @click="openManualAnalysis(portfolio)"><template #icon><Play :size="14" /></template>手动分析</n-button>
+          </div>
         </article>
       </div>
       <n-empty v-else description="先创建一个持仓组合。" />
@@ -144,6 +192,20 @@ onMounted(load)
       <n-form label-placement="top">
         <n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item>
         <n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button>
+      </n-form>
+    </n-modal>
+
+    <n-modal v-model:show="analysisOpen" preset="card" title="手动分析最新持仓" style="width: min(480px, 92vw)">
+      <n-alert type="info" :show-icon="false">
+        将使用 <strong>{{ analysisPortfolio?.name }}</strong> 的最新确认快照 #{{ analysisPortfolio?.latest_snapshot_id }}，不会重新识图或修改持仓。
+      </n-alert>
+      <n-form label-placement="top" class="analysis-modal-form">
+        <n-form-item label="分析模式">
+          <n-radio-group v-model:value="analysisMode"><n-radio-button value="quick">快速</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group>
+        </n-form-item>
+        <n-form-item label="检查点"><n-select v-model:value="analysisCheckpoint" :options="['09:35','10:00','12:00','14:30'].map(v => ({ label: v, value: v }))" /></n-form-item>
+        <n-form-item label="完成后发送通知"><n-switch v-model:value="analysisNotify" /></n-form-item>
+        <n-button type="primary" block size="large" :loading="startingAnalysis" @click="startManualAnalysis"><template #icon><Play :size="17" /></template>开始分析</n-button>
       </n-form>
     </n-modal>
   </section>
@@ -181,7 +243,8 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.035em; }
 .portfolio-icon { display: grid; width: 40px; height: 40px; place-items: center; border-radius: 10px; background: var(--app-primary-soft); color: var(--app-primary); }
 .portfolio-card p { margin: 3px 0 0; color: var(--app-text-muted); font-size: 11px; }
 .portfolio-time { grid-column: 2 / 4; display: flex; align-items: center; gap: 5px; color: var(--app-text-muted); font-size: 11px; }
-.portfolio-card .n-button { grid-column: 2 / 4; justify-self: start; }
+.portfolio-actions { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 8px; }
+.analysis-modal-form { margin-top: 16px; }
 @media (max-width: 1050px) { .metric-grid { grid-template-columns: repeat(2, 1fr); } .dashboard-grid { grid-template-columns: 1fr; } .portfolio-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 650px) { .page-heading { align-items: start; flex-direction: column; } .heading-actions { width: 100%; } .heading-actions .n-button { flex: 1; } .metric-grid, .portfolio-grid { grid-template-columns: 1fr; } }
 </style>
