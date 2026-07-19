@@ -141,7 +141,7 @@ class PortfolioResponse(BaseModel):
 
 
 class HoldingInput(BaseModel):
-    code: str = Field(min_length=1, max_length=16)
+    code: str = Field(default="", max_length=16)
     name: str | None = Field(default=None, max_length=64)
     market: str | None = Field(default=None, max_length=16)
     qty: float | None = None
@@ -154,9 +154,12 @@ class HoldingInput(BaseModel):
     weight: float | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("code")
+    @field_validator("code", mode="before")
     @classmethod
-    def normalize_code(cls, value: str) -> str:
+    def normalize_code(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        value = str(value)
         text = value.strip().upper()
         digits = "".join(ch for ch in text if ch.isdigit())
         return digits[-6:] if len(digits) >= 6 else text

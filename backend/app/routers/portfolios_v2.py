@@ -99,7 +99,7 @@ def _upload_response(row: HoldingUpload) -> UploadResponse:
 
 def _holding_schema(row: HoldingItem) -> HoldingInput:
     return HoldingInput(
-        code=row.code,
+        code=row.code or "",
         name=row.name,
         market=row.market,
         qty=row.qty,
@@ -351,7 +351,7 @@ def confirm_upload(
         db.add(
             HoldingItem(
                 snapshot_id=snapshot.id,
-                code=holding.code,
+                code=holding.code or None,
                 name=holding.name,
                 market=holding.market,
                 qty=qty,

@@ -17,6 +17,34 @@ os.environ.setdefault("SCHEDULER_ENABLED", "false")
 sys.path.insert(0, BACKEND_DIR)
 
 
+def test_recognized_holding_without_code_can_be_corrected_manually():
+    from app.services.holdings_service import parse_payload_dict
+
+    parsed, errors = parse_payload_dict({"holdings": [{"code": None, "name": "贵州茅台", "qty": 100}]})
+
+    assert parsed.holdings[0].name == "贵州茅台"
+    assert parsed.holdings[0].code == ""
+    assert errors == []
+
+
+def test_analysis_model_resolves_optional_holding_code(monkeypatch):
+    from app.services import analysis_engine
+
+    monkeypatch.setattr(
+        analysis_engine,
+        "_call_json",
+        lambda *_args, **_kwargs: {
+            "matches": [{"index": 0, "code": "600519", "confidence": "high", "reason": "名称唯一匹配"}]
+        },
+    )
+    holdings = [{"code": "", "name": "贵州茅台", "market": None}]
+
+    resolved = analysis_engine._resolve_missing_codes(object(), holdings)
+
+    assert resolved[0]["code"] == "600519"
+    assert resolved[0]["code_source"] == "model_match"
+
+
 def test_v2_portfolio_flow(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -70,7 +98,9 @@ def test_v2_portfolio_flow(monkeypatch):
                 "market_value": 160000,
                 "pnl": 0.0667,
                 "pnl_amount": 10000,
-            }
+            },
+            {"code": None, "name": "中证证券", "qty": 26000, "available_qty": 26000},
+            {"code": None, "name": "通信ETF", "qty": 42000, "available_qty": 38000},
         ],
         "total_assets": 200000,
         "total_market_value": 160000,
@@ -93,6 +123,7 @@ def test_v2_portfolio_flow(monkeypatch):
     snapshot_payload = snapshot.json()
     assert snapshot_payload["holdings"][0]["available_qty"] == 80
     assert snapshot_payload["holdings"][0]["extra"]["unavailable_qty"] == 20
+    assert [item["code"] for item in snapshot_payload["holdings"]] == ["600519", "", ""]
 
     monkeypatch.setattr(
         analysis_engine,
@@ -109,6 +140,13 @@ def test_v2_portfolio_flow(monkeypatch):
     )
 
     def fake_call(_profile, _system, _payload, instruction):
+        if "匹配六位证券代码" in instruction:
+            return {
+                "matches": [
+                    {"index": 1, "code": "512880", "confidence": "high", "reason": "名称匹配"},
+                    {"index": 2, "code": "515880", "confidence": "high", "reason": "名称匹配"},
+                ]
+            }
         if "多空辩论" in instruction:
             return {"bull_case": ["趋势向上"], "bear_case": ["估值较高"], "unresolved_claims": [], "manager_verdict": "谨慎持有"}
         if "证据包" in instruction:

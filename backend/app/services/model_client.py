@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -46,6 +47,9 @@ def _base_url(provider: ModelProvider) -> str:
     value = (provider.base_url or DEFAULT_BASE_URLS.get(provider.provider.lower()) or "").rstrip("/")
     if not value:
         raise ModelCallError("该模型供应商必须配置 Base URL")
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ModelCallError("Base URL 必须是完整的 http:// 或 https:// 地址")
     return value
 
 
@@ -244,11 +248,14 @@ def call_model(
     if not provider.enabled:
         raise ModelCallError("模型供应商已停用")
     provider_name = provider.provider.lower()
-    if provider_name == "anthropic":
-        return _anthropic(profile, provider, messages, image_bytes, image_mime)
-    if provider_name == "gemini":
-        return _gemini(profile, provider, messages, image_bytes, image_mime, json_mode)
-    return _openai_compatible(profile, provider, messages, image_bytes, image_mime, json_mode)
+    try:
+        if provider_name == "anthropic":
+            return _anthropic(profile, provider, messages, image_bytes, image_mime)
+        if provider_name == "gemini":
+            return _gemini(profile, provider, messages, image_bytes, image_mime, json_mode)
+        return _openai_compatible(profile, provider, messages, image_bytes, image_mime, json_mode)
+    except requests.RequestException as exc:
+        raise ModelCallError(f"模型接口请求失败：{exc}") from exc
 
 
 def health_check(profile: ModelProfile) -> ModelResult:

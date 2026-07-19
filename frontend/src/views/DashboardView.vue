@@ -140,7 +140,7 @@ onMounted(load)
       <n-empty v-else description="先创建一个持仓组合。" />
     </section>
 
-    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" class="modal-card">
+    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, 92vw)">
       <n-form label-placement="top">
         <n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item>
         <n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button>
@@ -182,7 +182,6 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.035em; }
 .portfolio-card p { margin: 3px 0 0; color: var(--app-text-muted); font-size: 11px; }
 .portfolio-time { grid-column: 2 / 4; display: flex; align-items: center; gap: 5px; color: var(--app-text-muted); font-size: 11px; }
 .portfolio-card .n-button { grid-column: 2 / 4; justify-self: start; }
-.modal-card { width: min(460px, 92vw); }
 @media (max-width: 1050px) { .metric-grid { grid-template-columns: repeat(2, 1fr); } .dashboard-grid { grid-template-columns: 1fr; } .portfolio-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 650px) { .page-heading { align-items: start; flex-direction: column; } .heading-actions { width: 100%; } .heading-actions .n-button { flex: 1; } .metric-grid, .portfolio-grid { grid-template-columns: 1fr; } }
 </style>

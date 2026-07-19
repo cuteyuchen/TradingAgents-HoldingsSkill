@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Camera, CheckCircle2, FileImage, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
+import { Camera, CheckCircle2, ClipboardPaste, FileImage, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
@@ -26,11 +26,13 @@ const checkpoint = ref('10:00')
 const notify = ref(true)
 let pollTimer: number | null = null
 
-const canUpload = computed(() => Boolean(portfolioId.value && selectedFile.value))
+const canUpload = computed(() => Boolean(selectedFile.value))
 const canConfirm = computed(() => Boolean(upload.value && parsed.value?.holdings.length && !upload.value.validation_errors.length))
+const missingCodeCount = computed(() => parsed.value?.holdings.filter((holding) => !holding.code.trim()).length || 0)
 const terminalJob = computed(() => ['succeeded', 'failed', 'cancelled'].includes(job.value?.status || ''))
 const stageLabels: Record<string, string> = {
   queued: '等待执行', context_loading: '加载历史分析', market_collecting: '采集行情与技术数据',
+  symbol_resolving: '匹配证券代码',
   analysts_running: '多维分析师研判', investment_debate: '多空观点辩论', portfolio_synthesis: '组合经理裁决',
   report_rendering: '生成结构化报告', completed: '分析完成', failed: '分析失败', cancelled: '已取消',
 }
@@ -39,9 +41,7 @@ function emptyParsed(): ParsedHoldings {
   return { holdings: [], excluded_items: [], notes: [] }
 }
 
-function selectFile(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0] || null
+function setSelectedFile(file: File | null) {
   selectedFile.value = file
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
   previewUrl.value = file ? URL.createObjectURL(file) : ''
@@ -49,6 +49,24 @@ function selectFile(event: Event) {
   parsed.value = null
   snapshot.value = null
   job.value = null
+}
+
+function selectFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  setSelectedFile(input.files?.[0] || null)
+}
+
+function pasteImage(event: ClipboardEvent) {
+  const source = Array.from(event.clipboardData?.files || []).find((file) => file.type.startsWith('image/'))
+    || Array.from(event.clipboardData?.items || [])
+      .find((item) => item.type.startsWith('image/'))
+      ?.getAsFile()
+  if (!source) return
+  event.preventDefault()
+  const extension = source.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+  const file = new File([source], `clipboard-holdings-${Date.now()}.${extension}`, { type: source.type })
+  setSelectedFile(file)
+  message.success('已从剪贴板读取持仓截图')
 }
 
 async function loadPortfolios() {
@@ -61,9 +79,15 @@ async function loadPortfolios() {
 }
 
 async function submitUpload() {
-  if (!portfolioId.value || !selectedFile.value) return
+  if (!selectedFile.value) return
   loading.value = true
   try {
+    if (!portfolioId.value) {
+      const portfolio = await api.createPortfolio({ name: '默认组合', is_default: true })
+      portfolios.value.push(portfolio)
+      portfolioId.value = portfolio.id
+      message.success('已自动创建默认持仓组合')
+    }
     upload.value = await api.uploadHoldings(portfolioId.value, selectedFile.value)
     parsed.value = upload.value.parsed || null
     message.success('截图已上传，正在识别持仓')
@@ -188,9 +212,11 @@ async function openReport() {
 }
 
 onMounted(async () => {
+  window.addEventListener('paste', pasteImage)
   try { await loadPortfolios() } catch (e) { message.error((e as Error).message) }
 })
 onUnmounted(() => {
+  window.removeEventListener('paste', pasteImage)
   stopPolling()
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
 })
@@ -209,20 +235,30 @@ onUnmounted(() => {
 
     <div class="upload-grid">
       <section class="panel-card upload-panel">
-        <div class="section-title"><div><h2>1. 选择截图</h2><p>支持 PNG、JPEG、WEBP、GIF，最大由服务端配置决定</p></div><FileImage :size="21" /></div>
+        <div class="section-title"><div><h2>1. 选择截图</h2><p>支持选择文件或直接按 Ctrl + V 粘贴截图</p></div><FileImage :size="21" /></div>
         <n-form label-placement="top">
           <n-form-item label="持仓组合">
             <n-select v-model:value="portfolioId" :options="portfolios.map(p => ({ label: p.name, value: p.id }))" placeholder="选择组合" />
           </n-form-item>
           <label class="drop-zone" :class="{ selected: selectedFile }">
             <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="selectFile" />
-            <Camera :size="30" />
-            <strong>{{ selectedFile?.name || '点击选择持仓截图' }}</strong>
-            <span>{{ selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : '原始截图会完整保存，用于后续回溯' }}</span>
+            <template v-if="previewUrl">
+              <img class="drop-preview" :src="previewUrl" alt="待上传持仓截图预览" />
+              <div class="preview-meta">
+                <strong>{{ selectedFile?.name }}</strong>
+                <span>{{ ((selectedFile?.size || 0) / 1024 / 1024).toFixed(2) }} MB · 点击可更换图片</span>
+              </div>
+            </template>
+            <template v-else>
+              <Camera :size="30" />
+              <strong>点击选择持仓截图</strong>
+              <span class="paste-hint"><ClipboardPaste :size="14" />也可在此页面按 Ctrl + V 粘贴图片</span>
+            </template>
           </label>
-          <n-button type="primary" block size="large" :disabled="!canUpload" :loading="loading" @click="submitUpload">上传并识别</n-button>
+          <n-button type="primary" block size="large" :disabled="!canUpload" :loading="loading" @click="submitUpload">
+            {{ portfolios.length ? '上传并识别' : '创建默认组合并上传识别' }}
+          </n-button>
         </n-form>
-        <div v-if="previewUrl" class="preview-wrap"><img :src="previewUrl" alt="持仓截图预览" /></div>
       </section>
 
       <section class="panel-card state-panel">
@@ -259,11 +295,11 @@ onUnmounted(() => {
 
       <div class="holdings-table-wrap">
         <table class="edit-table">
-          <thead><tr><th>名称</th><th>代码</th><th>总持仓</th><th>可用</th><th>成本</th><th>截图现价</th><th>市值</th><th>盈亏率</th><th>盈亏金额</th><th /></tr></thead>
+          <thead><tr><th>股票代码（可选）</th><th>名称</th><th>总持仓</th><th>可用</th><th>成本</th><th>截图现价</th><th>市值</th><th>盈亏率</th><th>盈亏金额</th><th /></tr></thead>
           <tbody>
             <tr v-for="(holding, index) in parsed.holdings" :key="index">
+              <td><n-input v-model:value="holding.code" placeholder="可留空" /></td>
               <td><n-input v-model:value="holding.name" placeholder="名称" /></td>
-              <td><n-input v-model:value="holding.code" placeholder="六位代码" /></td>
               <td><n-input-number v-model:value="holding.qty" :show-button="false" /></td>
               <td><n-input-number v-model:value="holding.available_qty" :show-button="false" /></td>
               <td><n-input-number v-model:value="holding.cost" :show-button="false" /></td>
@@ -276,6 +312,7 @@ onUnmounted(() => {
           </tbody>
         </table>
       </div>
+      <n-alert v-if="missingCodeCount" type="info" :show-icon="false">有 {{ missingCodeCount }} 个持仓未填写股票代码，确认快照后将在分析流程中由模型尝试匹配。</n-alert>
       <n-alert type="info" :show-icon="false">盈亏率使用小数，例如 -27.73% 应填写 -0.2773。减仓建议的数量上限是当前可用数量。</n-alert>
       <div class="confirm-row"><n-button type="success" size="large" :disabled="!canConfirm" :loading="confirming" @click="confirmHoldings"><template #icon><CheckCircle2 :size="17" /></template>确认持仓快照</n-button></div>
     </section>
@@ -310,12 +347,15 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.035em; }
 .section-title h2 { margin: 0; font-size: 17px; }
 .section-title p { font-size: 12px; }
 .section-actions, .state-actions { display: flex; gap: 8px; }
-.drop-zone { display: grid; min-height: 160px; place-items: center; align-content: center; gap: 8px; margin-bottom: 14px; border: 1px dashed var(--app-border); border-radius: 14px; background: var(--app-surface); color: var(--app-text-muted); cursor: pointer; }
+.drop-zone { display: grid; min-height: 180px; place-items: center; align-content: center; gap: 8px; margin-bottom: 14px; overflow: hidden; border: 1px dashed var(--app-border); border-radius: 14px; background: var(--app-surface); color: var(--app-text-muted); cursor: pointer; }
 .drop-zone input { display: none; }
-.drop-zone.selected { border-color: var(--app-primary); background: var(--app-primary-soft); color: var(--app-primary); }
+.drop-zone.selected { min-height: 0; border-color: var(--app-primary); background: #05080d; color: var(--app-text); }
 .drop-zone span { font-size: 11px; }
-.preview-wrap { display: grid; max-height: 460px; margin-top: 15px; overflow: auto; border-radius: 12px; background: #05080d; place-items: center; }
-.preview-wrap img { display: block; max-width: 100%; object-fit: contain; }
+.paste-hint { display: inline-flex; align-items: center; gap: 5px; }
+.drop-preview { display: block; width: 100%; height: clamp(220px, 36vh, 360px); object-fit: contain; }
+.preview-meta { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--app-border-soft); background: var(--app-surface); padding: 10px 12px; }
+.preview-meta strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-meta span { flex: none; color: var(--app-text-muted); }
 .state-panel { align-self: start; }
 .state-line { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; border-bottom: 1px solid var(--app-border-soft); padding-bottom: 13px; }
 .state-line span { color: var(--app-text-muted); }

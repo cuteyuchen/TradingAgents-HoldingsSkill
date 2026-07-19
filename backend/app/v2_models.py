@@ -162,7 +162,7 @@ class HoldingItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     snapshot_id: Mapped[int] = mapped_column(ForeignKey("portfolio_snapshots.id", ondelete="CASCADE"), index=True)
-    code: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)
     name: Mapped[str | None] = mapped_column(String(64))
     market: Mapped[str | None] = mapped_column(String(16))
     qty: Mapped[float | None] = mapped_column(Float)

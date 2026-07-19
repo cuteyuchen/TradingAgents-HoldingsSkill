@@ -90,6 +90,19 @@ def test_v2_auth_and_model_settings_are_user_scoped():
     assert len(defaults) == 1
     assert defaults[0]["model_name"] == f"vision-b-{suffix[:8]}"
 
+    invalid_provider = client.patch(
+        f"/api/v2/model-settings/providers/{provider_id}",
+        headers=headers,
+        json={"base_url": "not-a-valid-url"},
+    )
+    assert invalid_provider.status_code == 200, invalid_provider.text
+    health = client.post(
+        f"/api/v2/model-settings/profiles/{second_profile.json()['id']}/test",
+        headers=headers,
+    )
+    assert health.status_code == 502, health.text
+    assert "Base URL" in health.json()["detail"]
+
     refreshed = client.post(
         "/api/v2/auth/refresh",
         json={"refresh_token": tokens["refresh_token"], "device_info": "pytest-rotated"},

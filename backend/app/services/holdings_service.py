@@ -21,9 +21,9 @@ VISION_PROMPT = """
 顶层结构必须为：
 {
   "holdings": [{
-    "code": "六位证券代码",
+    "code": "截图中明确显示的证券代码；未显示则为 null",
     "name": "名称",
-    "market": "SH/SZ/BJ/HK/UNKNOWN",
+    "market": "截图中明确显示的市场；未显示则为 null",
     "qty": 总持仓数量,
     "available_qty": 当前可卖数量,
     "cost": 成本价,
@@ -43,9 +43,11 @@ VISION_PROMPT = """
 规则：
 1. 盈亏双行字段通常第一行是金额、第二行是百分比，不能混淆。
 2. 新标准券、标准券、国债逆回购不放入 holdings，放入 excluded_items 或 repo_or_standard_bond_value。
-3. 看不清的数字填 null，不得猜测。
-4. available_qty 只是当前可卖数量，不能把 qty-available_qty 当作已经卖出。
-5. 只返回 JSON 对象。
+3. 识图范围仅限截图中实际可见的内容，不补充截图之外的信息。
+4. 截图未显示证券代码时，code 必须填 null；不得根据证券名称、基金名称或常识推测代码。
+5. 看不清或未显示的数字填 null，不得猜测。
+6. available_qty 只是当前可卖数量，不能把 qty-available_qty 当作已经卖出。
+7. 只返回 JSON 对象。
 """.strip()
 
 
@@ -77,13 +79,11 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
         digits = "".join(ch for ch in code if ch.isdigit())
         if len(digits) >= 6:
             code = digits[-6:]
-        if not code:
-            errors.append(f"第 {index + 1} 行缺少证券代码")
-            continue
-        if code in seen:
+        if code and code in seen:
             errors.append(f"证券代码 {code} 重复")
             continue
-        seen.add(code)
+        if code:
+            seen.add(code)
         qty = _number(holding.qty)
         available = _number(holding.available_qty)
         if qty is not None and qty < 0:
@@ -172,7 +172,7 @@ def parse_upload(upload_id: int) -> None:
         result = call_model(
             profile,
             [
-                {"role": "system", "content": "严格提取图片中的持仓数据，不得编造。"},
+                {"role": "system", "content": "仅提取图片中实际可见的持仓数据，不推测、不补全图片未显示的信息。"},
                 {"role": "user", "content": VISION_PROMPT},
             ],
             image_bytes=image,

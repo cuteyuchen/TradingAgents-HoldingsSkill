@@ -170,7 +170,7 @@ watch(portfolioId, () => void loadRuns())
       </main>
     </div>
 
-    <n-modal v-model:show="comparisonOpen" preset="card" title="与上次分析比较" class="compare-modal">
+    <n-modal v-model:show="comparisonOpen" preset="card" title="与上次分析比较" style="width: min(960px, 94vw)">
       <template v-if="comparison?.previous">
         <n-alert type="info" :show-icon="false">共 {{ comparison.changes?.length || 0 }} 个标的或建议字段发生变化。</n-alert>
         <div v-for="change in comparison.changes || []" :key="change.code" class="change-card">
@@ -205,7 +205,7 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.035em; }
 .table-wrap { overflow-x: auto; }.action-table { width: 100%; min-width: 1000px; border-collapse: collapse; }.action-table th { border-bottom: 1px solid var(--app-border); padding: 9px; color: var(--app-text-muted); font-size: 10px; text-align: left; }.action-table td { border-bottom: 1px solid var(--app-border-soft); padding: 11px 9px; vertical-align: top; }.action-table td:first-child { display: grid; }.action-table td:first-child span { color: var(--app-text-muted); font-size: 10px; }.long-cell { min-width: 220px; line-height: 1.55; }
 .markdown-panel { padding: 25px; }.json-panel { display: grid; gap: 16px; }.evidence-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }.evidence-grid div { border: 1px solid var(--app-border-soft); border-radius: 10px; padding: 14px; }.evidence-grid h3 { margin: 0 0 9px; font-size: 14px; }.evidence-grid ul { margin: 0; padding-left: 18px; color: var(--app-text-muted); line-height: 1.7; }
 pre { overflow: auto; border-radius: 9px; background: color-mix(in srgb, var(--app-bg) 70%, black); padding: 13px; font-size: 11px; white-space: pre-wrap; }.screenshot-panel { display: grid; min-height: 420px; place-items: center; }.screenshot-panel img { max-width: 100%; max-height: 75dvh; object-fit: contain; }
-.compare-modal { width: min(960px, 94vw); }.change-card { display: grid; grid-template-columns: 80px 1fr 1fr; gap: 10px; margin-top: 12px; border: 1px solid var(--app-border-soft); border-radius: 10px; padding: 12px; }.change-card div > span { color: var(--app-text-muted); font-size: 11px; }
+.change-card { display: grid; grid-template-columns: 80px 1fr 1fr; gap: 10px; margin-top: 12px; border: 1px solid var(--app-border-soft); border-radius: 10px; padding: 12px; }.change-card div > span { color: var(--app-text-muted); font-size: 11px; }
 @media (max-width: 980px) { .report-layout { grid-template-columns: 1fr; }.report-list { position: static; display: flex; max-height: none; overflow-x: auto; }.run-item { min-width: 250px; }.decision-hero { grid-template-columns: 1fr; }.hero-actions { grid-column: auto; }.change-card { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .page-heading { align-items: start; flex-direction: column; }.heading-actions { width: 100%; }.portfolio-filter { flex: 1; width: auto; }.hero-stats, .evidence-grid { grid-template-columns: 1fr; } }
 </style>

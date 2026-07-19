@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import SessionLocal
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
-from .market_data import collect_market_snapshot, refresh_snapshot_quotes
+from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
 from .model_client import call_model, parse_json_result
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,7 @@ def _holdings(snapshot: PortfolioSnapshot) -> list[dict[str, Any]]:
         {
             "code": row.code,
             "name": row.name,
+            "market": row.market,
             "qty": row.qty,
             "available_qty": row.available_qty,
             "unavailable_qty": row.unavailable_qty,
@@ -151,6 +152,46 @@ def _call_json(profile: ModelProfile, system: str, payload: dict[str, Any], inst
         json_mode=True,
     )
     return parse_json_result(response)
+
+
+def _resolve_missing_codes(profile: ModelProfile, holdings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    missing = [
+        {"index": index, "name": item.get("name"), "market": item.get("market")}
+        for index, item in enumerate(holdings)
+        if not normalize_code(item.get("code") or "")
+    ]
+    if not missing:
+        return holdings
+
+    result = _call_json(
+        profile,
+        "你负责根据证券名称匹配 A 股、场内 ETF 或基金的证券代码。无法唯一确定时必须返回 null，不得猜测。",
+        {"holdings": missing},
+        "为每个输入项匹配六位证券代码。名称可能是券商显示的简称。"
+        "输出 JSON：{\"matches\":[{\"index\":0,\"code\":\"六位代码或null\","
+        "\"confidence\":\"high/medium/low\",\"reason\":\"匹配依据\"}]}。"
+        "只有能够唯一确定时才返回代码。",
+    )
+    matches = result.get("matches") if isinstance(result, dict) else None
+    if not isinstance(matches, list):
+        return holdings
+
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        try:
+            index = int(match.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(holdings) or holdings[index].get("code"):
+            continue
+        code = normalize_code(str(match.get("code") or ""))
+        if len(code) != 6 or not code.isdigit():
+            continue
+        holdings[index]["code"] = code
+        holdings[index]["code_source"] = "model_match"
+        holdings[index]["code_match_confidence"] = match.get("confidence")
+    return holdings
 
 
 def _blocked_result(snapshot: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
@@ -375,10 +416,18 @@ def run_analysis_job(job_id: int) -> None:
             "repo_or_standard_bond_value": snapshot_row.repo_or_standard_bond_value,
             "holdings": _holdings(snapshot_row),
         }
-        codes = [item["code"] for item in snapshot["holdings"]]
 
         _job_stage(db, job, "context_loading", 10)
         history = _history(db, job)
+        quick_profile = _profile(db, job.user_id, "analysis")
+        deep_profile = _profile(db, job.user_id, "deep_analysis") or quick_profile
+        if any(not normalize_code(item.get("code") or "") for item in snapshot["holdings"]):
+            resolution_profile = quick_profile or deep_profile
+            if resolution_profile is None:
+                raise RuntimeError("default_analysis_model_not_configured")
+            _job_stage(db, job, "symbol_resolving", 18)
+            snapshot["holdings"] = _resolve_missing_codes(resolution_profile, snapshot["holdings"])
+        codes = [item["code"] for item in snapshot["holdings"] if item.get("code")]
         _job_stage(db, job, "market_collecting", 22)
         market = collect_market_snapshot(codes)
 
@@ -387,8 +436,6 @@ def run_analysis_job(job_id: int) -> None:
             final_profile = None
             market = refresh_snapshot_quotes(market, codes)
         else:
-            quick_profile = _profile(db, job.user_id, "analysis")
-            deep_profile = _profile(db, job.user_id, "deep_analysis") or quick_profile
             if quick_profile is None and deep_profile is None:
                 raise RuntimeError("default_analysis_model_not_configured")
 
