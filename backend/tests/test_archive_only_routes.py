@@ -1,4 +1,4 @@
-"""Route exposure tests for the archive-only API surface."""
+"""Route exposure tests for the V1 archive compatibility surface."""
 import os
 import sys
 
@@ -6,26 +6,24 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEST_DB_DIR = os.path.join(BACKEND_DIR, "data")
 TEST_ARTIFACTS_DIR = os.path.join(TEST_DB_DIR, f"test_shared_artifacts_{os.getpid()}")
 os.makedirs(TEST_DB_DIR, exist_ok=True)
-os.environ["ADVISOR_DB_PATH"] = os.path.join(TEST_DB_DIR, f"test_shared_{os.getpid()}.db")
-os.environ["ADVISOR_ARTIFACTS_DIR"] = TEST_ARTIFACTS_DIR
-os.environ["ADVISOR_SQLITE_JOURNAL_MODE"] = "MEMORY"
-os.environ["ADVISOR_TOKEN"] = "test_token_xxx"
+os.environ.setdefault("ADVISOR_DB_PATH", os.path.join(TEST_DB_DIR, f"test_shared_{os.getpid()}.db"))
+os.environ.setdefault("ADVISOR_ARTIFACTS_DIR", TEST_ARTIFACTS_DIR)
+os.environ.setdefault("ADVISOR_SQLITE_JOURNAL_MODE", "MEMORY")
+os.environ.setdefault("ADVISOR_TOKEN", "test_token_xxx")
+os.environ.setdefault("SCHEDULER_ENABLED", "false")
 
 sys.path.insert(0, BACKEND_DIR)
 
 
-def test_only_archive_auth_and_health_routes_are_exposed():
-    """Old persistence APIs should not remain registered after archive-only rebuild."""
-    try:
-        os.remove(os.environ["ADVISOR_DB_PATH"])
-    except OSError:
-        pass
-
+def test_only_expected_v1_archive_routes_are_exposed():
+    """Removed legacy V1 APIs stay absent while V2 routes may coexist."""
     from fastapi.testclient import TestClient
 
     from app.database import init_db
     from app.main import app
 
+    # Never unlink the shared SQLite file after the application engine has been
+    # created. The full suite intentionally shares one per-process test database.
     init_db()
     client = TestClient(app)
     headers = {"Authorization": "Bearer test_token_xxx"}
@@ -47,8 +45,3 @@ def test_only_archive_auth_and_health_routes_are_exposed():
     ]
     for route in removed_routes:
         assert client.get(route, headers=headers).status_code == 404
-
-    try:
-        os.remove(os.environ["ADVISOR_DB_PATH"])
-    except OSError:
-        pass

@@ -1,15 +1,31 @@
 services:
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: advisor-backend
     environment:
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-true}
+      - JWT_ACCESS_TOKEN_MINUTES=${JWT_ACCESS_TOKEN_MINUTES:-15}
+      - JWT_REFRESH_TOKEN_DAYS=${JWT_REFRESH_TOKEN_DAYS:-30}
       - ADVISOR_DB_PATH=/app/data/advisor.db
+      - ADVISOR_ARTIFACTS_DIR=/app/data/artifacts
+      - ADVISOR_SQLITE_JOURNAL_MODE=${ADVISOR_SQLITE_JOURNAL_MODE:-WAL}
       - ADVISOR_CORS_ORIGINS=${ADVISOR_CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-12582912}
+      - ANALYSIS_HISTORY_LIMIT=${ANALYSIS_HISTORY_LIMIT:-5}
+      - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-true}
+      - SCHEDULER_INTERVAL_SECONDS=${SCHEDULER_INTERVAL_SECONDS:-60}
+      - PUBLIC_APP_URL=${PUBLIC_APP_URL:-http://localhost:8080}
+      - HOLDINGS_SKILL_DIR=/app/skill/tradingagents-holdings-advisor
     volumes:
       - advisor-data:/app/data
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   frontend:
@@ -17,6 +33,8 @@ services:
     container_name: advisor-frontend
     depends_on:
       - backend
+    environment:
+      - BACKEND_URL=http://backend:8000
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     restart: unless-stopped

@@ -1,0 +1,59 @@
+{
+  "name": "tradingagents-holdings-advisor",
+  "version": "2.0.0",
+  "prompt_version": "2026-07-19",
+  "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
+  "current_holdings_precedence": [
+    "confirmed_portfolio_snapshot",
+    "current_screenshot_or_manual_input",
+    "history_context_only"
+  ],
+  "phases": [
+    "intent_and_history_context",
+    "verified_market_snapshot",
+    "quality_gate",
+    "analyst_evidence",
+    "bull_bear_debate",
+    "research_verdict",
+    "trader_proposal",
+    "risk_revision",
+    "final_quote_refresh",
+    "portfolio_manager_final",
+    "persistence_and_notification"
+  ],
+  "rules": [
+    "The confirmed current portfolio snapshot is the only source of truth for current holdings. Historical reports are context only.",
+    "qty is total quantity and available_qty is currently sellable quantity. A reduce or sell action must never exceed available_qty.",
+    "qty minus available_qty may be pending, frozen, or T+1 restricted and must never be interpreted as already sold.",
+    "A loss is a risk input, not an automatic sell signal. Technical, capital-flow, event, and portfolio evidence are required.",
+    "If a same-day or recent recommendation reverses direction, the material new evidence must be stated explicitly.",
+    "Critical quote gaps block concrete trade actions. Optional evidence gaps lower the quality grade and must remain visible.",
+    "Facts, inferences, risks, triggers, invalidation conditions, and unresolved claims must be separated.",
+    "A candidate that is already held must agree with the holding-level add action; otherwise remove the conflicting candidate.",
+    "Final quote-sensitive fields must be refreshed immediately before the final portfolio decision.",
+    "The system provides research assistance only, never promises returns, and never executes brokerage orders."
+  ],
+  "quality_gate": {
+    "mandatory": [
+      "confirmed_holdings",
+      "instrument_code",
+      "quote_coverage",
+      "available_quantity_semantics"
+    ],
+    "block_action_when_missing": [
+      "confirmed_holdings",
+      "quote_coverage"
+    ]
+  },
+  "checkpoints": {
+    "09:35": "Opening confirmation after the first tradable prices are available.",
+    "10:00": "First confirmed intraday trend and initial risk adjustments.",
+    "12:00": "Midday sector rotation and morning-signal validation.",
+    "14:30": "Late-session overnight-carry and risk control."
+  },
+  "upstream_references": [
+    "TauricResearch/TradingAgents",
+    "simonlin1212/TradingAgents-astock",
+    "KylinMountain/TradingAgents-AShare"
+  ]
+}

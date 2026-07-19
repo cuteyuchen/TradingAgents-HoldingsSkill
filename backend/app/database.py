@@ -6,38 +6,38 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import settings
 
-# Ensure the data directory exists for the SQLite file.
 os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
 
 engine = create_engine(
     f"sqlite:///{settings.DB_PATH}",
-    connect_args={"check_same_thread": False},  # FastAPI runs across threads.
+    connect_args={"check_same_thread": False},
     echo=False,
 )
 
 
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
-    """Apply optional SQLite pragmas before SQLAlchemy creates tables."""
+    """Enable relational integrity and apply the optional journal mode."""
     journal_mode = settings.SQLITE_JOURNAL_MODE
     if journal_mode not in {"", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}:
         raise ValueError(f"Unsupported ADVISOR_SQLITE_JOURNAL_MODE: {journal_mode}")
-    if journal_mode:
-        cursor = dbapi_connection.cursor()
-        try:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        if journal_mode:
             cursor.execute(f"PRAGMA journal_mode={journal_mode}")
-        finally:
-            cursor.close()
+    finally:
+        cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 Base = declarative_base()
 
 
 def init_db() -> None:
-    """Create all tables. Called once at application startup."""
-    # Import models so SQLAlchemy registers them on Base before create_all.
-    from . import models  # noqa: F401
+    """Create legacy and V2 tables. Called once at application startup."""
+    from . import models, v2_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
@@ -45,8 +45,20 @@ def init_db() -> None:
 
 
 def _apply_lightweight_migrations() -> None:
-    """SQLite-friendly schema updates for the no-Alembic single-file setup."""
+    """Compatibility updates for developers opening an older local database.
+
+    Docker deployments run Alembic before application startup. This intentionally
+    small fallback covers columns that cannot be added by ``create_all``.
+    """
     inspector = inspect(engine)
+
+    if inspector.has_table("users"):
+        user_columns = {c["name"] for c in inspector.get_columns("users")}
+        if "timezone" not in user_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'"
+                ))
 
     if inspector.has_table("runs"):
         run_columns = {c["name"] for c in inspector.get_columns("runs")}
@@ -142,7 +154,6 @@ def _repair_historical_pnl_values() -> None:
 
 
 def get_db():
-    """FastAPI dependency: yield a per-request DB session."""
     db = SessionLocal()
     try:
         yield db
