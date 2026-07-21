@@ -1,9 +1,11 @@
 """FastAPI application entry point."""
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from . import auth
 from .config import settings
@@ -97,3 +99,31 @@ def healthz() -> dict:
 @app.get("/api/v1/auth/verify")
 def verify_auth(_: str = Depends(auth.require_token)) -> dict:
     return {"status": "ok"}
+
+
+STATIC_DIR = Path(settings.STATIC_DIR).resolve()
+
+
+@app.get("/{frontend_path:path}", include_in_schema=False)
+def serve_frontend(frontend_path: str, request: Request):
+    """Serve the bundled Vue application without masking missing API routes."""
+    if not STATIC_DIR.is_dir() or frontend_path.startswith("api/"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    requested_path = (STATIC_DIR / frontend_path).resolve()
+    try:
+        requested_path.relative_to(STATIC_DIR)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+    if requested_path.is_file():
+        return FileResponse(requested_path)
+
+    accepts_html = frontend_path == "" or "text/html" in request.headers.get("accept", "")
+    if not accepts_html or Path(frontend_path).suffix:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return FileResponse(index_path)

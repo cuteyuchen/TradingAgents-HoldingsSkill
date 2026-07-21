@@ -12,7 +12,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: cuteyuchen
-  IMAGE_PREFIX: tradingagents-holdings-advisor
+  IMAGE_NAME: tradingagents-holdings-advisor
 
 jobs:
   build:
@@ -20,17 +20,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - service: backend
-            context: ./backend
-            image_suffix: backend
-          - service: frontend
-            context: ./frontend
-            image_suffix: frontend
 
     steps:
       - name: Checkout
@@ -50,18 +39,19 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}-${{ matrix.image_suffix }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-
             type=ref,event=tag
 
-      - name: Build and push ${{ matrix.service }}
+      - name: Build and push application image
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
+          context: .
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,scope=application
+          cache-to: type=gha,mode=max,scope=application

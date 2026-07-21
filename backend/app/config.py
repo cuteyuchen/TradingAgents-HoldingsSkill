@@ -29,6 +29,10 @@ class Settings:
         "ADVISOR_ARTIFACTS_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "artifacts"),
     )
+    STATIC_DIR: str = os.getenv(
+        "ADVISOR_STATIC_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static"),
+    )
     SQLITE_JOURNAL_MODE: str = os.getenv("ADVISOR_SQLITE_JOURNAL_MODE", "").upper()
     MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(12 * 1024 * 1024)))
 

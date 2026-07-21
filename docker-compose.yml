@@ -1,9 +1,9 @@
 services:
-  backend:
+  advisor:
     build:
       context: .
-      dockerfile: backend/Dockerfile
-    container_name: advisor-backend
+      dockerfile: Dockerfile
+    container_name: tradingagents-holdings-advisor
     environment:
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
       - APP_SECRET_KEY=${APP_SECRET_KEY}
@@ -24,19 +24,9 @@ services:
       - advisor-data:/app/data
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+      - "${FRONTEND_PORT:-8080}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
-  frontend:
-    build: ./frontend
-    container_name: advisor-frontend
-    depends_on:
-      - backend
-    environment:
-      - BACKEND_URL=http://backend:8000
-    ports:
-      - "${FRONTEND_PORT:-8080}:80"
     restart: unless-stopped
 
 volumes:
