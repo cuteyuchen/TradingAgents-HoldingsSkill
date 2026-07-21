@@ -13,6 +13,22 @@ from sqlalchemy import event
 from ..v2_models import AnalysisRun
 
 
+REQUIRED_STRUCTURED_OUTPUTS = (
+    "evidence_pack",
+    "quality_gate",
+    "investment_debate_state",
+    "research_manager_verdict",
+    "trader_proposal",
+    "risk_revision",
+    "risk_debate_state",
+    "portfolio_manager_final",
+    "today_actions",
+    "buy_candidates",
+    "rebalance_plan",
+    "checkpoint_plan",
+)
+
+
 class SkillRuntimeError(RuntimeError):
     pass
 
@@ -58,12 +74,14 @@ def runtime_prompt() -> str:
     checkpoints = "\n".join(
         f"- {name}: {description}" for name, description in runtime.get("checkpoints", {}).items()
     )
+    required_outputs = "\n".join(f"- {name}" for name in REQUIRED_STRUCTURED_OUTPUTS)
     return (
         f"Skill: {runtime['name']} v{runtime['version']}\n"
         f"Prompt version: {runtime.get('prompt_version', '-')}\n"
         f"Runtime SHA256: {runtime['runtime_sha256']}\n\n"
         f"Required phases: {phases}\n\n"
         f"Core rules:\n{rules}\n\n"
+        f"Required structured outputs:\n{required_outputs}\n\n"
         f"Checkpoint guidance:\n{checkpoints}"
     )
 
@@ -76,6 +94,7 @@ def runtime_metadata() -> dict[str, Any]:
         "prompt_version": runtime.get("prompt_version"),
         "runtime_sha256": runtime["runtime_sha256"],
         "upstream_references": runtime.get("upstream_references", []),
+        "required_structured_outputs": list(REQUIRED_STRUCTURED_OUTPUTS),
     }
 
 

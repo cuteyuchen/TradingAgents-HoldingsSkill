@@ -24,4 +24,8 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
     assert metadata["runtime_sha256"] == runtime["runtime_sha256"]
     assert "available_qty" in prompt
     assert "final_quote_refresh" in prompt
+    assert "investment_debate_state" in prompt
+    assert "risk_debate_state" in prompt
+    assert "buy_candidates" in prompt
+    assert "today_actions" in metadata["required_structured_outputs"]
     assert "TauricResearch/TradingAgents" in metadata["upstream_references"]

@@ -457,10 +457,11 @@ onMounted(load)
     <n-modal
       v-model:show="providerOpen"
       preset="card"
+      class="provider-modal"
       :title="editingProviderId === null ? '新增模型供应商' : '编辑模型供应商'"
-      style="width: min(480px, 92vw)"
+      style="width: min(560px, calc(100vw - 32px)); max-width: calc(100vw - 32px)"
     >
-      <n-form label-placement="top">
+      <n-form label-placement="top" class="provider-form">
         <n-form-item label="供应商类型">
           <n-select v-model:value="providerForm.provider" :options="providerOptions"/>
         </n-form-item>

@@ -70,6 +70,14 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
   box-shadow: var(--app-shadow);
   backdrop-filter: blur(14px);
 }
+.provider-modal.n-card {
+  width: min(560px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px) !important;
+}
+.provider-modal .n-card__content {
+  max-height: calc(100dvh - 150px);
+  overflow-y: auto;
+}
 .muted { color: var(--app-text-muted); }
 .pos { color: var(--app-danger); }
 .neg { color: var(--app-success); }

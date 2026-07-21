@@ -196,7 +196,19 @@ def test_v2_portfolio_flow(monkeypatch):
     assert report.status_code == 200, report.text
     assert report.json()["final_rating"] == "hold"
     assert "今日持仓操作" in report.json()["markdown"]
-    assert report.json()["structured_result"]["result"]["holdings"][0]["max_sellable_qty"] == 80
+    structured = report.json()["structured_result"]
+    assert structured["result"]["holdings"][0]["max_sellable_qty"] == 80
+    assert structured["workflow"]["investment_debate_state"]["bull_claims"][0]["claim_id"].startswith("INV-")
+    risk_claims = sum(
+        (
+            structured["workflow"]["risk_debate_state"][key]
+            for key in ("aggressive_claims", "neutral_claims", "conservative_claims")
+        ),
+        [],
+    )
+    assert [claim["claim_id"] for claim in risk_claims] == ["RISK-1", "RISK-2", "RISK-3"]
+    assert "buy_candidate_selection" in structured["skill_execution"]["phases_completed"]
+    assert "今日买入/轮动候选" in report.json()["markdown"]
 
     schedule = client.post(
         "/api/v2/schedules",

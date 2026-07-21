@@ -6,6 +6,7 @@ import random
 import re
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -52,7 +53,13 @@ def _decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _em_get(url: str, *, params: dict[str, Any], timeout: float = 12.0) -> requests.Response:
+def _em_get(
+    url: str,
+    *,
+    params: dict[str, Any],
+    timeout: float = 12.0,
+    headers: dict[str, str] | None = None,
+) -> requests.Response:
     """Serialize Eastmoney requests to reduce temporary IP blocking."""
     global _EM_LAST_CALL
     with _EM_LOCK:
@@ -63,7 +70,11 @@ def _em_get(url: str, *, params: dict[str, Any], timeout: float = 12.0) -> reque
         response = requests.get(
             url,
             params=params,
-            headers={"User-Agent": USER_AGENT, "Referer": "https://quote.eastmoney.com/"},
+            headers={
+                "User-Agent": USER_AGENT,
+                "Referer": "https://quote.eastmoney.com/",
+                **(headers or {}),
+            },
             timeout=timeout,
         )
         _EM_LAST_CALL = time.monotonic()
@@ -243,6 +254,155 @@ def fetch_announcements(code: str, limit: int = 5) -> list[dict[str, Any]]:
     return output
 
 
+def fetch_market_news(limit: int = 8) -> list[dict[str, Any]]:
+    """Fetch current market catalysts, with CLS then Eastmoney fallback."""
+    try:
+        response = requests.get(
+            "https://www.cls.cn/nodeapi/telegraphList",
+            params={"rn": str(limit), "page": "1"},
+            headers={"User-Agent": USER_AGENT, "Referer": "https://www.cls.cn/"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        rows = ((response.json().get("data") or {}).get("roll_data") or [])
+        items = [
+            {
+                "title": row.get("title") or row.get("brief"),
+                "time": row.get("ctime"),
+                "source": "CLS telegraph",
+                "kind": "market_news",
+            }
+            for row in rows[:limit]
+            if row.get("title") or row.get("brief")
+        ]
+        if items:
+            return items
+    except Exception:
+        pass
+
+    payload = _em_get(
+        "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
+        params={
+            "client": "web",
+            "biz": "web_724",
+            "fastColumn": "102",
+            "sortEnd": "0",
+            "pageSize": str(limit),
+            "req_trace": str(uuid.uuid4()),
+        },
+        headers={"Referer": "https://kuaixun.eastmoney.com/"},
+        timeout=8,
+    ).json()
+    rows = ((payload.get("data") or {}).get("fastNewsList") or [])
+    if not rows:
+        raise ValueError("market_news_missing")
+    return [
+        {
+            "title": row.get("title"),
+            "time": row.get("showTime"),
+            "source": "Eastmoney 7x24",
+            "kind": "market_news",
+        }
+        for row in rows[:limit]
+        if row.get("title")
+    ]
+
+
+def fetch_sector_heat(limit: int = 10) -> list[dict[str, Any]]:
+    """Fetch the leading Eastmoney industry/concept boards for candidate context."""
+    params = {
+        "pn": "1",
+        "pz": str(limit),
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": "m:90+t:2+f:!50",
+        "fields": "f12,f14,f3,f62,f104,f105,f106,f184",
+    }
+    payload = _em_get("https://push2.eastmoney.com/api/qt/clist/get", params=params).json()
+    rows = ((payload.get("data") or {}).get("diff") or [])
+    output: list[dict[str, Any]] = []
+    for rank, row in enumerate(rows, start=1):
+        output.append(
+            {
+                "rank": rank,
+                "code": row.get("f12"),
+                "name": row.get("f14"),
+                "pct_change": _float(row.get("f3")),
+                "main_net": _float(row.get("f62")),
+                "main_net_ratio": _float(row.get("f184")),
+                "advancers": _float(row.get("f104")),
+                "decliners": _float(row.get("f105")),
+                "unchanged": _float(row.get("f106")),
+                "rotation_stage": "intraday_leader" if rank <= 5 else "watch",
+                "source": "Eastmoney sector ranking",
+            }
+        )
+    return output
+
+
+def fetch_etf_leaders(limit: int = 12) -> list[dict[str, Any]]:
+    """Fetch liquid ETF leaders as the safer side of the candidate pool."""
+    params = {
+        "pn": "1",
+        "pz": str(limit),
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
+        "fields": "f12,f14,f2,f3,f5,f6,f8,f10,f62",
+    }
+    payload = _em_get("https://push2.eastmoney.com/api/qt/clist/get", params=params).json()
+    rows = ((payload.get("data") or {}).get("diff") or [])
+    output: list[dict[str, Any]] = []
+    for rank, row in enumerate(rows, start=1):
+        output.append(
+            {
+                "rank": rank,
+                "code": normalize_code(str(row.get("f12") or "")),
+                "name": row.get("f14"),
+                "price": _float(row.get("f2")),
+                "pct_change": _float(row.get("f3")),
+                "volume": _float(row.get("f5")),
+                "turnover": _float(row.get("f6")),
+                "turnover_rate": _float(row.get("f8")),
+                "volume_ratio": _float(row.get("f10")),
+                "main_net": _float(row.get("f62")),
+                "source": "Eastmoney ETF ranking",
+            }
+        )
+    return output
+
+
+def _market_mood(index_quote: dict[str, Any], sector_heat: list[dict[str, Any]]) -> dict[str, Any]:
+    pct_change = _float(index_quote.get("pct_change"))
+    positive_sectors = sum(1 for item in sector_heat if (_float(item.get("pct_change")) or 0) > 0)
+    if pct_change is None:
+        mood = "unknown"
+        buy_mode = "watch_only"
+    elif pct_change < -1:
+        mood = "risk_off"
+        buy_mode = "risk_control"
+    elif pct_change >= 0 and positive_sectors >= max(1, len(sector_heat) // 2):
+        mood = "constructive"
+        buy_mode = "rotation_or_conditional_buy"
+    else:
+        mood = "mixed"
+        buy_mode = "rotation_watch"
+    return {
+        "mood": mood,
+        "buy_mode_hint": buy_mode,
+        "shanghai_pct_change": pct_change,
+        "positive_hot_sectors": positive_sectors,
+        "sector_sample_size": len(sector_heat),
+        "source": "derived from verified index quote and Eastmoney sector ranking",
+    }
+
+
 def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
     normalized_codes = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
     quotes: dict[str, Any]
@@ -276,6 +436,30 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
                 announcements[code] = []
                 errors.append(f"announcements {code}: {exc}")
 
+    try:
+        sector_heat = fetch_sector_heat()
+    except Exception as exc:
+        sector_heat = []
+        errors.append(f"sector_heat: {exc}")
+    try:
+        etf_leaders = fetch_etf_leaders()
+    except Exception as exc:
+        etf_leaders = []
+        errors.append(f"etf_leaders: {exc}")
+
+    try:
+        market_news = fetch_market_news()
+    except Exception as exc:
+        market_news = []
+        errors.append(f"market_news: {exc}")
+
+    company_news = [
+        {**item, "code": code, "kind": "announcement"}
+        for code, items in announcements.items()
+        for item in items[:3]
+    ]
+    news = market_news + company_news
+
     holding_quotes = {code: quotes.get(code, {}) for code in normalized_codes}
     complete_quotes = sum(1 for item in holding_quotes.values() if item.get("price") is not None)
     ratio = complete_quotes / len(normalized_codes) if normalized_codes else 0
@@ -289,13 +473,18 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
         grade = "C"
     else:
         grade = "F"
+    index_quote = quotes.get("000001", {})
     return {
         "captured_at": datetime.now(CHINA_TZ).isoformat(timespec="seconds"),
         "quotes": holding_quotes,
         "technicals": technicals,
         "fund_flows": fund_flows,
         "announcements": announcements,
-        "indices": {"sh000001": quotes.get("000001", {})},
+        "news": news,
+        "indices": {"sh000001": index_quote},
+        "sector_heat": sector_heat,
+        "candidate_pool": {"etf_leaders": etf_leaders},
+        "market_mood": _market_mood(index_quote, sector_heat),
         "quality_grade": grade,
         "errors": errors,
         "source_chain": [
@@ -303,6 +492,9 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
             "Eastmoney push2his K-line",
             "Eastmoney push2his fund flow",
             "Eastmoney announcements",
+            "CLS telegraph / Eastmoney 7x24",
+            "Eastmoney sector ranking",
+            "Eastmoney ETF ranking",
         ],
     }
 
