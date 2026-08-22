@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, onMounted, reactive, ref} from 'vue'
+import {computed, onMounted, reactive, ref, watch} from 'vue'
 import {Bell, Bot, CalendarClock, CheckCircle2, KeyRound, Pencil, Play, Plus, TestTube2, Trash2} from 'lucide-vue-next'
 import {useDialog, useMessage} from 'naive-ui'
 
@@ -36,7 +36,10 @@ const profileForm = reactive({
   model_name: '',
   temperature: 0.2,
   max_tokens: 4096,
-  timeout: 90,
+  // 开启流式后，超时只约束"两个数据块之间的静默间隔"，因此默认值可以远小于总耗时。
+  timeout: 180,
+  stream: true,
+  max_retries: 1,
   is_default: true
 })
 const scheduleForm = reactive({
@@ -74,6 +77,16 @@ const analysisModeLabels: Record<AnalysisMode, string> = {
   deep: '深度分析',
 }
 const providerById = computed(() => Object.fromEntries(providers.value.map(item => [item.id, item])))
+
+// 流式与非流式下"超时"的含义完全不同，直接把区别写在表单里，避免用户误配。
+const streamHint = computed(() => profileForm.stream
+  ? '推荐。超时只计算两次输出之间的间隔，模型思考再久也不会误判超时。'
+  : '关闭后超时必须覆盖模型完整思考时间，推理模型建议设为 600 秒以上。')
+
+// 切换流式时同步一个合理的超时默认值：流式看静默间隔，非流式要覆盖整段思考。
+watch(() => profileForm.stream, (streaming) => {
+  profileForm.timeout = streaming ? 180 : 600
+})
 
 function fmt(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', {hour12: false}) : '—'
@@ -159,7 +172,11 @@ async function createProfile() {
       parameters: {
         temperature: profileForm.temperature,
         max_tokens: profileForm.max_tokens,
-        timeout: profileForm.timeout
+        // 流式下这个值是静默间隔阈值，非流式下是整次请求的读超时。
+        timeout: profileForm.timeout,
+        stream_idle_timeout: profileForm.timeout,
+        stream: profileForm.stream,
+        max_retries: profileForm.max_retries
       }, is_default: profileForm.is_default,
     })
     profileOpen.value = false
@@ -499,17 +516,26 @@ onMounted(load)
         <n-form-item label="模型名称">
           <n-input v-model:value="profileForm.model_name" placeholder="例如 gpt-4.1-mini / qwen-vl-max"/>
         </n-form-item>
-        <div class="form-grid">
+        <div class="form-grid model-param-grid">
           <n-form-item label="Temperature">
             <n-input-number v-model:value="profileForm.temperature" :min="0" :max="2" :step="0.1"/>
           </n-form-item>
           <n-form-item label="Max Tokens">
             <n-input-number v-model:value="profileForm.max_tokens" :min="256" :max="128000"/>
           </n-form-item>
-          <n-form-item label="超时（秒）">
-            <n-input-number v-model:value="profileForm.timeout" :min="10" :max="600"/>
+          <n-form-item :label="profileForm.stream ? '静默超时（秒）' : '超时（秒）'">
+            <n-input-number v-model:value="profileForm.timeout" :min="10" :max="3600"/>
+          </n-form-item>
+          <n-form-item label="超时重试次数">
+            <n-input-number v-model:value="profileForm.max_retries" :min="0" :max="5"/>
           </n-form-item>
         </div>
+        <n-form-item label="流式输出">
+          <div class="stream-field">
+            <n-switch v-model:value="profileForm.stream"/>
+            <span class="hint">{{ streamHint }}</span>
+          </div>
+        </n-form-item>
         <n-form-item label="设为该用途默认模型">
           <n-switch v-model:value="profileForm.is_default"/>
         </n-form-item>
@@ -725,6 +751,24 @@ h1 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
+}
+
+/* 模型参数有 4 项，用两列排更均匀，避免第 4 项单独占一行。 */
+.model-param-grid {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.stream-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.stream-field .hint {
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.7;
 }
 
 @media (max-width: 1000px) {

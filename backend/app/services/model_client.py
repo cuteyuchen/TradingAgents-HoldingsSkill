@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
 import requests
 
+from ..config import settings
 from ..security import decrypt_secret
 from ..v2_models import ModelProfile, ModelProvider
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_BASE_URLS = {
@@ -32,11 +36,25 @@ class ModelCallError(RuntimeError):
     pass
 
 
+class ModelTimeoutError(ModelCallError):
+    """模型在允许的静默时间内没有返回任何数据。
+
+    单独成类是为了让上层能区分"网络/超时"和"模型返回了无效内容"，
+    前者可以安全重试，后者重试没有意义。
+    """
+
+
 @dataclass
 class ModelResult:
     text: str
     latency_ms: int
     raw: dict[str, Any]
+    # 推理型模型的思维链（reasoning_content / thinking），仅用于排查，不参与解析。
+    reasoning: str = ""
+    # 本次调用是否走流式；便于在日志和健康检查里回看实际链路。
+    streamed: bool = False
+    # 因超时或连接中断而自动重试的次数。
+    retries: int = field(default=0)
 
 
 def _api_key(provider: ModelProvider) -> str | None:
@@ -53,9 +71,73 @@ def _base_url(provider: ModelProvider) -> str:
     return value
 
 
-def _timeout(profile: ModelProfile) -> float:
-    params = profile.parameters_json or {}
-    return float(params.get("timeout", 90))
+def _params(profile: ModelProfile) -> dict[str, Any]:
+    return profile.parameters_json or {}
+
+
+def _float_param(params: dict[str, Any], key: str, default: float) -> float:
+    """读取数值参数，非法值回退到默认值而不是直接抛错。"""
+    try:
+        value = float(params.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _use_stream(profile: ModelProfile) -> bool:
+    """是否使用流式请求。模型档案里的 stream 参数优先于全局默认值。"""
+    params = _params(profile)
+    if "stream" in params:
+        return bool(params.get("stream"))
+    return settings.MODEL_STREAM_DEFAULT
+
+
+def _timeout(profile: ModelProfile, *, stream: bool) -> tuple[float, float]:
+    """返回 (连接超时, 读超时)。
+
+    requests 的读超时含义是"两次收到数据之间的最大间隔"，不是整个请求的总时长。
+    非流式请求在模型思考期间完全没有数据返回，所以读超时必须覆盖最长思考时间；
+    流式请求只要模型持续输出（包括思维链）就会不断刷新这个计时器，因此可以用
+    一个小得多的静默阈值，既能容忍长思考，也能及时发现真正的连接卡死。
+    """
+    params = _params(profile)
+    connect = _float_param(params, "connect_timeout", settings.MODEL_CONNECT_TIMEOUT)
+    if stream:
+        read = _float_param(
+            params,
+            "stream_idle_timeout",
+            settings.MODEL_STREAM_IDLE_TIMEOUT,
+        )
+    else:
+        # 兼容历史配置：老的模型档案里 timeout 就是非流式的读超时。
+        read = _float_param(params, "timeout", settings.MODEL_READ_TIMEOUT)
+    return connect, read
+
+
+def _max_retries(profile: ModelProfile) -> int:
+    params = _params(profile)
+    try:
+        value = int(params.get("max_retries", settings.MODEL_MAX_RETRIES))
+    except (TypeError, ValueError):
+        return settings.MODEL_MAX_RETRIES
+    return max(0, min(value, 5))
+
+
+def _timeout_hint(profile: ModelProfile, *, stream: bool, elapsed_ms: int) -> str:
+    """把 requests 的超时异常翻译成能直接照着改的提示。"""
+    _, read = _timeout(profile, stream=stream)
+    seconds = round(elapsed_ms / 1000)
+    if stream:
+        return (
+            f"模型在 {int(read)} 秒内没有返回任何新内容（已等待 {seconds} 秒）。"
+            "这通常是上游网关断流或模型排队。可在设置中调大该模型的超时，"
+            "或检查 Base URL 对应的中转服务是否稳定。"
+        )
+    return (
+        f"模型在 {int(read)} 秒内没有返回结果（已等待 {seconds} 秒）。"
+        "推理型模型思考时间较长，非流式请求必须把整段思考时间算进超时。"
+        "建议在设置中为该模型开启流式，或把超时调大。"
+    )
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -79,6 +161,45 @@ def _json_from_text(text: str) -> dict[str, Any]:
 
 def parse_json_result(result: ModelResult) -> dict[str, Any]:
     return _json_from_text(result.text)
+
+
+def _looks_like_sse(response: requests.Response) -> bool:
+    """判断响应是否真的是 SSE。
+
+    部分中转网关会忽略 stream 参数直接返回完整 JSON。这种情况下按 SSE 解析
+    会得到空正文，必须回退到普通 JSON 解析，否则流式默认开启就会误伤这些网关。
+    """
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    return "text/event-stream" in content_type
+
+
+def _sse_payloads(response: requests.Response) -> Any:
+    """逐行解析 SSE 响应，产出每个 data: 后面的 JSON 对象。
+
+    只要还在产生数据块，requests 的读超时计时器就会被刷新，
+    因此模型思考再久也不会被误判为超时。
+    """
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if not raw_line:
+            # SSE 的心跳空行同样能刷新读超时，直接跳过。
+            continue
+        line = raw_line.strip()
+        if line.startswith(":"):
+            # 部分网关用注释行做 keep-alive。
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            if data == "[DONE]":
+                return
+            continue
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            # 单个坏块不应该让整次调用失败。
+            logger.debug("Skipped malformed SSE chunk: %s", data[:200])
+            continue
 
 
 def _openai_compatible(
@@ -106,6 +227,7 @@ def _openai_compatible(
         ]
 
     parameters = dict(profile.parameters_json or {})
+    stream = _use_stream(profile)
     payload: dict[str, Any] = {
         "model": profile.model_name,
         "messages": converted,
@@ -117,23 +239,102 @@ def _openai_compatible(
     for key in ("top_p", "frequency_penalty", "presence_penalty", "reasoning_effort"):
         if key in parameters:
             payload[key] = parameters[key]
+    if stream:
+        payload["stream"] = True
 
+    connect_timeout, read_timeout = _timeout(profile, stream=stream)
     started = time.monotonic()
     response = requests.post(
         f"{_base_url(provider)}/chat/completions",
-        headers=headers,
+        headers={**headers, **({"Accept": "text/event-stream"} if stream else {})},
         json=payload,
-        timeout=_timeout(profile),
+        timeout=(connect_timeout, read_timeout),
+        stream=stream,
     )
-    latency = int((time.monotonic() - started) * 1000)
     if response.status_code >= 400:
-        raise ModelCallError(f"模型接口 {response.status_code}: {response.text[:500]}")
-    raw = response.json()
+        # 流式下错误体也要先读出来再关闭连接。
+        detail = response.text[:500]
+        response.close()
+        raise ModelCallError(f"模型接口 {response.status_code}: {detail}")
+
+    if not stream or not _looks_like_sse(response):
+        # 网关忽略了 stream 参数时也走这里，按普通 JSON 解析。
+        latency = int((time.monotonic() - started) * 1000)
+        raw = response.json()
+        try:
+            message = raw["choices"][0]["message"]
+            text = message.get("content")
+            reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelCallError(f"无法解析模型返回：{str(raw)[:500]}") from exc
+        return ModelResult(
+            text=text or "",
+            latency_ms=latency,
+            raw=raw,
+            reasoning=str(reasoning or ""),
+            streamed=False,
+        )
+
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
+    model_name = profile.model_name
     try:
-        text = raw["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ModelCallError(f"无法解析模型返回：{str(raw)[:500]}") from exc
-    return ModelResult(text=text or "", latency_ms=latency, raw=raw)
+        for chunk in _sse_payloads(response):
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            if chunk.get("model"):
+                model_name = chunk["model"]
+            # 有些网关把错误塞进流里而不是用 HTTP 状态码返回。
+            if chunk.get("error"):
+                raise ModelCallError(f"模型接口返回错误：{str(chunk['error'])[:500]}")
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            delta = choice.get("delta") or choice.get("message") or {}
+            if not isinstance(delta, dict):
+                continue
+            content = delta.get("content")
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                # 少数实现把 delta.content 组织成分段数组。
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        text_parts.append(part["text"])
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(reasoning, str):
+                reasoning_parts.append(reasoning)
+    finally:
+        response.close()
+
+    latency = int((time.monotonic() - started) * 1000)
+    text = "".join(text_parts)
+    reasoning = "".join(reasoning_parts)
+    if not text:
+        if reasoning:
+            raise ModelCallError(
+                "模型只返回了思考过程没有返回正文，通常是 max_tokens 太小被思维链占满。"
+                f"请调大该模型的 Max Tokens（当前 {payload['max_tokens']}）。"
+            )
+        raise ModelCallError("模型返回了空响应，请检查模型名称与上游服务状态。")
+    if finish_reason == "length":
+        logger.warning(
+            "Model %s output truncated by max_tokens=%s", profile.model_name, payload["max_tokens"]
+        )
+    raw = {
+        "model": model_name,
+        "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}],
+        "usage": usage or {},
+        "streamed": True,
+    }
+    return ModelResult(text=text, latency_ms=latency, raw=raw, reasoning=reasoning, streamed=True)
 
 
 def _anthropic(
@@ -164,13 +365,18 @@ def _anthropic(
             {"type": "text", "text": str(user_messages[-1]["content"])},
         ]
     params = profile.parameters_json or {}
-    payload = {
+    stream = _use_stream(profile)
+    payload: dict[str, Any] = {
         "model": profile.model_name,
         "system": "\n\n".join(system_parts),
         "messages": converted,
         "max_tokens": params.get("max_tokens", 4096),
         "temperature": params.get("temperature", 0.2),
     }
+    if stream:
+        payload["stream"] = True
+
+    connect_timeout, read_timeout = _timeout(profile, stream=stream)
     started = time.monotonic()
     response = requests.post(
         f"{_base_url(provider)}/v1/messages",
@@ -178,16 +384,78 @@ def _anthropic(
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
+            **({"Accept": "text/event-stream"} if stream else {}),
         },
         json=payload,
-        timeout=_timeout(profile),
+        timeout=(connect_timeout, read_timeout),
+        stream=stream,
     )
-    latency = int((time.monotonic() - started) * 1000)
     if response.status_code >= 400:
-        raise ModelCallError(f"Anthropic {response.status_code}: {response.text[:500]}")
-    raw = response.json()
-    text = "".join(item.get("text", "") for item in raw.get("content", []) if item.get("type") == "text")
-    return ModelResult(text=text, latency_ms=latency, raw=raw)
+        detail = response.text[:500]
+        response.close()
+        raise ModelCallError(f"Anthropic {response.status_code}: {detail}")
+
+    if not stream or not _looks_like_sse(response):
+        # 网关忽略了 stream 参数时也走这里，按普通 JSON 解析。
+        latency = int((time.monotonic() - started) * 1000)
+        raw = response.json()
+        text = "".join(item.get("text", "") for item in raw.get("content", []) if item.get("type") == "text")
+        thinking = "".join(
+            item.get("thinking", "") for item in raw.get("content", []) if item.get("type") == "thinking"
+        )
+        return ModelResult(text=text, latency_ms=latency, raw=raw, reasoning=thinking, streamed=False)
+
+    # Anthropic 的 SSE 用 content_block_delta 增量推送，thinking 块与正文分开。
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    stop_reason: str | None = None
+    usage: dict[str, Any] = {}
+    try:
+        for event in _sse_payloads(response):
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            if event_type == "error":
+                raise ModelCallError(f"Anthropic 流式返回错误：{str(event.get('error'))[:500]}")
+            if event_type == "content_block_delta":
+                delta = event.get("delta") or {}
+                if isinstance(delta.get("text"), str):
+                    text_parts.append(delta["text"])
+                elif isinstance(delta.get("thinking"), str):
+                    thinking_parts.append(delta["thinking"])
+            elif event_type == "message_delta":
+                delta = event.get("delta") or {}
+                if delta.get("stop_reason"):
+                    stop_reason = delta["stop_reason"]
+                if event.get("usage"):
+                    usage = event["usage"]
+            elif event_type == "message_start":
+                usage = (event.get("message") or {}).get("usage") or usage
+    finally:
+        response.close()
+
+    latency = int((time.monotonic() - started) * 1000)
+    text = "".join(text_parts)
+    thinking = "".join(thinking_parts)
+    if not text:
+        if thinking:
+            raise ModelCallError(
+                "模型只返回了思考过程没有返回正文，通常是 max_tokens 太小被思维链占满。"
+                f"请调大该模型的 Max Tokens（当前 {payload['max_tokens']}）。"
+            )
+        raise ModelCallError("Anthropic 返回了空响应，请检查模型名称与上游服务状态。")
+    if stop_reason == "max_tokens":
+        logger.warning(
+            "Model %s output truncated by max_tokens=%s", profile.model_name, payload["max_tokens"]
+        )
+    raw = {
+        "model": profile.model_name,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": stop_reason,
+        "usage": usage,
+        "streamed": True,
+    }
+    return ModelResult(text=text, latency_ms=latency, raw=raw, reasoning=thinking, streamed=True)
 
 
 def _gemini(
@@ -212,28 +480,84 @@ def _gemini(
             }
         )
     params = profile.parameters_json or {}
+    stream = _use_stream(profile)
     generation: dict[str, Any] = {
         "temperature": params.get("temperature", 0.2),
         "maxOutputTokens": params.get("max_tokens", 4096),
     }
     if json_mode:
         generation["responseMimeType"] = "application/json"
+
+    connect_timeout, read_timeout = _timeout(profile, stream=stream)
+    # 流式走 streamGenerateContent + alt=sse，返回标准 SSE。
+    method = "streamGenerateContent" if stream else "generateContent"
+    query = {"key": api_key}
+    if stream:
+        query["alt"] = "sse"
     started = time.monotonic()
     response = requests.post(
-        f"{_base_url(provider)}/v1beta/models/{profile.model_name}:generateContent",
-        params={"key": api_key},
+        f"{_base_url(provider)}/v1beta/models/{profile.model_name}:{method}",
+        params=query,
         json={"contents": [{"role": "user", "parts": parts}], "generationConfig": generation},
-        timeout=_timeout(profile),
+        timeout=(connect_timeout, read_timeout),
+        stream=stream,
     )
-    latency = int((time.monotonic() - started) * 1000)
     if response.status_code >= 400:
-        raise ModelCallError(f"Gemini {response.status_code}: {response.text[:500]}")
-    raw = response.json()
+        detail = response.text[:500]
+        response.close()
+        raise ModelCallError(f"Gemini {response.status_code}: {detail}")
+
+    if not stream or not _looks_like_sse(response):
+        # 网关忽略了 stream 参数时也走这里，按普通 JSON 解析。
+        latency = int((time.monotonic() - started) * 1000)
+        raw = response.json()
+        try:
+            text = raw["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelCallError(f"无法解析 Gemini 返回：{str(raw)[:500]}") from exc
+        return ModelResult(text=text, latency_ms=latency, raw=raw, streamed=False)
+
+    text_parts: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, Any] = {}
     try:
-        text = raw["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ModelCallError(f"无法解析 Gemini 返回：{str(raw)[:500]}") from exc
-    return ModelResult(text=text, latency_ms=latency, raw=raw)
+        for chunk in _sse_payloads(response):
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                raise ModelCallError(f"Gemini 流式返回错误：{str(chunk['error'])[:500]}")
+            if chunk.get("usageMetadata"):
+                usage = chunk["usageMetadata"]
+            for candidate in chunk.get("candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                if candidate.get("finishReason"):
+                    finish_reason = candidate["finishReason"]
+                for part in (candidate.get("content") or {}).get("parts") or []:
+                    # thought 为 true 的分片是思维链，不计入正文。
+                    if isinstance(part, dict) and isinstance(part.get("text"), str) and not part.get("thought"):
+                        text_parts.append(part["text"])
+    finally:
+        response.close()
+
+    latency = int((time.monotonic() - started) * 1000)
+    text = "".join(text_parts)
+    if not text:
+        raise ModelCallError("Gemini 返回了空响应，请检查模型名称与上游服务状态。")
+    if finish_reason == "MAX_TOKENS":
+        logger.warning(
+            "Model %s output truncated by maxOutputTokens=%s",
+            profile.model_name,
+            generation["maxOutputTokens"],
+        )
+    raw = {
+        "candidates": [
+            {"content": {"parts": [{"text": text}]}, "finishReason": finish_reason}
+        ],
+        "usageMetadata": usage,
+        "streamed": True,
+    }
+    return ModelResult(text=text, latency_ms=latency, raw=raw, streamed=True)
 
 
 def call_model(
@@ -248,14 +572,45 @@ def call_model(
     if not provider.enabled:
         raise ModelCallError("模型供应商已停用")
     provider_name = provider.provider.lower()
-    try:
-        if provider_name == "anthropic":
-            return _anthropic(profile, provider, messages, image_bytes, image_mime)
-        if provider_name == "gemini":
-            return _gemini(profile, provider, messages, image_bytes, image_mime, json_mode)
-        return _openai_compatible(profile, provider, messages, image_bytes, image_mime, json_mode)
-    except requests.RequestException as exc:
-        raise ModelCallError(f"模型接口请求失败：{exc}") from exc
+    stream = _use_stream(profile)
+    attempts = _max_retries(profile) + 1
+    last_error: ModelCallError | None = None
+
+    for attempt in range(attempts):
+        started = time.monotonic()
+        try:
+            if provider_name == "anthropic":
+                result = _anthropic(profile, provider, messages, image_bytes, image_mime)
+            elif provider_name == "gemini":
+                result = _gemini(profile, provider, messages, image_bytes, image_mime, json_mode)
+            else:
+                result = _openai_compatible(profile, provider, messages, image_bytes, image_mime, json_mode)
+            result.retries = attempt
+            return result
+        except requests.Timeout as exc:
+            elapsed = int((time.monotonic() - started) * 1000)
+            last_error = ModelTimeoutError(_timeout_hint(profile, stream=stream, elapsed_ms=elapsed))
+            last_error.__cause__ = exc
+        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
+            # 长连接被中间层掐断时 requests 抛的是连接类错误，与超时同样可以重试。
+            last_error = ModelTimeoutError(f"与模型服务的连接中断：{exc}")
+            last_error.__cause__ = exc
+        except requests.RequestException as exc:
+            # 其余请求异常（如非法 URL、SSL 错误）重试没有意义。
+            raise ModelCallError(f"模型接口请求失败：{exc}") from exc
+
+        if attempt < attempts - 1:
+            logger.warning(
+                "Model %s call failed (%s), retrying %s/%s",
+                profile.model_name,
+                last_error,
+                attempt + 1,
+                attempts - 1,
+            )
+            # 退避一小段时间，避免上游正在限流时立刻打第二次。
+            time.sleep(min(2 ** attempt, 5))
+
+    raise last_error if last_error else ModelCallError("模型调用失败")
 
 
 def health_check(profile: ModelProfile) -> ModelResult:

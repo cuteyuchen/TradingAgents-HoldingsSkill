@@ -36,6 +36,23 @@ class Settings:
     SQLITE_JOURNAL_MODE: str = os.getenv("ADVISOR_SQLITE_JOURNAL_MODE", "").upper()
     MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(12 * 1024 * 1024)))
 
+    # 模型调用超时与重试。
+    # 推理型模型（如 o 系列、DeepSeek-R1、QwQ、GLM-Z1）在返回首个 token 之前
+    # 会先思考很长时间，非流式请求在这段时间内不会产生任何字节，因此读超时
+    # 必须按"最长思考时间"来设置，而不是按"正常响应时间"。
+    # MODEL_CONNECT_TIMEOUT 只覆盖 TCP 建连，用于快速发现网络不可达。
+    MODEL_CONNECT_TIMEOUT: float = float(os.getenv("MODEL_CONNECT_TIMEOUT", "15"))
+    # 默认读超时，模型档案里的 timeout 参数可以覆盖它。
+    MODEL_READ_TIMEOUT: float = float(os.getenv("MODEL_READ_TIMEOUT", "600"))
+    # 流式模式下允许的最长静默间隔：开启流式后读超时按"两个数据块之间的间隔"
+    # 计算，只要模型持续吐字就不会触发，因此这个值可以比总耗时小很多。
+    MODEL_STREAM_IDLE_TIMEOUT: float = float(os.getenv("MODEL_STREAM_IDLE_TIMEOUT", "180"))
+    # 是否默认使用流式请求。流式能让长思考过程持续产生数据，从根本上避免
+    # 因"思考时间久"而误判超时；个别不支持 SSE 的网关可以关掉。
+    MODEL_STREAM_DEFAULT: bool = _bool_env("MODEL_STREAM_DEFAULT", "true")
+    # 超时或连接中断后的自动重试次数（仅对可安全重试的网络错误生效）。
+    MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "1"))
+
     # Analysis and scheduler.
     ANALYSIS_HISTORY_LIMIT: int = int(os.getenv("ANALYSIS_HISTORY_LIMIT", "5"))
     SCHEDULER_ENABLED: bool = _bool_env("SCHEDULER_ENABLED", "true")

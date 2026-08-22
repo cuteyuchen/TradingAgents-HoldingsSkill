@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..services.model_client import ModelCallError, health_check
+from ..services.model_client import ModelCallError, ModelTimeoutError, health_check
 from ..v2_dependencies import get_current_user
 from ..v2_models import ModelProfile, User
 from ..v2_schemas import ModelHealthResponse
@@ -31,12 +31,22 @@ def test_model_profile(
         profile.last_health_status = "ok"
         profile.last_health_at = datetime.now(UTC)
         db.commit()
+        # 把实际链路信息带回前端：是否流式、重试了几次，便于确认超时配置是否生效。
+        details = ["流式" if result.streamed else "非流式"]
+        if result.retries:
+            details.append(f"重试 {result.retries} 次")
         return ModelHealthResponse(
             status="ok",
-            message="模型连接成功",
+            message=f"模型连接成功（{('，').join(details)}）",
             latency_ms=result.latency_ms,
             raw_excerpt=result.text[:240],
         )
+    except ModelTimeoutError as exc:
+        # 超时单独用 504，前端可以据此提示用户去调超时而不是怀疑 API Key。
+        profile.last_health_status = "timeout"
+        profile.last_health_at = datetime.now(UTC)
+        db.commit()
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ModelCallError as exc:
         profile.last_health_status = "failed"
         profile.last_health_at = datetime.now(UTC)
