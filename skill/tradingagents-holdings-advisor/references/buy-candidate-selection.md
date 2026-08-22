@@ -109,7 +109,7 @@ Remove candidates that:
 Score each opportunity from 0-10 as a transitional ranking aid. A score of 7+
 makes an opportunity eligible for further consideration; it does not require
 the system to emit a candidate. The opportunity must still beat `NO_ACTION` and
-pass data-quality and risk gates. Score 5-6 is watch only; below 5 is rejected.
+pass data-quality and risk gates. Score 5-6 is observation-only text; it must never be emitted as a `candidates` row. Below 5 is rejected.
 
 | Factor | Points | Evidence Required |
 |---|---:|---|
@@ -126,7 +126,7 @@ pass data-quality and risk gates. Score 5-6 is watch only; below 5 is rejected.
 |---|---|---|
 | 8-10 | Buyable with normal sizing | High |
 | 7 | Buyable with reduced sizing | Medium |
-| 5-6 | Watch only — set trigger and wait | Conditional |
+| 5-6 | Observation text/blocker only; no candidate row | Conditional |
 | < 5 | Do not recommend | Low |
 
 ## Candidate Output
@@ -137,7 +137,7 @@ three valid entries remain, prefer higher legal numeric scores and keep at most
 three. For each emitted candidate, output:
 
 - **Name and code** (名称和代码); mark uncertainty if any.
-- **Candidate type** (候选类型): new-position ETF, new-position stock, or rotation watch.
+- **Candidate type** (候选类型): `new_position` ETF or stock only. Rotation watches and score 5–6 observations belong in blocker/report text, not in `candidates`.
 - **Long thesis in one sentence** (一句话看多逻辑).
 - **Recommendation reason** (建议理由): three short bullets for 消息面/催化, 资金面, 板块位置.
 - **Entry trigger** (入场触发): Exact price or condition.
@@ -151,7 +151,7 @@ three. For each emitted candidate, output:
 
 Block new buys or convert them to watch-only when any applies:
 
-- Account exposure remains above 85% and no weak holdings were reduced first.
+- A new opportunity is not clearly better than keeping the portfolio unchanged under the current market-regime, liquidity, concentration, and evidence assessment.
 - Major index and candidate sector diverge negatively (大盘跌而板块涨 — 不可持续).
 - Candidate is below both open and previous close.
 - Main funds are materially outflowing while price rises.

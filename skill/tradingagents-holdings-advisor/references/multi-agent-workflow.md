@@ -347,7 +347,7 @@ Every execution should include detailed debate for material decisions:
 - Separate "today's execution" from "watchlist/rotation candidates".
 - Always evaluate the opportunity module, but do not force output. If no opportunity beats keeping the portfolio unchanged, return `candidates=[]`; if blocked by quality, retain `watch_only` and state the blocker.
 - If the market is strong but the user's heavy holdings are weak, use strength to reduce weak holdings rather than add.
-- New buy candidates must fit the portfolio cash plan; do not add exposure before planned weak-position trims when account exposure is above 85%.
+- New action candidates must fit the current portfolio risk assessment; total exposure is an input, not a universal fixed hard gate, until Dynamic Risk Budget is implemented.
 - New candidates must never duplicate current holdings. If a held symbol is the
   best expression of a hot sector, keep any supported add decision in holdings;
   otherwise return no new candidate rather than selecting a weaker substitute.

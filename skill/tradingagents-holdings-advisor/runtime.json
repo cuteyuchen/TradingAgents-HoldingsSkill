@@ -1,7 +1,7 @@
 {
   "name": "tradingagents-holdings-advisor",
   "version": "2.1.0",
-  "prompt_version": "2026-07-19",
+  "prompt_version": "2026-08-22",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
     "confirmed_portfolio_snapshot",
@@ -23,7 +23,7 @@
   ],
   "rules": [
     "NO_ACTION is a first-class successful result. Do not trade merely because analysis completed; first prove that changing the current portfolio is better than keeping it.",
-    "New candidates are optional: return zero to three non-held stocks or ETFs only when they pass evidence, quality, and risk gates. Never manufacture candidates to fill a quota.",
+    "New action candidates are optional: return zero to three non-held stocks or ETFs only when candidate_type is new_position and the score is at least 7 after evidence, quality, and risk gates. Rotation watches and sub-threshold ideas belong in blocker/report text, never in candidates. Never manufacture candidates to fill a quota.",
     "Adding or conditionally adding an existing holding belongs only in the holding action plan, never in the new-candidate list.",
     "The confirmed current portfolio snapshot is the only source of truth for current holdings. Historical reports are context only.",
     "qty is total quantity and available_qty is currently sellable quantity. A reduce or sell action must never exceed available_qty.",
@@ -34,7 +34,8 @@
     "Facts, inferences, risks, triggers, invalidation conditions, and unresolved claims must be separated.",
     "Remove every candidate whose code is already present in current holdings; preserve any supported add or conditional-add verdict in the holding action plan.",
     "Final quote-sensitive fields must be refreshed immediately before the final portfolio decision.",
-    "The system provides research assistance only, never promises returns, and never executes brokerage orders."
+    "The system provides research assistance only, never promises returns, and never executes brokerage orders.",
+    "Total portfolio exposure is a risk input, not a universal fixed hard gate; until Dynamic Risk Budget exists, do not force a trade or cash raise solely because exposure crosses one fixed percentage."
   ],
   "decision_contract": {
     "version": "2.1.0",
@@ -88,10 +89,11 @@
     ]
   },
   "checkpoints": {
-    "09:35": "Opening confirmation after the first tradable prices are available.",
-    "10:00": "First confirmed intraday trend and initial risk adjustments.",
-    "12:00": "Midday sector rotation and morning-signal validation.",
-    "14:30": "Late-session overnight-carry and risk control."
+    "09:35": "Standard opening confirmation after the first tradable prices are available.",
+    "10:30": "Fast review of the confirmed morning trend and initial risk adjustments.",
+    "13:05": "Fast review of midday sector rotation and morning-signal validation.",
+    "14:30": "Standard late-session overnight-carry and risk control.",
+    "15:10": "Deep daily review and final portfolio consistency check."
   },
   "upstream_references": [
     "TauricResearch/TradingAgents",

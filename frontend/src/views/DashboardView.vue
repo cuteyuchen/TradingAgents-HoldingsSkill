@@ -20,7 +20,7 @@ const creating = ref(false)
 const analysisOpen = ref(false)
 const analysisPortfolio = ref<Portfolio | null>(null)
 const analysisMode = ref<AnalysisMode>('deep')
-const analysisCheckpoint = ref('10:00')
+const analysisCheckpoint = ref('10:30')
 const analysisNotify = ref(true)
 const startingAnalysis = ref(false)
 const ratingLabels: Record<string, string> = { no_action: '无需调整', watch_only: '仅观察' }
@@ -208,7 +208,7 @@ onMounted(load)
         <n-form-item label="分析模式">
           <n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group>
         </n-form-item>
-        <n-form-item label="检查点"><n-select v-model:value="analysisCheckpoint" :options="['09:35','10:00','12:00','14:30'].map(v => ({ label: v, value: v }))" /></n-form-item>
+        <n-form-item label="检查点"><n-select v-model:value="analysisCheckpoint" :options="['09:35','10:30','13:05','14:30','15:10'].map(v => ({ label: v, value: v }))" /></n-form-item>
         <n-form-item label="完成后发送通知"><n-switch v-model:value="analysisNotify" /></n-form-item>
         <n-button type="primary" block size="large" :loading="startingAnalysis" @click="startManualAnalysis"><template #icon><Play :size="17" /></template>开始分析</n-button>
       </n-form>

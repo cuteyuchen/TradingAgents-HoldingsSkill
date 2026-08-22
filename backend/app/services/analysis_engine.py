@@ -79,7 +79,7 @@ FINAL_SCHEMA = {
         {
             "code": "代码",
             "name": "名称",
-            "action": "new_position/rotation_watch",
+            "action": "new_position",
             "reason": "原因",
             "trigger": "触发条件",
             "initial_size": "初始仓位",
@@ -678,7 +678,11 @@ def _normalize_final(
             "watch_only": "rotation_watch",
             "轮动观察": "rotation_watch",
         }.get(candidate_type, candidate_type)
-        if candidate_type not in {"new_position", "rotation_watch"}:
+        # ``result.candidates`` is the Action Candidate list, not a watch pool.
+        # Phase A has no separate Watch/Ready lifecycle, so rotation watches and
+        # sub-threshold rows must stay out of this list entirely.  They must not
+        # prevent deterministic NO_ACTION when every holding is hold/watch.
+        if candidate_type != "new_position":
             continue
         row["candidate_type"] = candidate_type
         reason_detail = row.get("reason_detail") if isinstance(row.get("reason_detail"), dict) else {}
@@ -691,8 +695,12 @@ def _normalize_final(
         if missing_reason_fields or gate_grade in {"C", "D", "F"} or gate_status == "blocked":
             continue
         score = _numeric_score(row.get("score"))
-        row["buyable"] = bool(score is not None and score >= 7 and candidate_type != "rotation_watch")
-        row["gate_status"] = "buyable" if row["buyable"] else "watch_only"
+        # A candidate only enters the action contract when it clears the
+        # minimum score.  Missing or malformed scores are not actionable.
+        if score is None or score < 7:
+            continue
+        row["buyable"] = True
+        row["gate_status"] = "buyable"
         filtered_candidates.append(row)
 
     # Keep the contract bounded.  Valid numeric scores are preferred, while
@@ -726,22 +734,45 @@ def _normalize_final(
         result["bear_case"] = investment.get("bear_case") or result.get("bear_case") or []
         result["unresolved_claims"] = investment.get("unresolved_claims") or result.get("unresolved_claims") or []
 
-    if should_normalize_no_action(
+    normalized_no_action = should_normalize_no_action(
         quality_gate_status=gate_status,
         holdings=output_rows,
         candidates=filtered_candidates,
-    ):
+    )
+    if gate_status == "blocked":
+        # A blocked quality gate is never silently downgraded to NO_ACTION, even
+        # if the model happened to emit a no_action rating in its free-form output.
+        result["final_rating"] = "watch_only"
+    if normalized_no_action:
         result["final_rating"] = DEFAULT_PORTFOLIO_ACTION
-        result["portfolio_conclusion"] = result.get("portfolio_conclusion") or "证据充分，但没有足够理由改变当前组合，保持现状。"
+        # Deterministic contract fields outrank any stale model prose/actions.
+        result["portfolio_conclusion"] = "当前没有足够证据证明调整组合优于保持现状，维持当前组合。"
+        result["today_actions"] = output_rows
+        result["rebalance_plan"] = {}
+        trader_proposal = result.get("trader_proposal")
+        if not isinstance(trader_proposal, dict):
+            trader_proposal = {}
+        trader_proposal["orders"] = output_rows
+        trader_proposal["proposals"] = output_rows
+        trader_proposal["decision"] = "hold"
+        result["trader_proposal"] = trader_proposal
 
     portfolio_final = result.get("portfolio_manager_final") or {}
-    if result.get("final_rating") == DEFAULT_PORTFOLIO_ACTION:
+    if not isinstance(portfolio_final, dict):
+        portfolio_final = {}
+    if gate_status == "blocked":
+        portfolio_final["portfolio_rating"] = "watch_only"
+    elif normalized_no_action:
+        portfolio_final["portfolio_rating"] = DEFAULT_PORTFOLIO_ACTION
+        portfolio_final["final_actions"] = output_rows
+    elif result.get("final_rating") == DEFAULT_PORTFOLIO_ACTION:
         portfolio_final["portfolio_rating"] = DEFAULT_PORTFOLIO_ACTION
     else:
         portfolio_final.setdefault("portfolio_rating", result.get("final_rating"))
     portfolio_final.setdefault("cash_target", result.get("cash_target"))
     portfolio_final.setdefault("risk_decision", (result.get("risk_revision") or {}).get("decision", "pass"))
-    portfolio_final.setdefault("final_actions", output_rows)
+    if not normalized_no_action:
+        portfolio_final.setdefault("final_actions", output_rows)
     result["portfolio_manager_final"] = portfolio_final
     return result
 
@@ -1216,8 +1247,8 @@ def run_analysis_job(job_id: int) -> None:
                         "trader_proposal": trader,
                         "risk_revision": risk_revision,
                     },
-                    "执行今日新增机会三层扫描：大盘环境、热门板块、候选盘口。输出 0-3 个非当前持仓候选；candidates=[] 是正常结果，不得为了数量生成。"
-                    "每个候选必须包含 code、name、candidate_type(new_position/rotation_watch)，且不得属于当前持仓；"
+                    "执行今日新增机会三层扫描：大盘环境、热门板块、候选盘口。输出 0-3 个可行动的非当前持仓候选；candidates=[] 是正常结果，不得为了数量生成。"
+                    "每个候选必须包含 code、name、candidate_type(new_position)，score>=7，且不得属于当前持仓；"
                     "reason_detail(catalyst/capital_flow/sector_position)、entry_trigger、initial_size、take_profit_1、"
                     "take_profit_2、stop_loss、invalidating_condition、score(0-10)、score_breakdown。"
                     "同时输出 hot_sectors、market_buy_mode、cancel_all_buys_when、candidate_blocked_reason。",

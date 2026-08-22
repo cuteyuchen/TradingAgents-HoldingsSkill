@@ -22,16 +22,17 @@ For ETFs, use ETF-specific liquidity and tracking index strength, but still resp
 
 | Time | Decision Style | Focus |
 |---|---|---|
-| 09:25 | Plan only | Use auction/gap/news. Avoid aggressive new orders unless a pre-set risk plan exists. Check overnight global markets, HK/US futures, key news. |
-| 10:00 | First execution | Compare holdings to open/prev close/sector; trim weak heavy positions. First confirmed intraday trend. |
-| 12:00 | Midday adjustment | Reassess sector rotation, capital flow, and whether morning breakout held. Plan afternoon strategy. |
-| 14:30 | Risk control | Avoid impulsive new buys; decide what to carry overnight. Last chance to reduce before close. |
+| 09:35 | Standard opening confirmation | Use the first tradable prices, gap/news context, and opening quality gate. |
+| 10:30 | Fast morning review | Compare holdings to open/prev close/sector; review first trims and VPA breakout signals. |
+| 13:05 | Fast midday review | Reassess sector rotation, capital flow, and whether the morning breakout held. |
+| 14:30 | Standard risk control | Avoid impulsive new buys; decide what to carry overnight and finalize adjustments. |
+| 15:10 | Deep daily review | Refresh final quotes, reconcile portfolio actions, and review next-session risks. |
 
 ## Position Rules
 
 | Situation | Action Bias |
 |---|---|
-| Account exposure > 85% | Raise cash before considering new buys |
+| Current total exposure | Use as one risk input alongside market regime, liquidity, concentration, and evidence quality; no universal fixed exposure hard gate is active in Phase A |
 | Market weak and holdings weak | Reduce first, no averaging down |
 | Market strong but heavy holdings weak | Use strength/liquidity to reduce weak holdings |
 | Heavy loser underperforms index/sector | Evidence-gated split: hold, conditional reduce, reduce, or conditional add; loss alone is not enough |
@@ -71,7 +72,7 @@ Rules:
 
 - Short-track trades must not pull size from the medium-term base. If the short track says "trim 20%", that cash stays in the short-term sleeve for rotation, not for raising permanent cash unless the medium track also says reduce.
 - When both tracks say reduce, treat it as a full reduce (medium-track authority).
-- When short says add but medium says hold/reduce, the add is capped at the short-term sleeve and only if `account_exposure_high` (85%) is not breached.
+- When short says add but medium says hold/reduce, the add must fit the short-term sleeve and the current portfolio risk assessment; do not apply a universal fixed exposure gate in Phase A.
 - New buy candidates (see `buy-candidate-selection.md`) draw from the short-term sleeve by default; only move to the medium-term base after the medium track confirms.
 
 Phase A defines contract caps of 20% for an ordinary stock and 30% for a
@@ -156,7 +157,7 @@ Before recommending a buy:
 - Prefer candidates that are above both previous close and open, with price above MA5/MA20 or reclaiming them with volume.
 - Prefer candidates with positive VPA signals (volume expansion, OBV uptrend, no divergence).
 - Require enough liquidity for staged exits; avoid thin, one-word-theme, or pure limit-up chase candidates.
-- If account exposure is above 85%, candidate size must come from selling weak holdings first.
+- Current total exposure is a risk input, but crossing a fixed percentage alone must not automatically prohibit a new opportunity or require a cash raise before Dynamic Risk Budget is implemented.
 - If candidate evidence is blocked or incomplete, keep the candidate list empty and report the blocking reason.
 
 For each candidate, include:
@@ -214,11 +215,11 @@ After the Trader produces a proposal, the Risk Manager / Portfolio Manager revie
 1. **Pass (通过)**: Proposal is acceptable. Execute as planned.
 2. **Revise (退回修正)**: Proposal violates constraints. Send back with:
    - **Hard constraints (硬性约束)**: Non-negotiable rules that must be followed.
-     - Examples: "普通股票合同上限20%、行业/主题ETF合同上限30%（当前仅提示，不按名称猜类型执行）", "不追加跌停风险标的", "现金比例不低于15%"
+     - Examples: "普通股票合同上限20%、行业/主题ETF合同上限30%（当前仅提示，不按名称猜类型执行）", "不追加跌停风险标的", "根据市场状态和组合风险动态决定现金水平"
    - **Soft constraints (建议约束)**: Advisory guidance.
      - Examples: "建议分2批建仓", "优先考虑ETF而非个股"
    - **Execution preconditions (执行前提)**: Conditions that must hold before executing.
-     - Examples: "需等10:00趋势确认后再执行", "需北向资金转正"
+     - Examples: "需等10:30趋势确认后再执行", "需北向资金转正"
    - **De-risk triggers (去风险触发器)**: Conditions that require immediate position reduction.
      - Examples: "若标的跌破XX元立即减仓50%", "若大盘跌幅超2%暂停所有买入"
    - **Revision reason (退回原因)**: Why the original plan was insufficient.

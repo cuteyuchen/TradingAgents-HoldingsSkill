@@ -103,14 +103,13 @@ Position and action sizing. See `trading-rules.md`.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `account_exposure_high` | 0.85 | Above 85% exposure → raise cash before new buys |
 | `first_trim_pct` | 0.15–0.30 | First trim of a weak holding |
 | `second_trim_pct` | 0.20–0.30 | Second trim if support breaks / sector turns |
-| `cash_min_ratio` | 0.15 | Soft floor on cash after actions |
 | `stock_hard_cap_ratio` | 0.20 | Contract cap for an ordinary stock; deterministic enforcement belongs to a later Portfolio Engine |
 | `sector_theme_etf_hard_cap_ratio` | 0.30 | Contract cap for a sector/theme ETF; classification and deterministic enforcement are deferred |
 | `candidate_score_buyable` | 7 | Score ≥ 7 = buyable |
-| `candidate_score_watch` | 5 | 5–6 = watch only; < 5 = do not recommend |
+| `candidate_score_watch` | 5 | 5–6 = observation text/blocker only; never enters `result.candidates`; < 5 = do not recommend |
+| `portfolio_exposure_context` | no fixed threshold | Current total exposure is a risk input. Until Dynamic Risk Budget exists, do not automatically raise cash, reduce, or block a new opportunity solely because exposure crosses one universal percentage. |
 
 ### Decision Contract Parameters
 

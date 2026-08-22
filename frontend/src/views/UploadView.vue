@@ -24,7 +24,7 @@ const confirming = ref(false)
 const loadingLatestSnapshot = ref(false)
 const analysisStarting = ref(false)
 const analysisMode = ref<AnalysisMode>('deep')
-const checkpoint = ref('10:00')
+const checkpoint = ref('10:30')
 const notify = ref(true)
 const analysisPanel = ref<HTMLElement | null>(null)
 let initialized = false
@@ -430,7 +430,7 @@ onUnmounted(() => {
       </div>
       <div class="analysis-form">
         <n-form-item label="分析模式"><n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group></n-form-item>
-        <n-form-item label="检查点"><n-select v-model:value="checkpoint" :options="['09:35','10:00','12:00','14:30'].map(v => ({ label: v, value: v }))" /></n-form-item>
+        <n-form-item label="检查点"><n-select v-model:value="checkpoint" :options="['09:35','10:30','13:05','14:30','15:10'].map(v => ({ label: v, value: v }))" /></n-form-item>
         <n-form-item label="完成后通知"><n-switch v-model:value="notify" /></n-form-item>
         <n-button type="primary" size="large" :loading="analysisStarting" :disabled="Boolean(job && !terminalJob)" @click="runAnalysis"><template #icon><Play :size="17" /></template>手动开始分析</n-button>
       </div>

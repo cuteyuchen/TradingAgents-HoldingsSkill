@@ -13,7 +13,7 @@ Use Python scripts when any applies:
 - Technical indicators such as MA, RSI, MACD, Bollinger, ATR, VWMA, MFI, volume ratios, or support/resistance need calculation.
 - VPA indicators (OBV, volume ratio, bar type classification, volume-price divergence, selling climax detection) need pre-computation.
 - Data from several sources must be normalized into one evidence table.
-- A repeatable market snapshot is needed for 09:25, 10:00, 12:00, or 14:30 runs.
+- A repeatable market snapshot is needed for 09:35, 10:30, 13:05, 14:30, or 15:10 runs.
 - Candidate scoring requires programmatic comparison across multiple stocks/ETFs.
 
 ## Fast Market Snapshot Script

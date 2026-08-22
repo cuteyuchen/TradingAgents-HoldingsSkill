@@ -1,6 +1,6 @@
 ---
 name: tradingagents-holdings-advisor
-description: Use when the user asks for intraday stock or ETF operation advice, 持仓截图, 今日操作建议, 调仓建议, 实时行情, 新闻基本面, 9:25/10:00/12:00/14:30 review, or asks what to buy, sell, hold, reduce, add, or rotate.
+description: Use when the user asks for intraday stock or ETF operation advice, 持仓截图, 今日操作建议, 调仓建议, 实时行情, 新闻基本面, 09:35/10:30/13:05/14:30/15:10 review, or asks what to buy, sell, hold, reduce, add, or rotate.
 ---
 
 # TradingAgents Holdings Advisor
@@ -42,16 +42,17 @@ When invoked by the user or external automation, run this workflow at:
 
 | Time | Focus | Key Checks |
 |---|---|---|
-| 09:25 | Opening auction, overnight news | Global markets, gap-risk plan, northbound pre-open flow, auction volume |
-| 10:00 | First confirmed intraday trend | Weak/strong holdings vs open/prev close, first trims, VPA breakout signals |
-| 12:00 | Midday review | Sector rotation, capital flow shift, whether morning breakout held, afternoon plan |
-| 14:30 | Late-session risk control | Next-day carry decision, avoid impulsive new buys, finalize position adjustments |
+| 09:35 | Standard opening confirmation | Global markets, gap-risk plan, first tradable prices, opening data quality |
+| 10:30 | Fast morning review | Weak/strong holdings vs open/prev close, first trims, VPA breakout signals |
+| 13:05 | Fast midday review | Sector rotation, capital flow shift, whether morning breakout held, afternoon plan |
+| 14:30 | Standard late-session risk control | Next-day carry decision, avoid impulsive new buys, finalize position adjustments |
+| 15:10 | Deep daily review | Final quote refresh, portfolio consistency, overnight carry and next-session risks |
 
 ### Quality-First Failure Policy
 
 Advice quality is the first priority. Time pressure, repeated data failures, or slow optional sources must not produce a low-quality trading recommendation:
 
-- After `consecutive_failure_threshold` (default 3) consecutive failures for the same checkpoint, output an explicit blocking warning in the evidence pack (e.g. `[关键数据未完成: 10:00 checkpoint 数据拉取连续3次失败，暂不给交易建议]`).
+- After `consecutive_failure_threshold` (default 3) consecutive failures for the same checkpoint, output an explicit blocking warning in the evidence pack (e.g. `[关键数据未完成: 10:30 checkpoint 数据拉取连续3次失败，暂不给交易建议]`).
 - When the persistence system is configured, record failure context in the visible evidence and archive payload so the dashboard can surface the issue. The active persistence contract remains archive-only.
 - If mandatory quote, holdings, risk, or quality-gate evidence is missing, stop before action advice and output: missing data, why it blocks the recommendation, and how to fetch/confirm it next. Do not replace this with a low-quality trading plan.
 
@@ -123,7 +124,7 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
    - What to reduce first (with trigger and quantity).
    - What to keep (and why).
    - What can be watched or rotated into.
-8. **Current checkpoint plan**: e.g. "10:00 only execute if still below open price; if northbound turns negative, pause all buys".
+8. **Current checkpoint plan**: e.g. "10:30 only execute if still below open price; if northbound turns negative, pause all buys".
 9. **Trading memory note** (if applicable): "上次对该标的建议[动作]@[价格]，至今收益率[X]%，相对沪深300 Alpha [Y]%".
 
 ## Non-Negotiables

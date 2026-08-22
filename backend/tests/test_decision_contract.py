@@ -159,6 +159,110 @@ def test_blocked_candidate_scan_overrides_stale_final_candidates():
     assert result["final_rating"] == "no_action"
 
 
+def test_subthreshold_candidate_does_not_block_no_action():
+    from app.services.analysis_engine import _normalize_final
+
+    result = _normalize_final(
+        {
+            "data_quality_grade": "A",
+            "final_rating": "hold",
+            "holdings": [{"code": "600519", "action": "hold"}],
+            "risk_warnings": [],
+        },
+        [{"code": "600519", "name": "贵州茅台", "available_qty": 80}],
+        "A",
+        {
+            "quality_gate": {"status": "pass", "grade": "A"},
+            "candidates": [_candidate("000001", 6)],
+        },
+    )
+
+    assert result["candidates"] == []
+    assert result["buy_candidates"] == []
+    assert result["final_rating"] == "no_action"
+
+
+def test_rotation_watch_does_not_enter_action_candidates_or_block_no_action():
+    from app.services.analysis_engine import _normalize_final
+
+    candidate = _candidate("000001", 9)
+    candidate["candidate_type"] = "rotation_watch"
+    result = _normalize_final(
+        {
+            "data_quality_grade": "A",
+            "final_rating": "hold",
+            "holdings": [{"code": "600519", "action": "hold"}],
+            "risk_warnings": [],
+        },
+        [{"code": "600519", "name": "贵州茅台", "available_qty": 80}],
+        "A",
+        {
+            "quality_gate": {"status": "pass", "grade": "A"},
+            "candidates": [candidate],
+        },
+    )
+
+    assert result["candidates"] == []
+    assert result["buy_candidates"] == []
+    assert result["final_rating"] == "no_action"
+
+
+def test_no_action_overwrites_stale_conclusion_and_final_actions():
+    from app.services.analysis_engine import _normalize_final
+
+    result = _normalize_final(
+        {
+            "data_quality_grade": "A",
+            "final_rating": "hold",
+            "portfolio_conclusion": "建议减仓通信ETF并换入半导体。",
+            "holdings": [{"code": "600519", "action": "hold", "reason": "趋势与风险平衡"}],
+            "today_actions": [{"code": "600519", "action": "sell", "quantity": "80"}],
+            "portfolio_manager_final": {
+                "portfolio_rating": "hold",
+                "final_actions": [{"code": "600519", "action": "sell", "quantity": "80"}],
+            },
+            "trader_proposal": {
+                "orders": [{"code": "600519", "action": "sell", "quantity": "80"}],
+            },
+            "rebalance_plan": {"action": "换仓"},
+            "risk_warnings": [],
+        },
+        [{"code": "600519", "name": "贵州茅台", "available_qty": 80}],
+        "A",
+        {"quality_gate": {"status": "pass", "grade": "A"}, "candidates": []},
+    )
+
+    assert result["final_rating"] == "no_action"
+    assert result["portfolio_conclusion"] == "当前没有足够证据证明调整组合优于保持现状，维持当前组合。"
+    assert result["portfolio_manager_final"]["portfolio_rating"] == "no_action"
+    assert result["today_actions"] == result["holdings"]
+    assert result["portfolio_manager_final"]["final_actions"] == result["holdings"]
+    assert result["trader_proposal"]["orders"] == result["holdings"]
+    assert result["trader_proposal"]["decision"] == "hold"
+    assert result["rebalance_plan"] == {}
+    assert all(row["action"] in {"hold", "watch"} for row in result["today_actions"])
+
+
+def test_blocked_quality_gate_cannot_become_no_action_during_normalization():
+    from app.services.analysis_engine import _normalize_final
+
+    result = _normalize_final(
+        {
+            "data_quality_grade": "F",
+            "final_rating": "no_action",
+            "portfolio_conclusion": "保持现状",
+            "holdings": [{"code": "600519", "action": "hold"}],
+            "risk_warnings": [],
+        },
+        [{"code": "600519", "name": "贵州茅台", "available_qty": 80}],
+        "F",
+        {"quality_gate": {"status": "blocked", "grade": "F"}, "candidates": []},
+    )
+
+    assert result["final_rating"] == "watch_only"
+    assert result["portfolio_manager_final"]["portfolio_rating"] == "watch_only"
+
+
 def test_analysis_mode_alias_and_standard_mode():
     from app.decision_contract import canonicalize_analysis_mode
     from app.v2_schemas import AnalysisJobCreate
