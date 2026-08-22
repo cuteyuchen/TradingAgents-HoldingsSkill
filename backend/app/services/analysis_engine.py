@@ -11,6 +11,12 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal
+from ..decision_contract import (
+    CANDIDATE_MAX_COUNT,
+    DEFAULT_PORTFOLIO_ACTION,
+    canonicalize_analysis_mode,
+    should_normalize_no_action,
+)
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
 from .model_client import call_model, parse_json_result
@@ -21,12 +27,15 @@ logger = logging.getLogger(__name__)
 CORE_RULES = """
 你是 TradingAgents Holdings Advisor 的服务端分析引擎，面向 A 股和 ETF。
 必须遵守：
+- NO_ACTION 是一等合法的组合结果。先判断是否有必要改变当前组合，再判断改变什么；分析完成不等于必须交易。
 - 本次确认的持仓快照是当前持仓的唯一真实来源，历史只能用于一致性检查。
 - qty 是总持仓，available_qty 是当前可卖数量；减仓/卖出数量不得超过 available_qty。
 - qty-available_qty 可能来自挂单、冻结或 T+1，不能推断为已经卖出。
 - 亏损是风险输入，不是自动卖出理由，必须结合技术、资金、事件和组合风险。
 - 同日或近期建议发生方向反转，必须指出发生了什么实质变化。
 - 缺少关键行情时，不得编造触发价和具体数量。
+- 新 Candidate 只表示当前未持有的新机会，允许 0-3 个；当前持仓加仓/条件加仓只能出现在 Holding Action。
+- 证据充分、所有持仓为 hold/watch 且没有通过门控的新 Candidate 时，组合级结果必须为 no_action；质量门控 blocked 时必须保留 watch_only。
 - 事实、推断、风险和失效条件必须区分。
 - 这是研究辅助，不承诺收益，不执行交易。
 """.strip()
@@ -49,7 +58,7 @@ FINAL_SCHEMA = {
     "data_quality_grade": "A/B/C/D/F",
     "market_read": "市场概览",
     "portfolio_conclusion": "组合级结论",
-    "final_rating": "add/hold/reduce/sell/rotate/watch_only",
+    "final_rating": "add/hold/reduce/sell/rotate/no_action/watch_only",
     "cash_target": "建议现金区间",
     "confidence": "high/medium/low",
     "holdings": [
@@ -70,7 +79,7 @@ FINAL_SCHEMA = {
         {
             "code": "代码",
             "name": "名称",
-            "action": "new_position/add_existing/rotation_watch",
+            "action": "new_position/rotation_watch",
             "reason": "原因",
             "trigger": "触发条件",
             "initial_size": "初始仓位",
@@ -498,6 +507,15 @@ def _numeric_quantity(value: Any) -> float | None:
     return float(match.group(1)) if match else None
 
 
+def _numeric_score(value: Any) -> float | None:
+    """Parse a finite candidate score while keeping malformed scores unranked."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if score == score and score not in {float("inf"), float("-inf")} else None
+
+
 def _normalize_final(
     result: dict[str, Any],
     holdings: list[dict[str, Any]],
@@ -554,18 +572,26 @@ def _normalize_final(
         result["phase_errors"] = phase_errors
         result["risk_warnings"].extend(f"分析阶段降级：{item}" for item in phase_errors)
 
-    by_code = {item["code"]: item for item in holdings}
+    by_code: dict[str, dict[str, Any]] = {}
+    for item in holdings:
+        code = normalize_code(str(item.get("code") or ""))
+        if not code:
+            continue
+        source = dict(item)
+        source["code"] = code
+        by_code[code] = source
     output_rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in result.get("holdings") or []:
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
-        code = str(row.get("code") or "").strip()
+        code = normalize_code(str(row.get("code") or ""))
         if code not in by_code or code in seen:
             continue
         seen.add(code)
         source = by_code[code]
+        row["code"] = code
         available = source.get("available_qty")
         row["name"] = row.get("name") or source.get("name")
         row["max_sellable_qty"] = available
@@ -616,78 +642,83 @@ def _normalize_final(
             )
     result["holdings"] = output_rows
 
-    holding_actions = {row["code"]: str(row.get("action") or "watch").lower() for row in output_rows}
+    holding_codes = {row["code"] for row in output_rows}
     filtered_candidates: list[dict[str, Any]] = []
-    raw_candidates = workflow.get("candidates") or result.get("buy_candidates") or result.get("candidates") or []
+    # An explicitly empty workflow list is authoritative: the candidate scan
+    # may have blocked new opportunities even when a later model response still
+    # echoes stale candidates in its final payload.
+    if "candidates" in workflow:
+        raw_candidates = workflow.get("candidates") or []
+    else:
+        raw_candidates = result.get("buy_candidates") or result.get("candidates") or []
+    gate = result.get("quality_gate") or workflow.get("quality_gate") or {}
+    gate_grade = str(gate.get("grade") or quality_grade).upper()
+    gate_status = str(gate.get("status") or "pass").lower()
+    if gate_grade in {"D", "F"}:
+        gate_status = "blocked"
     for candidate in raw_candidates:
         if not isinstance(candidate, dict):
             continue
         row = dict(candidate)
         code = normalize_code(str(row.get("code") or ""))
+        # Candidate means a new, non-held opportunity.  Invalid or held rows are
+        # removed before any count cap is applied; holding-level adds remain in
+        # the holding action table.
+        if len(code) != 6 or not code.isdigit() or code in holding_codes:
+            if code in holding_codes:
+                result["risk_warnings"].append(f"候选 {code} 已在当前持仓中，已从新增机会列表移除。")
+            continue
         row["code"] = code
         candidate_type = str(row.get("candidate_type") or row.get("type") or row.get("action") or "rotation_watch").lower()
-        type_aliases = {
+        candidate_type = {
             "new": "new_position",
             "buy": "new_position",
             "新开仓": "new_position",
-            "add": "add_existing",
-            "加仓现有持仓": "add_existing",
-            "条件加仓": "conditional_add",
             "watch": "rotation_watch",
             "watch_only": "rotation_watch",
             "轮动观察": "rotation_watch",
-        }
-        candidate_type = type_aliases.get(candidate_type, candidate_type)
-        row["candidate_type"] = candidate_type
-        if code in holding_actions and holding_actions[code] not in {"add", "conditional_add"}:
-            result["risk_warnings"].append(
-                f"候选 {code} 与当前持仓动作冲突，已从买入候选中移除。"
-            )
+        }.get(candidate_type, candidate_type)
+        if candidate_type not in {"new_position", "rotation_watch"}:
             continue
-        if code in holding_actions and candidate_type not in {"add_existing", "conditional_add"}:
-            candidate_type = "conditional_add" if holding_actions[code] == "conditional_add" else "add_existing"
-            row["candidate_type"] = candidate_type
+        row["candidate_type"] = candidate_type
         reason_detail = row.get("reason_detail") if isinstance(row.get("reason_detail"), dict) else {}
-        catalyst = row.get("catalyst") or row.get("news_catalyst") or reason_detail.get("catalyst")
-        capital_flow = row.get("capital_flow") or reason_detail.get("capital_flow")
-        sector_position = row.get("sector_position") or reason_detail.get("sector_position")
         row["reason_detail"] = {
-            "catalyst": catalyst,
-            "capital_flow": capital_flow,
-            "sector_position": sector_position,
+            "catalyst": row.get("catalyst") or row.get("news_catalyst") or reason_detail.get("catalyst"),
+            "capital_flow": row.get("capital_flow") or reason_detail.get("capital_flow"),
+            "sector_position": row.get("sector_position") or reason_detail.get("sector_position"),
         }
-        missing_reason_fields = [
-            key
-            for key, value in row["reason_detail"].items()
-            if value is None or not str(value).strip()
-        ]
-        if missing_reason_fields:
-            row["buyable"] = False
-            row["candidate_type"] = "rotation_watch"
-            row["gate_status"] = "blocked_missing_evidence"
-            row["blocked_reason"] = "缺少候选依据：" + "、".join(missing_reason_fields)
-        else:
-            try:
-                score = float(row.get("score"))
-            except (TypeError, ValueError):
-                score = None
-            row["buyable"] = bool(score is not None and score >= 7 and candidate_type != "rotation_watch")
-            row["gate_status"] = "buyable" if row["buyable"] else "watch_only"
-        gate_grade = str((result.get("quality_gate") or {}).get("grade") or quality_grade).upper()
-        if gate_grade in {"C", "D", "F"}:
-            row["buyable"] = False
-            row["candidate_type"] = "rotation_watch"
-            row["gate_status"] = "watch_only_quality_gate"
-            row["blocked_reason"] = f"数据质量 {gate_grade}，新买入被门控阻断"
+        missing_reason_fields = [key for key, value in row["reason_detail"].items() if value is None or not str(value).strip()]
+        if missing_reason_fields or gate_grade in {"C", "D", "F"} or gate_status == "blocked":
+            continue
+        score = _numeric_score(row.get("score"))
+        row["buyable"] = bool(score is not None and score >= 7 and candidate_type != "rotation_watch")
+        row["gate_status"] = "buyable" if row["buyable"] else "watch_only"
         filtered_candidates.append(row)
+
+    # Keep the contract bounded.  Valid numeric scores are preferred, while
+    # preserving stable input order for candidates without a score.
+    filtered_candidates.sort(
+        key=lambda item: (
+            _numeric_score(item.get("score")) is not None,
+            _numeric_score(item.get("score")) if _numeric_score(item.get("score")) is not None else float("-inf"),
+        ),
+        reverse=True,
+    )
+    filtered_candidates = filtered_candidates[:CANDIDATE_MAX_COUNT]
     result["candidates"] = filtered_candidates
     result["buy_candidates"] = filtered_candidates
     result["today_actions"] = output_rows
-    result.setdefault("candidate_status", "ready" if filtered_candidates else "none")
-    result.setdefault(
-        "candidate_blocked_reason",
-        None if filtered_candidates else "当前没有同时满足消息面、资金面、板块位置和风险门控的候选。",
-    )
+    existing_candidate_status = str(result.get("candidate_status") or "").lower()
+    if filtered_candidates:
+        result["candidate_status"] = existing_candidate_status or "ready"
+    elif gate_status == "blocked":
+        result["candidate_status"] = "blocked"
+    elif existing_candidate_status in {"blocked_missing_evidence", "risk_control", "watch_only"}:
+        result["candidate_status"] = existing_candidate_status
+    else:
+        result["candidate_status"] = "none"
+    if not filtered_candidates and not result.get("candidate_blocked_reason"):
+        result["candidate_blocked_reason"] = "当前没有同时满足消息面、资金面、板块位置和风险门控的候选。"
 
     investment = result.get("investment_debate_state") or {}
     if investment:
@@ -695,8 +726,19 @@ def _normalize_final(
         result["bear_case"] = investment.get("bear_case") or result.get("bear_case") or []
         result["unresolved_claims"] = investment.get("unresolved_claims") or result.get("unresolved_claims") or []
 
+    if should_normalize_no_action(
+        quality_gate_status=gate_status,
+        holdings=output_rows,
+        candidates=filtered_candidates,
+    ):
+        result["final_rating"] = DEFAULT_PORTFOLIO_ACTION
+        result["portfolio_conclusion"] = result.get("portfolio_conclusion") or "证据充分，但没有足够理由改变当前组合，保持现状。"
+
     portfolio_final = result.get("portfolio_manager_final") or {}
-    portfolio_final.setdefault("portfolio_rating", result.get("final_rating"))
+    if result.get("final_rating") == DEFAULT_PORTFOLIO_ACTION:
+        portfolio_final["portfolio_rating"] = DEFAULT_PORTFOLIO_ACTION
+    else:
+        portfolio_final.setdefault("portfolio_rating", result.get("final_rating"))
     portfolio_final.setdefault("cash_target", result.get("cash_target"))
     portfolio_final.setdefault("risk_decision", (result.get("risk_revision") or {}).get("decision", "pass"))
     portfolio_final.setdefault("final_actions", output_rows)
@@ -984,6 +1026,7 @@ def run_analysis_job(job_id: int) -> None:
         final_profile = deep_profile or quick_profile
         system_prompt = CORE_RULES + "\n\n" + runtime_prompt()
         quality_gate = _quality_gate(snapshot, market)
+        analysis_mode = canonicalize_analysis_mode(job.mode)
 
         if quality_gate["status"] == "blocked":
             final = _blocked_result(snapshot, market)
@@ -1007,13 +1050,13 @@ def run_analysis_job(job_id: int) -> None:
             if quick_profile is None and deep_profile is None:
                 raise RuntimeError("default_analysis_model_not_configured")
             analyst_profile = quick_profile or deep_profile
-            manager_profile = (deep_profile or quick_profile) if job.mode == "deep" else analyst_profile
+            manager_profile = (deep_profile or quick_profile) if analysis_mode == "deep" else analyst_profile
             input_payload = {
                 "snapshot": snapshot,
                 "market": market,
                 "recent_history": history,
                 "checkpoint": job.checkpoint,
-                "analysis_mode": job.mode,
+                "analysis_mode": analysis_mode,
             }
 
             _job_stage(db, job, "analysts_running", 30)
@@ -1173,8 +1216,8 @@ def run_analysis_job(job_id: int) -> None:
                         "trader_proposal": trader,
                         "risk_revision": risk_revision,
                     },
-                    "执行今日买入候选三层扫描：大盘环境、热门板块、候选盘口。输出 1-2 个候选或明确阻断。"
-                    "每个候选必须包含 code、name、candidate_type(new_position/add_existing/conditional_add/rotation_watch)、"
+                    "执行今日新增机会三层扫描：大盘环境、热门板块、候选盘口。输出 0-3 个非当前持仓候选；candidates=[] 是正常结果，不得为了数量生成。"
+                    "每个候选必须包含 code、name、candidate_type(new_position/rotation_watch)，且不得属于当前持仓；"
                     "reason_detail(catalyst/capital_flow/sector_position)、entry_trigger、initial_size、take_profit_1、"
                     "take_profit_2、stop_loss、invalidating_condition、score(0-10)、score_breakdown。"
                     "同时输出 hot_sectors、market_buy_mode、cancel_all_buys_when、candidate_blocked_reason。",
@@ -1229,7 +1272,7 @@ def run_analysis_job(job_id: int) -> None:
                         "data_quality_grade": quality_gate["grade"],
                         "market_read": evidence.get("market_read") or "市场证据已采集，最终模型阶段降级。",
                         "portfolio_conclusion": research.get("strategic_action") or "保持观察。",
-                        "final_rating": "hold",
+                        "final_rating": DEFAULT_PORTFOLIO_ACTION,
                         "cash_target": "保持现状",
                         "confidence": "low",
                         "holdings": trader.get("orders", []),
@@ -1278,7 +1321,7 @@ def run_analysis_job(job_id: int) -> None:
                 "history_used": history,
                 "workflow": workflow,
                 "skill_execution": {
-                    "mode": job.mode,
+                    "mode": analysis_mode,
                     "phases_completed": (
                         [
                             "intent_and_history_context",

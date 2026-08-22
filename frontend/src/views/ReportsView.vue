@@ -77,7 +77,14 @@ const candidates = computed<any[]>(() => {
 const candidateBlockReason = computed(() => {
   const value = section('candidate_blocked_reason', 'candidate_block_reason', 'buy_block_reason')
     || (section('candidates', 'buy_candidates') as AnyRecord)?.blocked_reason
-  return textValue(value) || '当前没有通过质量与风险门控的买入或轮动候选。'
+  const explicitReason = textValue(value)
+  if (explicitReason) return explicitReason
+  const gate = qualityGate.value || {}
+  const blockers = listValue(gate.blockers || gate.blocked_reasons || gate.new_buy_blockers || gate.candidate_blockers || gate.reasons).map(textValue).filter(Boolean)
+  const blocked = gate.blocked === true || gate.action_allowed === false || gate.new_buy_allowed === false || gate.status === 'blocked' || blockers.length > 0
+  return blocked
+    ? `数据质量阻断：${blockers.join('；') || '关键数据不足，暂不生成新增候选。'}`
+    : '当前无达到行动门槛的新增机会'
 })
 
 const investmentClaims = computed<AnyRecord[]>(() => {
@@ -124,7 +131,7 @@ const speakerLabels: Record<string, string> = {
 }
 
 const actionLabels: Record<string, string> = {
-  add: '加仓', hold: '持有', reduce: '减仓', sell: '卖出', watch: '观察', watch_only: '仅观察',
+  add: '加仓', hold: '持有', reduce: '减仓', sell: '卖出', watch: '观察', watch_only: '仅观察', no_action: '无需调整',
   rotate: '轮动', new_position: '新开仓', add_existing: '加仓现有持仓', rotation_watch: '轮动观察', conditional_add: '条件加仓', conditional_buy: '条件买入',
 }
 
@@ -319,7 +326,7 @@ watch(portfolioId, () => void loadRuns())
           <section class="panel-card decision-hero">
             <div class="verdict-copy">
               <p class="eyebrow">PORTFOLIO VERDICT</p>
-              <div class="verdict-line"><h2>{{ actionText(detail.final_rating) }}</h2><n-tag :bordered="false" :type="actionType(detail.final_rating || '')">{{ detail.final_rating || 'watch_only' }}</n-tag></div>
+              <div class="verdict-line"><h2>{{ actionText(detail.final_rating) }}</h2><n-tag :bordered="false" :type="actionType(detail.final_rating || '')">{{ actionText(detail.final_rating || 'watch_only') }}</n-tag></div>
               <p>{{ detail.summary || '暂无摘要' }}</p>
             </div>
             <div class="hero-stats">
@@ -350,7 +357,7 @@ watch(portfolioId, () => void loadRuns())
 
           <section class="panel-card candidate-panel">
             <div class="section-title">
-              <div><p class="section-kicker">BUY / ROTATION</p><h2>今日买入与轮动候选</h2><p>候选同时核验消息催化、资金面、板块位置与组合约束</p></div>
+              <div><p class="section-kicker">NEW OPPORTUNITIES</p><h2>新增机会候选</h2><p>仅展示通过消息催化、资金面、板块位置与组合约束的新非持仓机会</p></div>
               <TrendingUp :size="21" />
             </div>
             <div v-if="candidates.length" class="candidate-list">

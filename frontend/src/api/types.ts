@@ -1,6 +1,7 @@
 export type DataGrade = 'A' | 'B' | 'C' | 'D' | 'F'
 export type ModelPurpose = 'vision' | 'analysis' | 'deep_analysis'
-export type AnalysisMode = 'quick' | 'deep'
+// `quick` remains readable for legacy jobs/schedules; new requests use canonical modes.
+export type AnalysisMode = 'quick' | 'fast' | 'standard' | 'deep'
 
 export interface User {
   id: number

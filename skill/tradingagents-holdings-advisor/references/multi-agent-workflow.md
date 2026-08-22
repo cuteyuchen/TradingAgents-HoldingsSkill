@@ -8,22 +8,22 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 
 | Phase | Name | Reasoning Mode | Steps |
 |---|---|---|---|
-| **Phase 0** | Intent Parsing + Archive Context | quick | Parse intent; extract portfolio; after code confirmation fetch archive context when configured |
-| **Phase 1** | Analyst Team | quick | Fast market snapshot; centralized data collection; rank by risk; full pass for top-risk, lighter pass for small |
-| **Phase 2** | Quality Gate | quick | Two-layer grade on all evidence before any debate |
-| **Phase 3** | Claim-Driven Bull/Bear Debate | quick | Structured claims with tracking |
-| **Phase 4** | Research → Trader → Risk Revision | mixed (research/risk mgr = deep, trader = quick) | Verdict, executable proposal, revision loop |
+| **Phase 0** | Intent Parsing + Archive Context | fast | Parse intent; extract portfolio; after code confirmation fetch archive context when configured |
+| **Phase 1** | Analyst Team | fast | Fast market snapshot; centralized data collection; rank by risk; full pass for top-risk, lighter pass for small |
+| **Phase 2** | Quality Gate | fast | Two-layer grade on all evidence before any debate |
+| **Phase 3** | Claim-Driven Bull/Bear Debate | fast | Structured claims with tracking |
+| **Phase 4** | Research → Trader → Risk Revision | mixed (research/risk mgr = deep, trader = fast) | Verdict, executable proposal, revision loop |
 | **Phase 5** | Portfolio Synthesis | deep | Three-way risk debate + portfolio-level final decision |
-| **Phase 6** | Reflection + Archive | quick | Reflect on available past decisions; after visible advice, upload archive files |
+| **Phase 6** | Reflection + Archive | fast | Reflect on available past decisions; after visible advice, upload archive files |
 
-### Phase 0 — Intent Parsing + Archive Context (quick)
+### Phase 0 — Intent Parsing + Archive Context (fast)
 
 1. **Intent Parsing**: Parse the user's natural language to identify: target tickers, investment horizon (短线/中线/长线), focus areas (技术/基本面/政策/资金), risk profile, and specific questions. If the user says "分析茅台短线", extract ticker=600519, horizon=short, focus=technical+momentum. See Intent Parsing section below.
    - If the user says "解析持仓/解析截图/上传持仓", default the objective to "完成持仓解析并给出今日操作建议". Do not downgrade the task to extraction only unless the user explicitly says not to provide advice.
 2. **Extract the whole portfolio** from screenshot/typed input/history.
 3. **Archive Context**: After current codes are confirmed, call `GET /archives/context?codes=...&limit=5` when `ADVISOR_API_URL` and `ADVISOR_TOKEN` are configured. Use the result for same-day consistency, historical reduction detection, and trading memory. Do not call legacy persistence endpoints for Phase 0 history. The current skill integration with the companion system is archive-only; see `persistence.md`.
 
-### Phase 1 — Analyst Team (quick)
+### Phase 1 — Analyst Team (fast)
 
 4. **Fast Snapshot + Centralized Data Collection**: Build `evidence_snapshot.json` with `scripts/market_snapshot.py`, then fetch any remaining non-quote evidence once for all holdings in a single batch pass. See `data-sources.md`. Never fetch the same data point twice.
    - Treat `schema_version`, `source_chain`, `missing_fields`, `errors`, and `quality_gate` as the verified data contract inherited from the upstream TradingAgents v0.3.0 data-access hardening.
@@ -50,25 +50,25 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 6. **Run the full analyst pass** for top-risk names and any large ETF.
 7. **Run a lighter pass** for small positions unless they have major news.
 
-### Phase 2 — Quality Gate (quick)
+### Phase 2 — Quality Gate (fast)
 
 8. **Quality Gate** (two-layer): Grade all evidence before any debate begins. See Quality Gate section below. Start from `evidence_snapshot.quality_gate`; then tighten the grade if later analyst reports expose additional missing mandatory fields.
 
-### Phase 3 — Claim-Driven Bull/Bear Debate (quick)
+### Phase 3 — Claim-Driven Bull/Bear Debate (fast)
 
 9. **Claim-Driven Bull/Bear Debate**: Structured argumentation with tracked claims, evidence, confidence, and resolution status. See Debate section below.
 
 ### Phase 4 — Research → Trader → Risk Revision (mixed)
 
 10. **Research Manager Verdict** (deep): Synthesize debate into directional plan.
-11. **Trader Proposal** (quick): Convert plan into executable order with A-share constraints.
+11. **Trader Proposal** (fast): Convert plan into executable order with A-share constraints.
 12. **Risk Manager Decision + Revision Loop** (deep): Risk Manager can send Trader back for revision (max `max_revision_retries`, default 1) with structured constraints.
 
 ### Phase 5 — Portfolio Synthesis (deep)
 
 13. **Three-Way Risk Debate** + **Portfolio-Level Synthesis**: Aggressive / Neutral / Conservative with claim tracking, then aggregate all decisions at portfolio level, not single-stock level.
 
-### Phase 6 — Memory Reflection + Archive (quick)
+### Phase 6 — Memory Reflection + Archive (fast)
 
 14. **Final Quote Refresh**: Run `scripts/market_snapshot.py --refresh-final evidence_snapshot.json` immediately before the final visible advice. Update quote-sensitive fields only. Rerun affected trader/risk logic only when refreshed prices invalidate a hard trigger, stop, or risk constraint.
 15. **Trading Memory Reflection**: Compare with past decisions on same tickers, compute alpha vs CSI 300 benchmark. See `trading-rules.md` Trading Memory section.
@@ -77,11 +77,10 @@ The original repos analyze one ticker through a graph. For a screenshot portfoli
 **Quality note**: Under time/data pressure, do not skip mandatory evidence or the quality gate. If mandatory evidence is unavailable, block trading advice and state the missing data plus next collection step.
 
 **Action output note**: Regardless of compression level, final output must include
-both tables: (1) current holding operation advice, and (2) today's
-buy/rotation advice. The buy/rotation table may include non-held symbols or a
-current holding labeled `加仓现有持仓`/`条件加仓`, but it must never contradict the
-holding table. Existing holdings marked `持有不加仓`, `减仓`, or `卖出` must not
-reappear as buy candidates.
+current holding operation advice and an opportunity assessment. The normalized
+candidate list may contain 0-3 non-held symbols and may be empty. Existing
+holding add/conditional-add decisions stay in the holding table and never
+reappear as new candidates.
 
 ## Intent Parsing
 
@@ -90,7 +89,7 @@ Before starting analysis, parse the user's intent from natural language:
 | Field | Extraction Method | Example |
 |---|---|---|
 | Target ticker(s) | Chinese name → code mapping, regex for 6-digit codes | "茅台" → 600519 |
-| Investment horizon | Keywords: 短线/日内 = short(1-14d), 中线 = medium(14-90d), 长线 = long(90d+) | "做个短线" → short |
+| Investment horizon | Keywords: 短线/日内 = short(1-5 trading days), 波段 = swing(6-20 trading days), 中线 = medium(21-120 trading days) | "做个短线" → short |
 | Focus areas | Keywords: 技术/形态/K线, 基本面/财报, 政策/监管, 资金/主力/北向 | "看看资金面" → capital flow focus |
 | Risk profile | Keywords: 激进/稳健/保守, or infer from portfolio concentration | High concentration → conservative |
 | Specific objective | Keywords: 建仓/加仓/减仓/止损/调仓/轮动 | "该不该加仓" → add position decision |
@@ -104,13 +103,14 @@ Inspired by `TradingAgents-AShare`'s dual-period analysis. For **core holdings o
 
 | Track | Horizon | Default Window | Question Answered |
 |---|---|---|---|
-| Short track (短线轨) | short | `horizon_short_days` = 1–14d | Today's tactical action: trim/add/exit |
-| Medium track (中线轨) | base | `horizon_medium_days` = 14–90d | Hold the base position or not |
+| Short track (短线轨) | short | `horizon_short_days` = 1–5 trading days | Today's tactical action: trim/add/exit |
+| Swing track (波段轨) | swing | `horizon_swing_days` = 6–20 trading days | Short swing action and trigger planning |
+| Medium track (中线轨) | medium | `horizon_medium_days` = 21–120 trading days | Hold the base position or not |
 
 Run the analyst pass and bull/bear debate **once per track** for core holdings. When the two tracks conflict:
 
 - The track matching the user's **stated horizon wins** (`horizon_conflict_rule`).
-- If horizon is unspecified, the **medium track (base) wins** for the hold/reduce decision; the short track only sizes tactical trades within `short_track_max_ratio` (default 15%).
+- If horizon is unspecified, the **medium track (base) wins** for the hold/reduce decision; short/swing tracks only size tactical trades within `short_track_max_ratio` (default 15%).
 - State both conclusions and the conflict explicitly in the evidence pack so the user can see the tension.
 
 Non-core holdings use a single track matching the parsed horizon (or medium by default).
@@ -225,7 +225,7 @@ Note: Investment debate (Phase 3) uses `INV-` prefix with speakers `bull/bear` a
 
 ### Phase 4: Research Manager (研究总监)
 
-Use **deep reasoning** (not quick analysis) to synthesize the debate:
+Use **deep reasoning** (not fast analysis) to synthesize the debate:
 
 - Input: All 7 analyst reports + quality summary + full claim debate + unresolved claims.
 - Process: Weigh unresolved claims by evidence strength and confidence.
@@ -267,7 +267,7 @@ Use **deep reasoning** to make final decision:
 **Revision Loop** (unique feature from TradingAgents-AShare):
 - Verdict can be: `pass` / `revise` / `reject`
 - If `revise`: Send back to Trader with structured feedback:
-  - `hard_constraints`: Non-negotiable (e.g., "仓位不超过30%")
+  - `hard_constraints`: Non-negotiable (e.g., "普通股票合同上限20%、行业/主题ETF合同上限30%；当前未完成确定性执行")
   - `soft_constraints`: Advisory (e.g., "建议分批建仓")
   - `execution_preconditions`: Must-hold conditions
   - `de_risk_triggers`: Immediate action triggers
@@ -275,15 +275,15 @@ Use **deep reasoning** to make final decision:
 - Max 1 retry. If still unsatisfactory, default to reject.
 
 **Final Output:**
-- Rating: Buy / Overweight / Hold / Underweight / Sell
+- Rating: `no_action` / `watch_only` / Buy / Overweight / Hold / Underweight / Sell
 - Portfolio-level action plan
 - Cash target
 - What to reduce first, keep, watch, or rotate into
-- Which buy candidate can be executed, watched, or rejected today
+ - Which non-held opportunity can be executed, watched, or rejected today; zero is valid
 
 ### Optional: Hot Sector Scanner & Buy Candidate Analyst
 
-These run as part of the portfolio synthesis, not as separate graph nodes. See `buy-candidate-selection.md`.
+These run as part of the portfolio synthesis, not as separate graph nodes. See `buy-candidate-selection.md`. They may return no candidates.
 
 ## Trading Memory System
 
@@ -303,11 +303,12 @@ When past advice exists for a holding, reference it and the alpha in the final a
 
 ## Dual Reasoning Mode
 
-Inspired by `TradingAgents-AShare`'s dual model strategy (quick_think_llm vs deep_think_llm). Each phase has a fixed reasoning mode; defaults are in `configuration.md`.
+Inspired by `TradingAgents-AShare`'s dual model strategy (fast_think_llm vs deep_think_llm). Each phase has a fixed reasoning profile; request modes are canonicalized as `fast | standard | deep` (legacy `quick` reads as `fast`), with defaults in `configuration.md`.
 
 | Mode | Phases | Characteristics |
 |---|---|---|
-| **Quick mode (快速分析)** | Phase 0, Phase 1, Phase 3, Phase 4 (trader), Phase 6 | Faster, focused on specific data points, concise output |
+| **Fast mode (快速分析)** | Phase 0, Phase 1, Phase 3, Phase 4 (trader), Phase 6 | Faster, focused on specific data points, concise output |
+| **Standard mode (标准分析)** | Full existing pipeline with balanced depth | Canonical default for ordinary runs; does not imply a new agent topology |
 | **Deep mode (深度推理)** | Phase 4 (research manager, risk manager), Phase 5 | Slower, synthesizes all reports + debate + unresolved claims, weighs trade-offs carefully |
 
 In practice: analyst-level and debate-level reasoning (Phases 0/1/3, trader) is fast and data-focused. Judge-level reasoning (research manager, risk manager, portfolio manager — Phases 4/5) must be thorough, weighing all evidence and unresolved claims before deciding.
@@ -344,14 +345,12 @@ Every execution should include detailed debate for material decisions:
 - Prioritize reducing high-weight losers that are weaker than the market.
 - Do not sell the strongest holding first just because it is profitable.
 - Separate "today's execution" from "watchlist/rotation candidates".
-- Always include a buy/rotation candidate module. If buys are blocked by exposure, timing, or data quality, output watch-only candidates with exact triggers.
+- Always evaluate the opportunity module, but do not force output. If no opportunity beats keeping the portfolio unchanged, return `candidates=[]`; if blocked by quality, retain `watch_only` and state the blocker.
 - If the market is strong but the user's heavy holdings are weak, use strength to reduce weak holdings rather than add.
 - New buy candidates must fit the portfolio cash plan; do not add exposure before planned weak-position trims when account exposure is above 85%.
-- Buy/rotation candidates may duplicate current holdings only as
-  `加仓现有持仓`/`条件加仓` and only when the current-holding action table gives
-  the same add verdict. If a held symbol is the best expression of a hot sector
-  but the holding verdict is `持有不加仓`, `减仓`, or `卖出`, select a different
-  non-held candidate or state that no buy is allowed today.
+- New candidates must never duplicate current holdings. If a held symbol is the
+  best expression of a hot sector, keep any supported add decision in holdings;
+  otherwise return no new candidate rather than selecting a weaker substitute.
 
 ## Final Decision Vocabulary
 

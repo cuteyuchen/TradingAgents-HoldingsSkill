@@ -201,7 +201,7 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 - Eastmoney is used as **primary only** for data unique to it (fund flow, dragon-tiger, lockup); for everything else it is last-resort to protect the rate budget.
 - Any failed fetch records `[数据缺失: source/field]`. If the missing field is mandatory for the action decision, block the affected trading advice instead of lowering the evidence standard. Never retry endlessly (see `fallback_action` in `configuration.md`).
 - Quote collection is mandatory after codes are confirmed. During trading hours, use live quote fields; outside trading hours, use the latest completed trading session's open/high/low/close/turnover data and set `market_session` to `closed_latest_session`.
-- New-buy candidates require both sector/concept position and capital-flow evidence. If `market.hot_sectors`, `concept_blocks:*`, or fund-flow evidence is missing, output watch-only triggers instead of an executable new buy.
+- New non-held candidates require both sector/concept position and capital-flow evidence. If `market.hot_sectors`, `concept_blocks:*`, or fund-flow evidence is missing, keep the candidate list empty, preserve the blocker, and do not emit an executable new buy.
 
 ## Symbol Resolution
 

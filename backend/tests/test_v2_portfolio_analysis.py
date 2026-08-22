@@ -194,9 +194,10 @@ def test_v2_portfolio_flow(monkeypatch):
 
     report = client.get(f"/api/v2/analysis/runs/{job.json()['run_id']}", headers=headers)
     assert report.status_code == 200, report.text
-    assert report.json()["final_rating"] == "hold"
+    assert report.json()["final_rating"] == "no_action"
     assert "今日持仓操作" in report.json()["markdown"]
     structured = report.json()["structured_result"]
+    assert structured["result"]["portfolio_manager_final"]["portfolio_rating"] == "no_action"
     assert structured["result"]["holdings"][0]["max_sellable_qty"] == 80
     assert structured["workflow"]["investment_debate_state"]["bull_claims"][0]["claim_id"].startswith("INV-")
     risk_claims = sum(

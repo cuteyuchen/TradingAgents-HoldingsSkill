@@ -11,8 +11,13 @@ The workflow runs in 7 phases (see `multi-agent-workflow.md`). Each phase has a 
 | Parameter | Default | Applies To | Notes |
 |---|---|---|---|
 | `pipeline_phases` | 7 (Phase 0–6) | Whole pipeline | Phase 0 意图解析+本地上下文 / 1 分析师 / 2 质量门 / 3 多空辩论 / 4 研究·交易·风控修正 / 5 组合综合 / 6 反思+归档 |
-| `quick_mode_phases` | 0, 1, 3, 4(trader) | Reasoning mode | Fast, data-focused: analyst reports, debate responses, trader proposal |
-| `deep_mode_phases` | 4(research mgr), 4(risk mgr), 5 | Reasoning mode | Thorough synthesis: research/risk/portfolio managers weigh all evidence + unresolved claims |
+| `fast_reasoning_phases` | 0, 1, 3, 4(trader) | Reasoning profile | Fast, data-focused: analyst reports, debate responses, trader proposal |
+| `deep_reasoning_phases` | 4(research mgr), 4(risk mgr), 5 | Reasoning profile | Thorough synthesis: research/risk/portfolio managers weigh all evidence + unresolved claims |
+
+Request-level analysis modes are `fast`, `standard`, and `deep`; legacy `quick`
+input is accepted as an alias for `fast`. These modes may adjust reasoning depth
+or model selection, but they do not imply different pipeline stages or fixed
+agent counts.
 
 ## Runtime Experience Parameters
 
@@ -102,9 +107,24 @@ Position and action sizing. See `trading-rules.md`.
 | `first_trim_pct` | 0.15–0.30 | First trim of a weak holding |
 | `second_trim_pct` | 0.20–0.30 | Second trim if support breaks / sector turns |
 | `cash_min_ratio` | 0.15 | Soft floor on cash after actions |
-| `single_position_max_ratio` | 0.30 | Hard cap: one holding ≤ 30% of total assets |
+| `stock_hard_cap_ratio` | 0.20 | Contract cap for an ordinary stock; deterministic enforcement belongs to a later Portfolio Engine |
+| `sector_theme_etf_hard_cap_ratio` | 0.30 | Contract cap for a sector/theme ETF; classification and deterministic enforcement are deferred |
 | `candidate_score_buyable` | 7 | Score ≥ 7 = buyable |
 | `candidate_score_watch` | 5 | 5–6 = watch only; < 5 = do not recommend |
+
+### Decision Contract Parameters
+
+These values define the Phase A contract shared by the Skill, runtime, backend,
+and frontend. A passing score never forces a candidate: the opportunity must
+still be clearly better than keeping the current portfolio unchanged.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `candidate_min_count` | 0 | An empty candidate list is a valid successful result |
+| `candidate_max_count` | 3 | Final normalized result keeps at most three valid non-held candidates |
+| `candidate_force_output` | false | Never manufacture a candidate to satisfy a quota |
+| `new_candidate_exclude_current_holdings` | true | Existing holding add/conditional-add stays in the holding action plan |
+| `default_portfolio_action` | `no_action` | Used when quality passes, all holdings are hold/watch, and no candidate survives gates |
 
 ## Dual-Horizon Parameters
 
@@ -112,9 +132,9 @@ Short vs medium-term parallel analysis for core holdings. See `multi-agent-workf
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `horizon_short_days` | 1–14 | 短线/日内 |
-| `horizon_medium_days` | 14–90 | 中线 |
-| `horizon_long_days` | 90+ | 长线 |
+| `horizon_short_days` | 1–5 trading days | 短线 |
+| `horizon_swing_days` | 6–20 trading days | 波段 |
+| `horizon_medium_days` | 21–120 trading days | 中线 |
 | `dual_horizon_holdings` | core holdings only | Run both short + medium tracks; small positions use single track |
 | `short_track_max_ratio` | 0.15 | Short-term sleeve ≤ 15% of portfolio |
 | `horizon_conflict_rule` | horizon wins | When short and medium conclusions conflict, the one matching the user's stated horizon wins; if horizon unspecified, medium-track (base) wins, short-track (trade) only sizes within `short_track_max_ratio` |

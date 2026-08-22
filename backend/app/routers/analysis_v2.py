@@ -10,6 +10,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
+from ..decision_contract import canonicalize_analysis_mode
 from ..services.analysis_engine import run_analysis_job
 from ..v2_dependencies import get_current_user
 from ..v2_models import AnalysisJob, AnalysisRun, PortfolioSnapshot, User
@@ -111,7 +112,7 @@ def create_job(
         snapshot_id=snapshot.id,
         trigger_type="manual",
         checkpoint=payload.checkpoint,
-        mode=payload.mode,
+        mode=canonicalize_analysis_mode(payload.mode),
         notify=payload.notify,
         status="queued",
         current_stage="queued",

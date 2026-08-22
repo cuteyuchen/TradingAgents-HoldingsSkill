@@ -1,11 +1,22 @@
 """Pydantic schemas for the V2 product API."""
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator
+
+from .decision_contract import canonicalize_analysis_mode
 
 ModelPurpose = Literal["vision", "analysis", "deep_analysis"]
-AnalysisMode = Literal["quick", "deep"]
+
+
+def _canonical_analysis_mode(value: Any) -> Any:
+    return value if value is None else canonicalize_analysis_mode(value)
+
+
+AnalysisMode = Annotated[
+    Literal["quick", "fast", "standard", "deep"],
+    BeforeValidator(_canonical_analysis_mode),
+]
 NotificationType = Literal["dingtalk", "wecom"]
 
 

@@ -23,6 +23,7 @@ const analysisMode = ref<AnalysisMode>('deep')
 const analysisCheckpoint = ref('10:00')
 const analysisNotify = ref(true)
 const startingAnalysis = ref(false)
+const ratingLabels: Record<string, string> = { no_action: '无需调整', watch_only: '仅观察' }
 
 const defaultPortfolio = computed(() => portfolios.value.find((item) => item.is_default) || portfolios.value[0])
 const latestRun = computed(() => runs.value[0])
@@ -39,6 +40,10 @@ const readiness = computed(() => [
 
 function fmt(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+}
+
+function ratingText(value?: string | null) {
+  return value ? ratingLabels[value] || value : '暂无'
 }
 
 async function load() {
@@ -137,7 +142,7 @@ onMounted(load)
         <span>历史报告</span><strong>{{ runs.length }}</strong><small>最近：{{ fmt(latestRun?.created_at) }}</small>
       </section>
       <section class="metric-card panel-card">
-        <span>最近结论</span><strong class="metric-word">{{ latestRun?.final_rating || '暂无' }}</strong><small>{{ latestRun?.data_quality_grade ? `质量 ${latestRun.data_quality_grade}` : '等待首次分析' }}</small>
+        <span>最近结论</span><strong class="metric-word">{{ ratingText(latestRun?.final_rating) }}</strong><small>{{ latestRun?.data_quality_grade ? `质量 ${latestRun.data_quality_grade}` : '等待首次分析' }}</small>
       </section>
       <section class="metric-card panel-card">
         <span>下次自动分析</span><strong class="metric-word">{{ schedules.find(s => s.enabled)?.checkpoint || '未配置' }}</strong><small>{{ fmt(schedules.find(s => s.enabled)?.next_run_at) }}</small>
@@ -148,7 +153,7 @@ onMounted(load)
       <section class="panel-card main-decision">
         <div class="section-title"><div><h2>最近一次组合结论</h2><p>系统保存的结构化最终裁决</p></div><n-tag v-if="latestRun?.data_quality_grade" :bordered="false" type="info">质量 {{ latestRun.data_quality_grade }}</n-tag></div>
         <template v-if="latestRun">
-          <div class="decision-rating">{{ latestRun.final_rating || 'watch_only' }}</div>
+          <div class="decision-rating">{{ ratingText(latestRun.final_rating || 'watch_only') }}</div>
           <p class="decision-summary">{{ latestRun.summary || '该报告没有摘要。' }}</p>
           <div class="decision-meta"><span>现金目标：{{ latestRun.cash_target || '—' }}</span><span>置信度：{{ latestRun.confidence || '—' }}</span><span>{{ fmt(latestRun.created_at) }}</span></div>
           <n-button text type="primary" @click="router.push({ name: 'reports', query: { run: latestRun.id } })">查看完整报告 <ArrowRight :size="15" /></n-button>
@@ -201,7 +206,7 @@ onMounted(load)
       </n-alert>
       <n-form label-placement="top" class="analysis-modal-form">
         <n-form-item label="分析模式">
-          <n-radio-group v-model:value="analysisMode"><n-radio-button value="quick">快速</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group>
+          <n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group>
         </n-form-item>
         <n-form-item label="检查点"><n-select v-model:value="analysisCheckpoint" :options="['09:35','10:00','12:00','14:30'].map(v => ({ label: v, value: v }))" /></n-form-item>
         <n-form-item label="完成后发送通知"><n-switch v-model:value="analysisNotify" /></n-form-item>

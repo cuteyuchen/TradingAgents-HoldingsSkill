@@ -65,7 +65,7 @@ For core holdings run under dual-horizon analysis (see `multi-agent-workflow.md`
 | Sleeve | Default Cap | Purpose | Funding |
 |---|---|---|---|
 | Short-term sleeve (短线仓) | `short_track_max_ratio` = 15% of portfolio | Tactical trades from the short track (today's trim/add/exit) | Cash from short-track trims recycles into short-track adds only |
-| Medium-term base (中线底仓) | Remainder up to `single_position_max_ratio` = 30% per name | Hold/reduce decision from the medium track | Independent of short-term sleeve |
+| Medium-term base (中线底仓) | Remainder within the instrument-specific contract cap | Hold/reduce decision from the medium track | Independent of short-term sleeve |
 
 Rules:
 
@@ -73,6 +73,12 @@ Rules:
 - When both tracks say reduce, treat it as a full reduce (medium-track authority).
 - When short says add but medium says hold/reduce, the add is capped at the short-term sleeve and only if `account_exposure_high` (85%) is not breached.
 - New buy candidates (see `buy-candidate-selection.md`) draw from the short-term sleeve by default; only move to the medium-term base after the medium track confirms.
+
+Phase A defines contract caps of 20% for an ordinary stock and 30% for a
+sector/theme ETF. The current system does not yet have a reliable SecurityMaster
+or ETF classifier, so do not infer instrument type from its name or ask an LLM
+to enforce these caps. Deterministic enforcement is deferred to the Portfolio
+Engine; for now, surface the applicable contract and avoid claiming enforcement.
 
 ## Trigger Design
 
@@ -132,18 +138,17 @@ Never add simply because:
 - The user wants to recover quickly.
 - Past decision on this ticker was profitable (avoid recency bias).
 
-## New Buy Candidate Rules
+## New Opportunity Candidate Rules
 
-Every daily execution must include 1-2 buy/rotation candidates, even if the action is "watch only".
+Start by asking whether taking new risk is clearly better than keeping the
+current portfolio unchanged. New candidates are optional and must satisfy all
+of these contract rules:
 
-The buy/rotation candidate module may include either non-held symbols or
-existing holdings that deserve more exposure. Label candidate rows clearly:
-`新开仓`, `加仓现有持仓`, `条件加仓`, or `轮动观察`.
-
-For current holdings, the candidate row must match the holding action table:
-if a holding deserves "加仓", it may also appear as `加仓现有持仓`; if it deserves
-"持有不加仓", "减仓", or "卖出", do not repeat it as a buy candidate later in the
-report.
+- Return 0-3 candidates; zero is a normal successful result.
+- Never create a candidate merely to fill a quota.
+- A new candidate must not already exist in current holdings.
+- Existing-holding `加仓` or `条件加仓` belongs only in the holding action table.
+- A candidate must pass data-quality, evidence, and risk gates and have a core reason.
 
 Before recommending a buy:
 
@@ -152,7 +157,7 @@ Before recommending a buy:
 - Prefer candidates with positive VPA signals (volume expansion, OBV uptrend, no divergence).
 - Require enough liquidity for staged exits; avoid thin, one-word-theme, or pure limit-up chase candidates.
 - If account exposure is above 85%, candidate size must come from selling weak holdings first.
-- If data quality is C or worse, only give ETF-style or watch-only candidates.
+- If candidate evidence is blocked or incomplete, keep the candidate list empty and report the blocking reason.
 
 For each candidate, include:
 
@@ -165,8 +170,7 @@ For each candidate, include:
 
 Do not recommend a fresh buy or add-on buy when:
 
-- The candidate code already exists in the current holdings and the holding
-  action is not `加仓` or `条件加仓`.
+- The candidate code already exists in current holdings.
 - The candidate is below open and previous close.
 - The sector is rising but the candidate is lagging.
 - Main funds are materially outflowing.
@@ -210,7 +214,7 @@ After the Trader produces a proposal, the Risk Manager / Portfolio Manager revie
 1. **Pass (通过)**: Proposal is acceptable. Execute as planned.
 2. **Revise (退回修正)**: Proposal violates constraints. Send back with:
    - **Hard constraints (硬性约束)**: Non-negotiable rules that must be followed.
-     - Examples: "单只持仓不超过总资产30%", "不追加跌停风险标的", "现金比例不低于15%"
+     - Examples: "普通股票合同上限20%、行业/主题ETF合同上限30%（当前仅提示，不按名称猜类型执行）", "不追加跌停风险标的", "现金比例不低于15%"
    - **Soft constraints (建议约束)**: Advisory guidance.
      - Examples: "建议分2批建仓", "优先考虑ETF而非个股"
    - **Execution preconditions (执行前提)**: Conditions that must hold before executing.
@@ -305,7 +309,7 @@ When conditions prevent a full evidence-backed decision, do not output a lower-q
 
 | Situation | Required Output |
 |---|---|
-| Mandatory evidence complete, grade A-B | Full advice with evidence pack, debate, holding actions, buy/rotation candidates, and risk controls |
+| Mandatory evidence complete, grade A-B | Full advice with evidence pack, debate, holding actions, opportunity assessment (possibly zero candidates), and risk controls |
 | Non-critical gaps only, grade C | Explicitly mark missing fields, reduce action size, and block immediate new buys unless all buy-reason fields are supported |
 | Mandatory quote/market/sector/capital/risk evidence missing | State "暂不能给出交易建议", list missing data, and provide next collection/confirmation steps |
 | User requests brevity | Keep sections concise, but do not remove quality gate, key evidence, triggers, or risk controls |

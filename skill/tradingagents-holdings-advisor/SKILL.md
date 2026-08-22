@@ -7,7 +7,7 @@ description: Use when the user asks for intraday stock or ETF operation advice, 
 
 ## Overview
 
-Give intraday A-share/HK-related stock and ETF operation advice from the user's real holdings, current quotes, market context, news, fundamentals, capital flow, signal data, VPA analysis, and A-share trading constraints.
+Give intraday operation advice for the currently supported V1 scope: A-share stocks and exchange-traded ETFs. Base decisions on the user's real holdings, current quotes, market context, news, fundamentals, capital flow, signal data, VPA analysis, and A-share trading constraints.
 
 This skill is adapted from the design patterns in three open-source TradingAgents-style investment research systems. Current upstream checkpoints reviewed for this version:
 
@@ -17,14 +17,14 @@ This skill is adapted from the design patterns in three open-source TradingAgent
 
 Core rule: holdings source must stay clean. If the user provides a screenshot, use that screenshot as the current holdings source. If no screenshot is provided, use current conversation history or memory. The archive context endpoint may provide prior holdings/advice only for consistency checks; never use it as the current holdings source. Never query local development systems, broker caches, databases, or test data unless the user explicitly asks.
 
-Screenshot parsing is never the final deliverable by itself. When the user asks to parse, analyze, read, or upload a holdings screenshot, treat it as a full portfolio-advice run unless the user explicitly says "只解析/不要建议/只输出JSON". The workflow must still complete evidence collection, quality gate, multi-agent bull/bear debate, trader proposal, three-way risk debate, portfolio synthesis, today's holding actions, and buy/rotation candidates. Buy advice may be a new position, a rotation target, or an add-on to an existing holding when the holding-level verdict also says add.
+Screenshot parsing is never the final deliverable by itself. When the user asks to parse, analyze, read, or upload a holdings screenshot, treat it as a full portfolio-advice run unless the user explicitly says "只解析/不要建议/只输出JSON". The workflow must still complete evidence collection, quality gate, multi-agent bull/bear debate, trader proposal, three-way risk debate, portfolio synthesis, today's holding actions, and opportunity scanning. A successful run may decide that no portfolio change is justified and return `NO_ACTION`. New candidates are only non-held opportunities; any add or conditional-add decision for a current holding stays in the holding action plan.
 
 ## Bundled References
 
 Read these supporting files when needed:
 
 - `references/data-sources.md`: 5-tier data source matrix (core market / fundamentals / signal data / news / global), centralized collection principle, Eastmoney rate limiting, symbol resolution, VPA pre-computation, mandatory data checklist, quality gate quick reference.
-- `references/multi-agent-workflow.md`: 7-phase portfolio-aware pipeline (Phase 0 intent + context → 1 analysts → 2 quality gate → 3 bull/bear debate → 4 research/trader/risk revision → 5 portfolio synthesis → 6 reflection + archive), 7 analyst roles, two-layer numeric quality gate, claim-driven bull/bear debate, dual-horizon analysis, dual reasoning mode (quick/deep per phase).
+- `references/multi-agent-workflow.md`: 7-phase portfolio-aware pipeline (Phase 0 intent + context → 1 analysts → 2 quality gate → 3 bull/bear debate → 4 research/trader/risk revision → 5 portfolio synthesis → 6 reflection + archive), 7 analyst roles, two-layer numeric quality gate, claim-driven bull/bear debate, dual-horizon analysis, and reasoning-mode compatibility.
 - `references/trading-rules.md`: A-share constraints, time checkpoint rules, position rules, dual-horizon position rules, trigger design, stop/reduce/add rules, buy candidate rules, rotation rules, overnight carry rules, risk revision loop, trading memory & alpha benchmark, quality-gated output.
 - `references/debate-reporting.md`: Claim-driven debate system (claim structure, status lifecycle, round goals), full transcript structure (evidence pack, quality gate summary, bull/bear debate with claims, research manager verdict, trader proposal with revision, three-way risk debate with claims, portfolio manager final, buy candidates), A-share bull/bear/risk frameworks, formatting templates.
 - `references/buy-candidate-selection.md`: Three-layer hot sector scanner (broad market / hot sectors / candidate tape), candidate pool construction strategy, scoring system (0-10 with 6 factors), candidate output requirements, buy risk gate, portfolio-aware buy rule, industry comparison integration.
@@ -82,14 +82,12 @@ Default fast path:
 6. **Two-layer quality gate**: Grade all evidence before debate using the numeric thresholds in `references/configuration.md` (Layer 1: hard checks, Layer 2: LLM review). See `references/multi-agent-workflow.md` quality gate section.
 7. **Run the multi-agent reasoning**: Run the full analyst pass for top-risk names, lighter pass for small positions. Apply dual-horizon analysis for core holdings. Apply claim-driven bull/bear debate. See `references/multi-agent-workflow.md`.
 8. **Apply trading rules**: T+1, daily limits, lot size, time-of-day, total exposure, loser/winner priority, dual-horizon sleeve sizing. For losing positions, apply the evidence-gated loss decision rule: loss is a risk input, not an automatic reduce/sell conclusion. Check risk revision loop. See `references/trading-rules.md`.
-9. **Select 1-2 buy/rotation candidates**: Use the three-layer hot sector scanner and scoring system. Every candidate must include a recommendation reason covering news/catalyst, capital flow, and current sector position/rotation stage. If buys are blocked, still output conditional watch-only triggers and the blocking reason. See `references/buy-candidate-selection.md`.
-   - Candidates may include `新开仓`, `加仓现有持仓`, or `轮动观察`.
-   - If a candidate code already exists in current holdings, the holding table
-     must also say `加仓` or `条件加仓` for that same code. Never show a holding as
-     `持有不加仓`/`减仓`/`卖出` and later recommend buying the same code.
+9. **Evaluate 0-3 new non-held opportunities**: First decide whether adding risk is better than keeping the current portfolio unchanged. Use the three-layer hot-sector scanner and transitional scoring system only for opportunities that pass evidence, quality, and risk gates. `candidates=[]` is a normal successful result; never fill a quota. Every emitted candidate must include a recommendation reason covering news/catalyst, capital flow, and current sector position/rotation stage. See `references/buy-candidate-selection.md`.
+   - Candidates may include `新开仓` or `轮动观察`, but their codes must not exist in current holdings.
+   - A current holding may still receive `加仓` or `条件加仓` in the holding action table; do not duplicate it in the new-candidate list.
 10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Investment claims must use `INV-` IDs; three-way risk claims must use `RISK-1/RISK-2/RISK-3` with aggressive/neutral/conservative speakers. Show unresolved claims explicitly. See `references/debate-reporting.md`.
 11. **Risk Manager review**: Check if Trader proposal needs revision. Apply hard/soft constraints. See `references/trading-rules.md` risk revision loop.
-12. **Final quote refresh + action-first advice**: Refresh quote fields immediately before output, then produce market read, portfolio conclusion, holding table, buy candidate plan, rebalance plan, checkpoint-specific execution rules.
+12. **Final quote refresh + action-first advice**: Refresh quote fields immediately before output, then produce market read, portfolio conclusion, holding table, opportunity assessment, rebalance plan, and checkpoint-specific execution rules.
 13. **Trading memory reflection**: If past decisions exist in the conversation, user-provided archive content, or the configured `/archives/context` response, reference them and compute alpha vs CSI 300 when benchmark data is available. Do not invent or fetch history through removed/legacy persistence endpoints.
 14. **Display advice, then archive (Phase 6, if persistence configured)**: First show the final advice to the user. After the advice is visible, upload `advice.md`, `holdings.json`, and the original screenshot file via `references/persistence.md`. On failure, append `[未持久化: 原因]` without changing the already displayed advice. Skip silently if not configured.
 
@@ -101,7 +99,7 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 
 1. **Market read**: Index trend, sector mood, domestic/overseas risk appetite, northbound flow direction.
 2. **Data quality grade**: A/B/C/D/F with key gaps noted.
-3. **Portfolio conclusion**: Add, hold, reduce, sell, or rotate — at portfolio level.
+3. **Portfolio conclusion**: First decide whether the portfolio needs to change. `no_action` is the normal conclusion when evidence is sufficient, every holding is hold/watch, and no new candidate passes the gates. Keep `watch_only` for blocked or materially incomplete evidence.
 4. **Evidence pack and claim-driven debate transcript**:
    - Bull vs bear debate with claim IDs and status.
    - Unresolved claims listed explicitly.
@@ -115,9 +113,9 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 | 标的 | 代码 | 实时状态 | 数据质量 | 关键证据 | 多空裁决 | 今日操作 |
 |---|---|---:|---:|---|---|---|
 
-6. **Buy/rotation candidate plan**:
+6. **Opportunity / candidate plan**:
    - Hot sectors/themes considered (with sector rank and fund flow data).
-   - 1-2 candidate stocks or ETFs with score breakdown, or "no immediate buy" with trigger plan.
+   - 0-3 non-held candidate stocks or ETFs with score breakdown. An empty list is valid and should explain that no new opportunity reached the action threshold.
    - Recommendation reason for each candidate, explicitly covering news/catalyst, capital flow, and current sector position/rotation stage.
    - Entry trigger, initial size, take-profit (2 targets), stop-loss, invalidating condition.
 7. **Rebalance plan**:
@@ -136,7 +134,7 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not force-match ambiguous ETFs when live price conflicts with screenshot price.
 - Do not trust a single broker/OCR P/L value that conflicts with price and cost. If there is no separate percent line, correct the decimal ratio, write the corrected ratio to `holdings[].pnl`, put amount-like values in `holdings[].pnl_amount`, and record `{code, name, original_pnl, corrected_pnl, pnl_amount, price, cost, reason}` in `evidence_pack.pnl_corrections`.
 - Do not treat a normal two-line broker 盈亏 cell as an error. If the cell shows amount on line 1 and percent on line 2, persist them directly as `pnl_amount` and `pnl`; do not write `evidence_pack.pnl_corrections`.
-- Do not stop after extracting holdings. A screenshot run must produce concrete buy/sell/hold/reduce actions, triggers, and a buy/rotation candidate plan after the multi-agent debate workflow.
+- Do not stop after extracting holdings. A screenshot run must produce concrete holding actions, triggers, and an opportunity assessment after the multi-agent debate workflow; the new-candidate list may be empty.
 - Do not persist a run with `UNKNOWN-*` holdings when public matching cannot confirm the code; ask the user for confirmation first and mark `[未持久化: 待确认代码]`.
 - Do not infer a sell/reduce from unavailable quantity. If `available_qty` is less than `qty`, mark the difference as unavailable/pending/frozen/T+1 and size any reduce recommendation only from `available_qty`.
 - Do not recommend a sell/reduce quantity greater than `available_qty`; if `available_qty` is 0, the action can only be hold/watch/cancel pending order/confirm availability, not an executable sell.
@@ -151,7 +149,7 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not average down heavy losers without market, sector, and capital-flow confirmation.
 - Do not add to a losing holding unless market/sector alignment, quote strength above open/previous close, fund-flow confirmation, VPA confirmation, and risk sizing all pass.
 - Do not give generic "observe" answers; include triggers, quantities/percentages, and priority.
-- Do not omit today's buy/rotation candidates; if no buy is allowed, output a conditional watch-only plan with exact triggers.
+- Do not manufacture today's buy/rotation candidates. If no non-held opportunity clearly beats keeping the portfolio unchanged, return an empty candidate list and explain why; when quality is blocked, show the blocker rather than converting it to `no_action`.
 - Do not omit the bull/bear and risk debate transcript during execution unless the user asks for a concise answer.
 - Do not upload before the final advice is displayed to the user. Persistence is a post-advice archive step.
 - Do not call or document non-archive backend endpoints during skill execution. The skill's active persistence contract is `/api/v1/archives/context` for read-only history and `/api/v1/archives` for post-advice upload.
@@ -163,11 +161,7 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not ignore unresolved claims in the final verdict; the Research Manager must address each one.
 - Do not recommend a buy that violates the risk revision loop's hard constraints.
 - Do not give today's buy recommendation without a reason that covers news/catalyst, capital flow, and current sector position/rotation stage.
-- Do not contradict yourself across the holding table and buy/rotation plan.
-  A current holding may appear in the buy/rotation plan only as `加仓现有持仓`
-  or `条件加仓`, and only when the holding table gives the same add verdict.
-  If the holding table says `持有不加仓`, `减仓`, or `卖出`, do not recommend
-  buying that code later in the report.
+- Do not contradict yourself across the holding table and opportunity plan. Current-holding add or conditional-add decisions belong only in the holding table. Remove all current holding codes from the new-candidate list.
 - Do not make more than 5 concurrent Eastmoney requests; follow the rate limiting discipline in `references/data-sources.md` and the throttling parameters in `references/configuration.md`.
 - Do not silently swallow a persistence upload failure; if `ADVISOR_API_URL` is configured and the upload fails, mark `[未持久化: 原因]` at the end of the advice.
 - Do not convert key data failures into a lower-quality trading plan. If mandatory evidence is incomplete, block action advice and state the missing data plus next collection step.
@@ -191,9 +185,7 @@ Before final advice, verify:
 - Debate includes claim IDs with at least the top 2-3 claims per side.
 - Three-way risk debate includes structured `RISK-` claims for aggressive, neutral, and conservative views.
 - Unresolved claims are explicitly listed and addressed in the verdict.
-- Advice contains explicit action, trigger level, risk control, and a buy/rotation candidate plan.
-- Every buy/rotation candidate includes a reason covering news/catalyst, capital flow, and current sector position/rotation stage.
-- Current holding actions and today's buy/rotation plan are both present. Any
-  candidate that overlaps with a holding code is explicitly labeled
-  `加仓现有持仓`/`条件加仓` and matches the holding-level action.
+- Advice contains explicit holding actions, trigger levels, risk controls, and an opportunity assessment; the candidate list may be empty.
+- Every emitted candidate includes a reason covering news/catalyst, capital flow, and current sector position/rotation stage.
+- Current holding actions and today's opportunity assessment are both present. Candidate count is 0-3, and no candidate code overlaps with current holdings.
 - If archive context is configured, it was attempted after code confirmation. If past decisions exist for any holding, trading memory was checked and alpha referenced.

@@ -19,7 +19,7 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
     prompt = runtime_prompt()
 
     assert runtime["name"] == "tradingagents-holdings-advisor"
-    assert runtime["version"] == "2.0.0"
+    assert runtime["version"] == "2.1.0"
     assert len(runtime["runtime_sha256"]) == 64
     assert metadata["runtime_sha256"] == runtime["runtime_sha256"]
     assert "available_qty" in prompt
@@ -29,3 +29,14 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
     assert "buy_candidates" in prompt
     assert "today_actions" in metadata["required_structured_outputs"]
     assert "TauricResearch/TradingAgents" in metadata["upstream_references"]
+    contract = runtime["decision_contract"]
+    assert contract["default_portfolio_action"] == "no_action"
+    assert contract["candidates"]["min"] == 0
+    assert contract["candidates"]["max"] == 3
+    assert contract["hard_caps"]["stock"] == 0.20
+    assert contract["hard_caps"]["sector_theme_etf"] == 0.30
+    assert contract["analysis_modes"]["canonical"] == ["fast", "standard", "deep"]
+    assert contract["analysis_modes"]["aliases"]["quick"] == "fast"
+    assert metadata["decision_contract_version"] == "2.1.0"
+    assert metadata["contract_keys"]["candidate_max"] == 3
+    assert '"default_portfolio_action": "no_action"' in prompt

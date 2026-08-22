@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from ..config import settings
 from ..database import SessionLocal
+from ..decision_contract import canonicalize_analysis_mode
 from ..v2_models import AnalysisJob, PortfolioSnapshot, Schedule
 from .analysis_engine import run_analysis_job
 from .market_data import is_a_share_trading_day
@@ -90,7 +91,7 @@ def create_scheduled_job(db, schedule: Schedule, *, force: bool = False) -> Anal
         snapshot_id=snapshot.id,
         trigger_type="scheduled",
         checkpoint=schedule.checkpoint,
-        mode=schedule.mode,
+        mode=canonicalize_analysis_mode(schedule.mode),
         notify=schedule.notify,
         status="queued",
         current_stage="queued",

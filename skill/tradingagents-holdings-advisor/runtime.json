@@ -1,6 +1,6 @@
 {
   "name": "tradingagents-holdings-advisor",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "prompt_version": "2026-07-19",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
@@ -22,6 +22,9 @@
     "persistence_and_notification"
   ],
   "rules": [
+    "NO_ACTION is a first-class successful result. Do not trade merely because analysis completed; first prove that changing the current portfolio is better than keeping it.",
+    "New candidates are optional: return zero to three non-held stocks or ETFs only when they pass evidence, quality, and risk gates. Never manufacture candidates to fill a quota.",
+    "Adding or conditionally adding an existing holding belongs only in the holding action plan, never in the new-candidate list.",
     "The confirmed current portfolio snapshot is the only source of truth for current holdings. Historical reports are context only.",
     "qty is total quantity and available_qty is currently sellable quantity. A reduce or sell action must never exceed available_qty.",
     "qty minus available_qty may be pending, frozen, or T+1 restricted and must never be interpreted as already sold.",
@@ -29,10 +32,49 @@
     "If a same-day or recent recommendation reverses direction, the material new evidence must be stated explicitly.",
     "Critical quote gaps block concrete trade actions. Optional evidence gaps lower the quality grade and must remain visible.",
     "Facts, inferences, risks, triggers, invalidation conditions, and unresolved claims must be separated.",
-    "A candidate that is already held must agree with the holding-level add action; otherwise remove the conflicting candidate.",
+    "Remove every candidate whose code is already present in current holdings; preserve any supported add or conditional-add verdict in the holding action plan.",
     "Final quote-sensitive fields must be refreshed immediately before the final portfolio decision.",
     "The system provides research assistance only, never promises returns, and never executes brokerage orders."
   ],
+  "decision_contract": {
+    "version": "2.1.0",
+    "default_portfolio_action": "no_action",
+    "candidates": {
+      "min": 0,
+      "max": 3,
+      "force_output": false,
+      "exclude_current_holdings": true
+    },
+    "hard_caps": {
+      "stock": 0.20,
+      "sector_theme_etf": 0.30,
+      "deterministic_enforcement": false
+    },
+    "horizons": {
+      "short": {
+        "min_trading_days": 1,
+        "max_trading_days": 5
+      },
+      "swing": {
+        "min_trading_days": 6,
+        "max_trading_days": 20
+      },
+      "medium": {
+        "min_trading_days": 21,
+        "max_trading_days": 120
+      }
+    },
+    "analysis_modes": {
+      "canonical": [
+        "fast",
+        "standard",
+        "deep"
+      ],
+      "aliases": {
+        "quick": "fast"
+      }
+    }
+  },
   "quality_gate": {
     "mandatory": [
       "confirmed_holdings",

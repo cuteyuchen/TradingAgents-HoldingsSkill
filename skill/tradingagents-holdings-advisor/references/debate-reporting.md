@@ -14,7 +14,7 @@ For a multi-holding portfolio, print full detail for:
 2. The largest market-value position.
 3. Any position with fresh red-flag news, capital outflow, or code ambiguity.
 4. Any proposed buy/add/major sell.
-5. Any buy/rotation candidate, including "watch only" candidates.
+5. Any emitted new opportunity candidate; zero candidates is valid when no opportunity clears the gates.
 
 Small, low-risk positions can use a compressed debate.
 
@@ -176,10 +176,10 @@ If the Risk Manager sends the proposal back for revision, show:
 |---|---|---:|---|---|
 ```
 
-### 8. Buy/Rotation Candidate Plan (今日买入/轮动候选)
+### 8. New Opportunity Candidate Plan (新增机会候选)
 
 ```markdown
-**今日买入/轮动候选**
+**新增机会候选（0-3，当前持仓不进入此表）**
 | 候选 | 类型 | 消息面/催化 | 资金面 | 板块位置 | 入场条件 | 仓位 | 止盈1 | 止盈2 | 止损 | 取消条件 | 评分 |
 |---|---|---|---|---|---|---:|---:|---:|---:|---|---:|
 ```
@@ -281,7 +281,7 @@ Use this compact but detailed shape when full detail would be too long:
 | 标的 | 动作 | 触发价 | 数量/比例 | 失效条件 | 风控状态 |
 |---|---|---:|---:|---|---|
 
-**今日买入/轮动候选**
+**新增机会候选（0-3，当前持仓不进入此表）**
 | 候选 | 消息面/催化 | 资金面 | 板块位置 | 入场条件 | 仓位 | 止盈 | 止损/取消条件 | 评分 |
 |---|---|---|---|---|---:|---|---|---:|
 
@@ -297,7 +297,7 @@ If a single holding needs more detail, expand it into prose under the tables.
 - If ETF code is uncertain, put the uncertainty in the evidence pack and debate table.
 - If data quality is C or worse, the conservative argument must explicitly say so.
 - If a final recommendation depends on a level, show the level.
-- If no immediate buy is allowed, still show watch-only candidates and the exact trigger that would change the decision.
+- If no immediate buy is allowed, an empty candidate list is valid. State why no opportunity cleared the action threshold; when quality is blocked, preserve the blocker as `watch_only` rather than treating it as `no_action`.
 - If claim status is "unresolved", explicitly list it and explain why it couldn't be resolved.
 - If risk revision was triggered, show both the original and revised proposals.
 - If trading memory exists for this ticker, reference the past decision and alpha performance.

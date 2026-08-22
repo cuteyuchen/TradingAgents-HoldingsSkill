@@ -47,7 +47,7 @@ const stageLabels: Record<string, string> = {
   trader_proposal: '生成交易员方案',
   risk_revision: '风控审查与修正',
   risk_debate: '三方风控辩论',
-  candidate_screening: '扫描今日买入候选',
+  candidate_screening: '扫描新增机会候选',
   portfolio_synthesis: '组合经理裁决',
   final_quote_refresh: '刷新最终行情',
   report_rendering: '生成结构化报告',
@@ -429,7 +429,7 @@ onUnmounted(() => {
         <Play :size="21" />
       </div>
       <div class="analysis-form">
-        <n-form-item label="分析模式"><n-radio-group v-model:value="analysisMode"><n-radio-button value="quick">快速</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group></n-form-item>
+        <n-form-item label="分析模式"><n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group></n-form-item>
         <n-form-item label="检查点"><n-select v-model:value="checkpoint" :options="['09:35','10:00','12:00','14:30'].map(v => ({ label: v, value: v }))" /></n-form-item>
         <n-form-item label="完成后通知"><n-switch v-model:value="notify" /></n-form-item>
         <n-button type="primary" size="large" :loading="analysisStarting" :disabled="Boolean(job && !terminalJob)" @click="runAnalysis"><template #icon><Play :size="17" /></template>手动开始分析</n-button>

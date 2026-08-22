@@ -101,7 +101,7 @@ Recommended collection sequence:
 |---|---|
 | Shared prefetch | Run `market_snapshot.py`, symbol confirmation, Tencent/Sina batch quotes, major indices, sector heat |
 | Ticker workers | Split holdings into up to `max_ticker_workers` bundles; fetch K-line, VPA, news, fundamentals, fund-flow fallback per bundle |
-| Candidate workers | Scan non-held new-position ETFs/stocks and existing-holding add-on eligibility from hot sectors in parallel with ticker workers |
+| Candidate workers | Scan non-held new-position ETFs/stocks from hot sectors in parallel with ticker workers; evaluate existing-holding add eligibility in the holding-action path |
 | Merge + quality gate | Normalize evidence, mark missing fields, grade whether action advice is allowed |
 | Final refresh + synthesis + archive | Refresh quote fields, show advice first, then archive Markdown/holdings/screenshot if persistence is configured |
 

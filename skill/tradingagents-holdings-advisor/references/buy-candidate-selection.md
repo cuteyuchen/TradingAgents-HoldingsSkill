@@ -1,25 +1,25 @@
-# Buy Candidate Selection
+# Opportunity / Candidate Selection
 
-Use this file whenever the user asks for today's operation advice, rebalance advice, or any execution run. The output must include buy/rotation candidates unless the user explicitly asks for risk-control-only advice.
+Use this file whenever the user asks for today's operation advice, rebalance advice, or any execution run. The module must assess new opportunities, but its structured candidate list may be empty.
 
 This file integrates the signal data layer from `TradingAgents-astock` (northbound flow, dragon-tiger board, concept blocks, industry comparison, hot stocks with theme attribution) and the centralized candidate scoring from `TradingAgents-AShare`.
 
-## Required Buy Module
+## Opportunity / Candidate Module
 
 Every execution must answer:
 
-1. Which hot sectors/themes are leading today?
-2. Is the market mood suitable for new buys, only rotation, or no buys?
-3. Which 1-2 stocks or ETFs are the best candidates?
-4. What are the entry trigger, position size, take-profit, stop-loss, and invalidation rules?
-5. What condition cancels all new buys today?
-6. Why this candidate is recommended today, with explicit evidence from news/catalyst, capital flow, and current sector position/rotation stage.
+1. Is taking new risk justified at all?
+2. Does any opportunity clearly beat keeping the current portfolio unchanged?
+3. If yes, which 0-3 non-held stocks or ETFs pass the evidence, quality, and risk gates?
+4. For each emitted candidate, what are the entry trigger, position size, take-profit, stop-loss, and invalidation rules?
+5. If none qualifies, why does no new opportunity reach the action threshold?
+6. What condition cancels all new buys today?
 
-If data quality is weak or the portfolio exposure is too high, provide a "watch only / conditional buy" candidate table only when the three-part reason is still supported by evidence; otherwise state that new-buy advice is blocked and list the missing data.
+`candidates=[]` is a normal successful result. If data quality is blocked or the portfolio exposure is too high, state the blocker and any useful observation trigger outside the candidate list; do not manufacture a row.
 
 ## Recommendation Reason Requirement
 
-Every buy or watch-only candidate must include a reason block with these three fields:
+Every emitted candidate must include a reason block with these three fields:
 
 | Reason Field | Required Evidence |
 |---|---|
@@ -29,29 +29,15 @@ Every buy or watch-only candidate must include a reason block with these three f
 
 Do not output a buy recommendation if any of the three reason fields is empty. If one field is missing because data cannot be fetched, convert the idea to "暂不建议买入" and state the exact missing source.
 
-## Candidate / Holding Consistency Rule
+## Candidate / Holding Separation Rule
 
-Today's buy/rotation candidates can be **new positions, rotation targets, or
-add-on plans for current holdings**. The hard rule is consistency, not forced
-separation:
+Today's candidates are **new, non-held opportunities only**:
 
-- Use `候选类型` to label every row as `新开仓`, `加仓现有持仓`, `条件加仓`, or
-  `轮动观察`.
-- A candidate whose `code` is already present in the current holding list is
-  allowed only when the holding action table also says `加仓` or `条件加仓` for
-  that same code.
-- Do not show the same symbol as `持有不加仓`, `减仓`, or `卖出` in the holding
-  table and `买入/观察买入` in the candidate table.
-- If the best expression of a hot sector is already held and evidence supports
-  adding, show it both as a holding-level add decision and as a candidate row
-  labeled `加仓现有持仓`.
-- If the held symbol should not be added, keep it out of the candidate table and
-  choose a different non-held ETF/stock, or state "今日不新增买入" with the exact
-  condition that would reopen buy eligibility.
-- Before upload, compare `candidates[].code` against `holdings[].code`. Any
-  duplicate candidate must have `candidate_type`/`type` equivalent to
-  `加仓现有持仓` or `条件加仓` and must match the holding-level trader proposal;
-  otherwise remove it or convert it into a non-conflicting holding action.
+- Use `候选类型` to label a row as `新开仓` or `轮动观察`.
+- Compare normalized `candidates[].code` against `holdings[].code` and remove every duplicate.
+- Preserve an evidence-backed `加仓` or `条件加仓` verdict for a current holding only in the holding action table.
+- If the best expression of a hot sector is already held, evaluate its add eligibility as a holding action; do not copy it into candidates.
+- Do not choose a weaker non-held symbol merely to replace a removed held candidate. Returning zero candidates is valid.
 
 ## Hot Sector Scanner — Three-Layer Architecture
 
@@ -113,16 +99,17 @@ For each hot sector, find the best expression:
 Remove candidates that:
 - Are below both open and previous close (弱势).
 - Have main funds materially outflowing while price rises (假突破).
-- Are already in the user's portfolio while the holding-level verdict is
-  `持有不加仓`, `减仓`, or `卖出`. Existing holdings are allowed only as
-  `加仓现有持仓`/`条件加仓` candidates when the holding verdict also says add.
+- Are already in the user's portfolio, regardless of their holding-level action.
 - Have fresh negative announcement, reduction, pledge, ST/delist risk.
 - Have turnover rate > 25% (possible distribution).
 - Have VPA divergence signals (量价背离).
 
 ## Candidate Scoring System
 
-Score each candidate from 0-10. Only name candidates with score 7+ as "buyable"; score 5-6 is "watch only"; below 5 should not be recommended.
+Score each opportunity from 0-10 as a transitional ranking aid. A score of 7+
+makes an opportunity eligible for further consideration; it does not require
+the system to emit a candidate. The opportunity must still beat `NO_ACTION` and
+pass data-quality and risk gates. Score 5-6 is watch only; below 5 is rejected.
 
 | Factor | Points | Evidence Required |
 |---|---:|---|
@@ -144,10 +131,13 @@ Score each candidate from 0-10. Only name candidates with score 7+ as "buyable";
 
 ## Candidate Output
 
-For each candidate, output:
+Return 0-3 candidates. Before applying the maximum, remove entries with no valid
+code, current holdings, failed data quality, or no core reason. If more than
+three valid entries remain, prefer higher legal numeric scores and keep at most
+three. For each emitted candidate, output:
 
 - **Name and code** (名称和代码); mark uncertainty if any.
-- **Candidate type** (候选类型): ETF / stock / watch only.
+- **Candidate type** (候选类型): new-position ETF, new-position stock, or rotation watch.
 - **Long thesis in one sentence** (一句话看多逻辑).
 - **Recommendation reason** (建议理由): three short bullets for 消息面/催化, 资金面, 板块位置.
 - **Entry trigger** (入场触发): Exact price or condition.
@@ -171,18 +161,16 @@ Block new buys or convert them to watch-only when any applies:
 - Northbound flow is materially negative today.
 - Data quality is C or worse.
 
-When blocked, phrase the output as "不立即买；满足触发后再买" and still give the trigger plan.
+When blocked, keep `candidates=[]`, state the blocking reason, and optionally describe the evidence that would reopen eligibility.
 
 ## Portfolio-Aware Buy Rule
 
 Buy recommendations must not conflict with the portfolio plan:
 
 - If the user is overexposed, candidate size should come only from cash raised by reducing weak holdings.
-- Do not recommend averaging down current losers as the only buy idea.
-- If the strongest existing holding is already the best expression of the hot
-  sector, it may be the buy candidate only when the plan is explicitly
-  `加仓现有持仓`/`条件加仓` and the holding table gives the same add instruction.
-- If two candidates are given, make one safer ETF-style candidate and one higher-risk stock-style candidate when evidence supports it.
+- Do not recommend averaging down current losers as the only buy idea; any existing-holding add belongs in holding actions.
+- If the strongest existing holding is already the best expression of the hot sector, evaluate it only as a holding action.
+- Candidate composition is unconstrained: all stocks, all ETFs, or a mix are valid. Do not force an ETF-plus-stock pairing.
 - If the risk revision loop rejected the original plan, the revised candidate must incorporate the hard constraints.
 
 ## Industry Comparison Integration

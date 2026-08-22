@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..decision_contract import canonicalize_analysis_mode
 from ..security import encrypt_secret
 from ..services.notifications import test_channel, validate_webhook
 from ..services.scheduler import create_scheduled_job, next_run, run_scheduled_job, validate_timezone
@@ -124,7 +125,9 @@ def create_schedule(
     )
     if duplicate:
         raise HTTPException(status_code=409, detail="Schedule name already exists for this portfolio.")
-    row = Schedule(user_id=current_user.id, **payload.model_dump())
+    values = payload.model_dump()
+    values["mode"] = canonicalize_analysis_mode(values["mode"])
+    row = Schedule(user_id=current_user.id, **values)
     db.add(row)
     db.flush()
     row.next_run_at = next_run(row)
@@ -144,6 +147,8 @@ def update_schedule(
     for field in payload.model_fields_set:
         value = getattr(payload, field)
         if value is not None:
+            if field == "mode":
+                value = canonicalize_analysis_mode(value)
             setattr(row, field, value)
     try:
         validate_timezone(row.timezone)

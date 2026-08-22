@@ -4,7 +4,7 @@ import {Bell, Bot, CalendarClock, CheckCircle2, KeyRound, Pencil, Play, Plus, Te
 import {useDialog, useMessage} from 'naive-ui'
 
 import {api} from '../api'
-import type {ModelProfile, ModelProvider, NotificationChannel, Portfolio, Schedule} from '../api/types'
+import type {AnalysisMode, ModelProfile, ModelProvider, NotificationChannel, Portfolio, Schedule} from '../api/types'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -46,7 +46,7 @@ const scheduleForm = reactive({
   hour: 9,
   minute: 35,
   checkpoint: '09:35',
-  mode: 'deep',
+  mode: 'deep' as AnalysisMode,
   stale_snapshot_days: 3,
   notify: true,
   enabled: true
@@ -67,6 +67,12 @@ const purposeOptions = [
   },
 ]
 const purposeLabels: Record<string, string> = {vision: '识图', analysis: '快速分析', deep_analysis: '深度裁决'}
+const analysisModeLabels: Record<AnalysisMode, string> = {
+  quick: '快速分析',
+  fast: '快速分析',
+  standard: '标准分析',
+  deep: '深度分析',
+}
 const providerById = computed(() => Object.fromEntries(providers.value.map(item => [item.id, item])))
 
 function fmt(value?: string | null) {
@@ -388,7 +394,7 @@ onMounted(load)
                 <p>{{ portfolios.find(p => p.id === row.portfolio_id)?.name }} · {{ row.timezone }}</p></div>
               <div class="schedule-time">{{ String(row.hour).padStart(2, '0') }}:{{
                   String(row.minute).padStart(2, '0')
-                }}<span>{{ row.mode === 'deep' ? '深度分析' : '快速分析' }}</span></div>
+                }}<span>{{ analysisModeLabels[row.mode] }}</span></div>
               <div class="schedule-meta"><span>下次：{{
                   fmt(row.next_run_at)
                 }}</span><span>连续失败：{{ row.consecutive_failures }}/{{ row.max_consecutive_failures }}</span></div>
@@ -528,7 +534,7 @@ onMounted(load)
           </n-form-item>
           <n-form-item label="模式">
             <n-select v-model:value="scheduleForm.mode"
-                      :options="[{ label: '深度', value: 'deep' }, { label: '快速', value: 'quick' }]"/>
+                      :options="[{ label: '快速', value: 'fast' }, { label: '标准', value: 'standard' }, { label: '深度', value: 'deep' }]"/>
           </n-form-item>
         </div>
         <n-form-item label="时区">
