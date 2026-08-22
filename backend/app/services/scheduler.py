@@ -7,13 +7,14 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal
 from ..decision_contract import canonicalize_analysis_mode
 from ..v2_models import AnalysisJob, PortfolioSnapshot, Schedule
 from .analysis_engine import run_analysis_job
-from .market_data import is_a_share_trading_day
+from .trading_calendar import CHINA_TZ, TradingCalendarService, next_open_date
 
 logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
@@ -27,15 +28,47 @@ def validate_timezone(value: str) -> str:
     return value
 
 
-def next_run(schedule: Schedule, now: datetime | None = None) -> datetime:
-    timezone = ZoneInfo(validate_timezone(schedule.timezone))
-    current = (now or datetime.now(UTC)).astimezone(timezone)
+def _as_china_time(value: datetime | None = None) -> datetime:
+    """Interpret naive scheduler inputs as Shanghai wall-clock time."""
+
+    if value is None:
+        return datetime.now(CHINA_TZ)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=CHINA_TZ)
+    return value.astimezone(CHINA_TZ)
+
+
+def next_run(
+    schedule: Schedule,
+    now: datetime | None = None,
+    db: Session | None = None,
+) -> datetime | None:
+    """Return the next persisted CN open day at the schedule's Shanghai time."""
+
+    current = _as_china_time(now)
     candidate = current.replace(hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0)
     if candidate <= current:
         candidate += timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate += timedelta(days=1)
-    return candidate.astimezone(UTC)
+
+    owns_session = db is None
+    calendar_db = db or SessionLocal()
+    try:
+        open_date = next_open_date(calendar_db, candidate.date())
+    finally:
+        if owns_session:
+            calendar_db.close()
+    if open_date is None:
+        logger.warning(
+            "Trading calendar missing open date on or after %s; schedule %s is fail-closed",
+            candidate.date().isoformat(),
+            getattr(schedule, "id", None),
+        )
+        return None
+    return candidate.replace(
+        year=open_date.year,
+        month=open_date.month,
+        day=open_date.day,
+    ).astimezone(UTC)
 
 
 def _latest_snapshot(db, schedule: Schedule) -> PortfolioSnapshot | None:
@@ -65,14 +98,14 @@ def run_scheduled_job(job_id: int, schedule_id: int) -> None:
             schedule.consecutive_failures += 1
             if schedule.consecutive_failures >= schedule.max_consecutive_failures:
                 schedule.enabled = False
-        schedule.next_run_at = next_run(schedule)
+        schedule.next_run_at = next_run(schedule, db=db)
         db.commit()
     finally:
         db.close()
 
 
 def create_scheduled_job(db, schedule: Schedule, *, force: bool = False) -> AnalysisJob:
-    local_now = datetime.now(ZoneInfo(schedule.timezone))
+    local_now = datetime.now(CHINA_TZ)
     key = f"schedule:{schedule.id}:{local_now.date().isoformat()}:{schedule.checkpoint}"
     existing = db.query(AnalysisJob).filter(AnalysisJob.idempotency_key == key).first()
     if existing and not force:
@@ -108,30 +141,45 @@ def tick_schedules() -> None:
     db = SessionLocal()
     try:
         rows = db.query(Schedule).filter(Schedule.enabled.is_(True)).all()
+        if not rows:
+            return
         now_utc = datetime.now(UTC)
-        trading_day_cache: bool | None = None
+        local = now_utc.astimezone(CHINA_TZ)
+        calendar = TradingCalendarService(db)
+        calendar_row = calendar.row_for(local.date())
+        if calendar_row is None:
+            logger.warning(
+                "Trading calendar has no CN row for %s; scheduled analysis is fail-closed",
+                local.date().isoformat(),
+            )
+            for schedule in rows:
+                schedule.next_run_at = next_run(schedule, now_utc, db=db)
+            db.commit()
+            return
+        if not calendar_row.is_open:
+            for schedule in rows:
+                schedule.next_run_at = next_run(schedule, now_utc, db=db)
+            db.commit()
+            return
+
         for schedule in rows:
             try:
-                timezone = ZoneInfo(validate_timezone(schedule.timezone))
-                local = now_utc.astimezone(timezone)
-                schedule.next_run_at = next_run(schedule, now_utc)
-                if local.hour != schedule.hour or local.minute != schedule.minute:
+                schedule.next_run_at = next_run(schedule, now_utc, db=db)
+                current_minute = local.hour * 60 + local.minute
+                checkpoint_minute = schedule.hour * 60 + schedule.minute
+                if current_minute < checkpoint_minute:
                     continue
-                if schedule.last_run_at and schedule.last_run_at.replace(tzinfo=UTC).astimezone(timezone).date() == local.date():
-                    continue
-                if trading_day_cache is None:
-                    trading_day_cache = is_a_share_trading_day(local)
-                if not trading_day_cache:
+                if schedule.last_run_at and schedule.last_run_at.replace(tzinfo=UTC).astimezone(CHINA_TZ).date() == local.date():
                     continue
                 job = create_scheduled_job(db, schedule)
                 schedule.last_run_at = now_utc
-                schedule.next_run_at = next_run(schedule, now_utc)
+                schedule.next_run_at = next_run(schedule, now_utc, db=db)
                 db.commit()
                 threading.Thread(target=run_scheduled_job, args=(job.id, schedule.id), daemon=True).start()
             except Exception as exc:
                 logger.exception("Schedule %s failed to enqueue", schedule.id)
                 schedule.consecutive_failures += 1
-                schedule.next_run_at = next_run(schedule, now_utc)
+                schedule.next_run_at = next_run(schedule, now_utc, db=db)
                 if schedule.consecutive_failures >= schedule.max_consecutive_failures:
                     schedule.enabled = False
                 db.commit()

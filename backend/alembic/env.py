@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import settings
 from app.database import Base
-from app import models, v2_models  # noqa: F401
+from app import market_models, market_runtime_models, models, v2_models  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", f"sqlite:///{settings.DB_PATH}")

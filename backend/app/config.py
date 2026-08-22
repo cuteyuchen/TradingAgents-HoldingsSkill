@@ -59,6 +59,41 @@ class Settings:
     SCHEDULER_INTERVAL_SECONDS: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
     PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "http://localhost:8080").rstrip("/")
 
+    # Phase B market-data foundation. Provider order is centralized here so
+    # adapters and business services never each invent their own fallback chain.
+    MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER: str = os.getenv(
+        "MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER", "eastmoney_batch"
+    ).strip().lower()
+    MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS: tuple[str, ...] = tuple(
+        value.strip().lower()
+        for value in os.getenv("MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS", "tencent").split(",")
+        if value.strip()
+    )
+    MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER: str = os.getenv(
+        "MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER", "tencent"
+    ).strip().lower()
+    MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS: tuple[str, ...] = tuple(
+        value.strip().lower()
+        for value in os.getenv("MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS", "eastmoney_batch").split(",")
+        if value.strip()
+    )
+    PROVIDER_FAILURE_THRESHOLD: int = int(os.getenv("PROVIDER_FAILURE_THRESHOLD", "3"))
+    PROVIDER_CIRCUIT_COOLDOWN_SECONDS: float = float(
+        os.getenv("PROVIDER_CIRCUIT_COOLDOWN_SECONDS", "60")
+    )
+    QUOTE_FRESHNESS_SECONDS: float = float(os.getenv("QUOTE_FRESHNESS_SECONDS", "90"))
+    MARKET_SNAPSHOT_FRESHNESS_SECONDS: float = float(
+        os.getenv("MARKET_SNAPSHOT_FRESHNESS_SECONDS", "120")
+    )
+    MARKET_QUOTE_CONFLICT_THRESHOLD_PCT: float = float(
+        os.getenv("MARKET_QUOTE_CONFLICT_THRESHOLD_PCT", "0.5")
+    )
+    EASTMONEY_MIN_INTERVAL_SECONDS: float = float(
+        os.getenv("EASTMONEY_MIN_INTERVAL_SECONDS", "0.8")
+    )
+    SECURITY_MASTER_SYNC_ENABLED: bool = _bool_env("SECURITY_MASTER_SYNC_ENABLED", "false")
+    CALENDAR_SYNC_ENABLED: bool = _bool_env("CALENDAR_SYNC_ENABLED", "false")
+
     # Server.
     HOST: str = os.getenv("ADVISOR_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("ADVISOR_PORT", "8000"))

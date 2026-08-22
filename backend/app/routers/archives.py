@@ -1,7 +1,6 @@
 """File-backed analysis archives for advice Markdown, holdings JSON, and screenshot."""
 import base64
 import json
-import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ from .. import models
 from ..auth import require_token
 from ..config import settings
 from ..database import get_db
+from ..market.codes import normalize_security_code
 from ..schemas import ArchiveCreated, ArchiveSummary
 
 router = APIRouter(prefix="/api/v1/archives", tags=["archives"])
@@ -95,9 +95,7 @@ def _holdings_count(data: Any) -> int:
 
 
 def _normalize_code(value: Any) -> str:
-    text = str(value or "").strip().upper()
-    match = re.search(r"(\d{6})", text)
-    return match.group(1) if match else text
+    return normalize_security_code(value)
 
 
 def _holdings_list(data: Any) -> list[dict[str, Any]]:
