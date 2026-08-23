@@ -168,6 +168,7 @@ class EastmoneyBatchQuoteProvider(QuoteProvider):
     """
 
     name = "eastmoney_batch"
+    endpoint = EASTMONEY_QUOTE_URL
 
     def __init__(
         self,

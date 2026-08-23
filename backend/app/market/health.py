@@ -8,6 +8,9 @@ from .providers.health import (
     ProviderHealthState,
     ProviderHealthStatus,
     ProviderHealthTracker,
+    get_runtime_provider_health_registry,
+    reset_runtime_provider_health_registry,
+    runtime_provider_health_snapshot,
 )
 
 __all__ = [
@@ -18,4 +21,7 @@ __all__ = [
     "ProviderHealthState",
     "ProviderHealthStatus",
     "ProviderHealthTracker",
+    "get_runtime_provider_health_registry",
+    "reset_runtime_provider_health_registry",
+    "runtime_provider_health_snapshot",
 ]

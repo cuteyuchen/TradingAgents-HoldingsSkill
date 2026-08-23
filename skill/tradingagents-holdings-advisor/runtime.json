@@ -1,7 +1,7 @@
 {
   "name": "tradingagents-holdings-advisor",
   "version": "2.1.0",
-  "prompt_version": "2026-08-22",
+  "prompt_version": "2026-08-23",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
     "confirmed_portfolio_snapshot",

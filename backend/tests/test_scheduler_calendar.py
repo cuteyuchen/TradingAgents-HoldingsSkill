@@ -1,5 +1,5 @@
 """Scheduler integration tests for the persisted CN trading calendar."""
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.market_models import TradingCalendar
 from app.services import scheduler
+from app.services.market_identity_sync import initialize_local_market_identity
 from app.services.trading_calendar import upsert_calendar
 from app.v2_models import Schedule
 
@@ -140,6 +141,51 @@ def test_tick_schedules_missing_calendar_is_fail_closed(monkeypatch, caplog):
         assert row.next_run_at is None
     assert calls == []
     assert "scheduled analysis is fail-closed" in caplog.text
+
+
+def test_upgrade_bootstrap_restores_existing_schedule(monkeypatch):
+    """An upgraded database must recover after the offline startup bootstrap."""
+
+    factory = _scheduler_db()
+    with factory() as db:
+        assert db.query(TradingCalendar).count() == 0
+
+    status = initialize_local_market_identity(
+        session_factory=factory,
+        as_of=date(2026, 8, 20),
+    )
+    assert status["status"] == "ready"
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(scheduler, "datetime", _FrozenDateTime)
+    created = []
+    started = []
+
+    def fake_create(_db, schedule):
+        created.append(schedule.id)
+        return SimpleNamespace(id=101)
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon):
+            self.args = args
+            assert target is scheduler.run_scheduled_job
+            assert daemon is True
+
+        def start(self):
+            started.append(self.args)
+
+    monkeypatch.setattr(scheduler, "create_scheduled_job", fake_create)
+    monkeypatch.setattr(scheduler.threading, "Thread", FakeThread)
+
+    scheduler.tick_schedules()
+
+    assert created == [1]
+    assert started == [(101, 1)]
+    with factory() as db:
+        row = db.get(Schedule, 1)
+        assert row.enabled is True
+        assert row.last_run_at == datetime(2026, 8, 20, 1, 35)
+        assert row.next_run_at == datetime(2026, 8, 21, 1, 35)
 
 
 def test_tick_schedules_enqueues_only_on_persisted_open_day(monkeypatch):

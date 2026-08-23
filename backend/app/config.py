@@ -93,6 +93,18 @@ class Settings:
     )
     SECURITY_MASTER_SYNC_ENABLED: bool = _bool_env("SECURITY_MASTER_SYNC_ENABLED", "false")
     CALENDAR_SYNC_ENABLED: bool = _bool_env("CALENDAR_SYNC_ENABLED", "false")
+    # Identity data lifecycle.  The offline calendar bootstrap is safe to run
+    # on every startup; remote providers are always asynchronous and opt-in.
+    CALENDAR_BOOTSTRAP_ENABLED: bool = _bool_env("CALENDAR_BOOTSTRAP_ENABLED", "true")
+    CALENDAR_SYNC_PROVIDER: str = os.getenv("CALENDAR_SYNC_PROVIDER", "eastmoney_sse_calendar").strip().lower()
+    CALENDAR_SYNC_LOOKBACK_DAYS: int = int(os.getenv("CALENDAR_SYNC_LOOKBACK_DAYS", "370"))
+    SECURITY_MASTER_SYNC_PROVIDER: str = os.getenv(
+        "SECURITY_MASTER_SYNC_PROVIDER", "eastmoney_security"
+    ).strip().lower()
+    # Sync routes are global-data mutation endpoints, so they require both an
+    # explicit feature flag and a separate operator token.  JWT login alone is
+    # intentionally insufficient for these writes.
+    MARKET_IDENTITY_SYNC_TOKEN: str = os.getenv("MARKET_IDENTITY_SYNC_TOKEN", "").strip()
 
     # Server.
     HOST: str = os.getenv("ADVISOR_HOST", "0.0.0.0")

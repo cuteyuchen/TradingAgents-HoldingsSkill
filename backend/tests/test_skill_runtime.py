@@ -20,7 +20,7 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
 
     assert runtime["name"] == "tradingagents-holdings-advisor"
     assert runtime["version"] == "2.1.0"
-    assert runtime["prompt_version"] == "2026-08-22"
+    assert runtime["prompt_version"] == "2026-08-23"
     assert list(runtime["checkpoints"]) == ["09:35", "10:30", "13:05", "14:30", "15:10"]
     assert len(runtime["runtime_sha256"]) == 64
     assert metadata["runtime_sha256"] == runtime["runtime_sha256"]

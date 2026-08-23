@@ -6,11 +6,17 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import auth
 from .config import settings
-from .database import init_db
+from .database import SessionLocal, init_db
 from .services import analysis_engine
+from .services.market_identity_sync import (
+    calendar_status,
+    initialize_local_market_identity,
+    start_remote_market_identity_sync,
+)
 from .services.scheduler import start_scheduler, stop_scheduler
 from .services.skill_runtime import runtime_metadata, runtime_prompt
 
@@ -27,6 +33,12 @@ async def lifespan(app: FastAPI):
     if settings.APP_SECRET_KEY == "dev-only-change-me":
         logger.warning("APP_SECRET_KEY uses the development default; set a stable secret in production.")
 
+    # Populate the scheduler's local calendar before it starts.  This path is
+    # fully offline; optional provider refreshes run later in a daemon thread.
+    identity_status = initialize_local_market_identity()
+    if identity_status["status"] != "ready":
+        logger.warning("Market calendar is not ready: %s", identity_status["status"])
+
     # The runtime prompt and its hash come from skill/tradingagents-holdings-advisor,
     # making the repository Skill the audited source of analysis rules.
     analysis_engine.CORE_RULES = runtime_prompt()
@@ -39,6 +51,7 @@ async def lifespan(app: FastAPI):
     )
 
     start_scheduler()
+    start_remote_market_identity_sync()
     try:
         yield
     finally:
@@ -89,10 +102,23 @@ app.include_router(market_v3.router)
 @app.get("/healthz")
 def healthz() -> dict:
     skill = runtime_metadata()
+    try:
+        with SessionLocal() as db:
+            market_calendar = calendar_status(db)
+    except SQLAlchemyError:
+        logger.warning("Market calendar table is unavailable during health check", exc_info=True)
+        # A liveness probe must remain useful during first boot/migration; the
+        # explicit state still tells operators that the calendar is unready.
+        market_calendar = {
+            "status": "calendar_not_initialized",
+            "market": "CN",
+            "row_count": 0,
+        }
     return {
         "status": "ok",
         "version": app.version,
         "scheduler": settings.SCHEDULER_ENABLED,
+        "market_calendar": market_calendar,
         "skill_version": skill["version"],
         "skill_runtime_sha256": skill["runtime_sha256"],
     }

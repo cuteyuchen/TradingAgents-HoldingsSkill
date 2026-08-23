@@ -16,11 +16,13 @@ import requests
 
 from ..codes import normalize_security_code, exchange_for_code, provider_symbol
 from ..models import DataQualityStatus, NormalizedQuote
+from ..quality import validate_normalized_quote
 from .base import QuoteProvider
 
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q"
 
 
 def _float(value: Any) -> float | None:
@@ -67,7 +69,7 @@ def parse_tencent_line(line: str, *, fetched_at: datetime | None = None) -> Norm
             )
         except ValueError:
             source_timestamp = quote_time
-    return NormalizedQuote(
+    quote = NormalizedQuote(
         market="CN",
         exchange=exchange_for_code(code),
         code=code,
@@ -84,12 +86,17 @@ def parse_tencent_line(line: str, *, fetched_at: datetime | None = None) -> Norm
         provider="tencent",
         fetched_at=fetched_at or datetime.now().astimezone(),
         quality_status=DataQualityStatus.VALID,
-        raw_reference="Tencent qt.gtimg.cn",
+        raw_reference=TENCENT_QUOTE_URL,
     )
+    validation = validate_normalized_quote(quote, now=quote.fetched_at, max_age_seconds=None)
+    quote.quality_status = validation.status
+    quote.errors.extend(error for error in validation.errors if error not in quote.errors)
+    return quote
 
 
 class TencentQuoteProvider(QuoteProvider):
     name = "tencent"
+    endpoint = TENCENT_QUOTE_URL
 
     def __init__(
         self,
@@ -97,29 +104,39 @@ class TencentQuoteProvider(QuoteProvider):
         session: requests.Session | None = None,
         timeout: float = 10.0,
         request: Callable[..., Any] | None = None,
+        batch_size: int = 400,
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
         self._request = request
+        self.batch_size = max(1, int(batch_size))
 
     def get_quotes(self, codes: Iterable[str]) -> dict[str, NormalizedQuote]:
         normalized = list(dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)))
         if not normalized:
             return {}
-        symbols = ",".join(tencent_symbol(code) for code in normalized)
         request = self._request or self.session.get
-        response = request(
-            "https://qt.gtimg.cn/q=" + symbols,
-            headers={"User-Agent": USER_AGENT, "Referer": "https://finance.qq.com/"},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        fetched_at = datetime.now().astimezone()
         results: dict[str, NormalizedQuote] = {}
-        for line in decode_tencent(response.content).splitlines():
-            quote = parse_tencent_line(line, fetched_at=fetched_at)
-            if quote:
-                results[quote.code] = quote
+        fetched_at = datetime.now().astimezone()
+        for offset in range(0, len(normalized), self.batch_size):
+            batch = normalized[offset : offset + self.batch_size]
+            symbols = ",".join(tencent_symbol(code) for code in batch)
+            response = request(
+                TENCENT_QUOTE_URL + "=" + symbols,
+                headers={"User-Agent": USER_AGENT, "Referer": "https://finance.qq.com/"},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            text = decode_tencent(response.content)
+            # Tencent may concatenate assignments without newlines.  The
+            # terminating quote-semicolon pair is the stable record boundary.
+            for record in text.split('";'):
+                line = record.strip()
+                if not line:
+                    continue
+                quote = parse_tencent_line(line + '";', fetched_at=fetched_at)
+                if quote:
+                    results[quote.code] = quote
         for code in set(normalized) - set(results):
             results[code] = NormalizedQuote(
                 code=code,
@@ -127,7 +144,16 @@ class TencentQuoteProvider(QuoteProvider):
                 provider=self.name,
                 fetched_at=fetched_at,
                 quality_status=DataQualityStatus.MISSING,
-                raw_reference="Tencent qt.gtimg.cn",
+                raw_reference=TENCENT_QUOTE_URL,
                 errors=["quote_missing"],
             )
         return results
+
+
+__all__ = [
+    "TENCENT_QUOTE_URL",
+    "TencentQuoteProvider",
+    "decode_tencent",
+    "parse_tencent_line",
+    "tencent_symbol",
+]

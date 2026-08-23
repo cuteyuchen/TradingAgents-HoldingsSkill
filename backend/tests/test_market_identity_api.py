@@ -15,6 +15,9 @@ os.environ.setdefault("ADVISOR_SQLITE_JOURNAL_MODE", "MEMORY")
 os.environ.setdefault("ADVISOR_TOKEN", "test_token_xxx")
 os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-at-least-32-bytes-long")
 os.environ.setdefault("SCHEDULER_ENABLED", "false")
+os.environ.setdefault("SECURITY_MASTER_SYNC_ENABLED", "true")
+os.environ.setdefault("CALENDAR_SYNC_ENABLED", "true")
+os.environ.setdefault("MARKET_IDENTITY_SYNC_TOKEN", "test-market-identity-sync-token")
 sys.path.insert(0, BACKEND_DIR)
 
 
@@ -22,9 +25,18 @@ sys.path.insert(0, BACKEND_DIR)
 def client_and_headers():
     from fastapi.testclient import TestClient
 
+    from app.config import settings
     from app.database import init_db
     from app.main import app
 
+    original = (
+        settings.SECURITY_MASTER_SYNC_ENABLED,
+        settings.CALENDAR_SYNC_ENABLED,
+        settings.MARKET_IDENTITY_SYNC_TOKEN,
+    )
+    settings.SECURITY_MASTER_SYNC_ENABLED = True
+    settings.CALENDAR_SYNC_ENABLED = True
+    settings.MARKET_IDENTITY_SYNC_TOKEN = os.environ["MARKET_IDENTITY_SYNC_TOKEN"]
     init_db()
     client = TestClient(app)
     suffix = uuid.uuid4().hex
@@ -36,7 +48,17 @@ def client_and_headers():
     ).status_code == 201
     login = client.post("/api/v2/auth/login", json={"email": email, "password": "password123"})
     assert login.status_code == 200, login.text
-    return client, {"Authorization": f"Bearer {login.json()['access_token']}"}
+    try:
+        yield client, {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Market-Identity-Sync-Token": os.environ["MARKET_IDENTITY_SYNC_TOKEN"],
+        }
+    finally:
+        (
+            settings.SECURITY_MASTER_SYNC_ENABLED,
+            settings.CALENDAR_SYNC_ENABLED,
+            settings.MARKET_IDENTITY_SYNC_TOKEN,
+        ) = original
 
 
 def test_security_sync_list_filters_and_paginates(client_and_headers):
@@ -110,3 +132,27 @@ def test_identity_sync_requires_authentication(client_and_headers):
     client, _headers = client_and_headers
     assert client.get("/api/v3/market/securities").status_code == 401
     assert client.post("/api/v3/market/calendar/sync", json={"rows": []}).status_code == 401
+
+
+def test_identity_sync_requires_internal_operator_token(client_and_headers):
+    client, headers = client_and_headers
+    user_headers = {"Authorization": headers["Authorization"]}
+    assert client.post(
+        "/api/v3/market/securities/sync",
+        headers=user_headers,
+        json={"rows": []},
+    ).status_code == 403
+    assert client.post(
+        "/api/v3/market/calendar/sync",
+        headers=user_headers,
+        json={"rows": []},
+    ).status_code == 403
+
+
+def test_calendar_status_exposes_initialized_state(client_and_headers):
+    client, headers = client_and_headers
+    response = client.get("/api/v3/market/calendar/status", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["status"] in {"calendar_not_initialized", "calendar_out_of_range", "ready"}
+    assert payload["market"] == "CN"

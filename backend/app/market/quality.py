@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from .models import DataQualityStatus, NormalizedQuote, QuoteComparison, QuoteValidation
 
 
-DEFAULT_QUOTE_FRESHNESS_SECONDS = 120.0
+DEFAULT_QUOTE_FRESHNESS_SECONDS = 90.0
 DEFAULT_CONFLICT_THRESHOLD_PCT = 0.5
 
 

@@ -264,6 +264,7 @@ class QuoteSnapshot:
     errors: list[Any] = field(default_factory=list)
     quality_status: DataQualityStatus = DataQualityStatus.MISSING
     missing_codes: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.started_at = _coerce_datetime(self.started_at) or _utcnow()
@@ -278,6 +279,7 @@ class QuoteSnapshot:
         self.missing_codes = list(
             dict.fromkeys(normalize_security_code(code) for code in self.missing_codes if normalize_security_code(code))
         )
+        self.metadata = dict(self.metadata or {})
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -296,4 +298,5 @@ class QuoteSnapshot:
             "errors": list(self.errors),
             "quality_status": self.quality_status.value,
             "missing_codes": list(self.missing_codes),
+            "metadata": dict(self.metadata),
         }

@@ -6,8 +6,11 @@ from typing import Any
 
 from .base import QuoteProvider
 from .eastmoney import EastmoneyBatchQuoteProvider
-from .fallback import FallbackQuoteProvider
-from .health import ProviderHealthRegistry
+from .fallback import FallbackQuoteProvider, HealthTrackedQuoteProvider
+from .health import (
+    ProviderHealthRegistry,
+    get_runtime_provider_health_registry,
+)
 from .inmemory import InMemoryQuoteProvider
 from .tencent import TencentQuoteProvider
 
@@ -15,8 +18,17 @@ from .tencent import TencentQuoteProvider
 ProviderBuilder = Callable[..., QuoteProvider]
 
 
+_PROVIDER_ALIASES = {
+    "eastmoney": "eastmoney_batch",
+    "em": "eastmoney_batch",
+    "qq": "tencent",
+    "qt_gtimg_cn": "tencent",
+}
+
+
 def _canonical_name(value: str) -> str:
-    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    canonical = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return _PROVIDER_ALIASES.get(canonical, canonical)
 
 
 class ProviderRegistry:
@@ -70,15 +82,20 @@ class QuoteProviderFactory:
         provider_options: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.registry = registry or DEFAULT_PROVIDER_REGISTRY
-        self.health = health or ProviderHealthRegistry()
-        self.provider_options = {
-            _canonical_name(name): dict(options) for name, options in (provider_options or {}).items()
-        }
+        self.health = health or get_runtime_provider_health_registry()
+        self.provider_options = _configured_provider_options()
+        for name, options in (provider_options or {}).items():
+            self.provider_options.setdefault(_canonical_name(name), {}).update(options)
 
-    def create(self, name: str, **kwargs: Any) -> QuoteProvider:
+    def _create_adapter(self, name: str, **kwargs: Any) -> QuoteProvider:
         options = dict(self.provider_options.get(_canonical_name(name), {}))
         options.update(kwargs)
         return self.registry.create(name, **options)
+
+    def create(self, name: str, **kwargs: Any) -> QuoteProvider:
+        """Create a health-tracked direct Provider using the shared registry."""
+
+        return HealthTrackedQuoteProvider(self._create_adapter(name, **kwargs), health=self.health)
 
     def build_chain(
         self,
@@ -91,11 +108,13 @@ class QuoteProviderFactory:
             if isinstance(provider, QuoteProvider):
                 instances.append(provider)
             else:
-                instances.append(self.create(provider))
+                instances.append(self._create_adapter(provider))
         if not instances:
             raise ValueError("at least one quote provider is required")
         if len(instances) == 1:
-            return instances[0]
+            if isinstance(instances[0], HealthTrackedQuoteProvider):
+                return instances[0]
+            return HealthTrackedQuoteProvider(instances[0], health=health or self.health)
         return FallbackQuoteProvider(instances, health=health or self.health)
 
     def build_critical_quote_chain(
@@ -121,13 +140,28 @@ def create_quote_provider(name: str, **kwargs: Any) -> QuoteProvider:
     """Convenience constructor backed by the default registry."""
 
     canonical = _canonical_name(name)
-    canonical = {"qq": "tencent", "qt_gtimg_cn": "tencent", "em": "eastmoney_batch"}.get(canonical, canonical)
     options = dict(kwargs)
     if canonical == "tencent" and "request" not in options and "transport" in options:
         options["request"] = options.pop("transport")
     elif canonical == "eastmoney_batch" and "transport" not in options and "request" in options:
         options["transport"] = options.pop("request")
-    return QuoteProviderFactory().create(canonical, **options)
+    factory = QuoteProviderFactory()
+    return factory.create(canonical, **options)
+
+
+def _configured_provider_options() -> dict[str, dict[str, Any]]:
+    """Read adapter knobs from application settings without importing them at module load."""
+
+    try:
+        from ...config import settings
+
+        return {
+            "eastmoney_batch": {
+                "min_interval_seconds": settings.EASTMONEY_MIN_INTERVAL_SECONDS,
+            },
+        }
+    except (ImportError, AttributeError):
+        return {}
 
 
 def make_provider(
@@ -136,6 +170,7 @@ def make_provider(
     transport: Any = None,
     request: Any = None,
     timeout: float | None = None,
+    health: ProviderHealthRegistry | None = None,
     **kwargs: Any,
 ) -> QuoteProvider:
     """Compatibility constructor used by the first Provider draft.
@@ -156,10 +191,11 @@ def make_provider(
         options["request"] = transport
     elif canonical in {"eastmoney", "eastmoney_batch", "em"} and transport is not None:
         options["transport"] = transport
-    return create_quote_provider(
-        {"qq": "tencent", "qt_gtimg_cn": "tencent", "em": "eastmoney_batch"}.get(canonical, canonical),
+    provider = QuoteProviderFactory(health=health).create(
+        canonical,
         **options,
     )
+    return provider
 
 
 def build_provider_chain(
@@ -191,10 +227,13 @@ def build_quote_provider(
     if fallbacks is None:
         fallbacks = ("eastmoney_batch",) if route_name in {"critical", "holding", "quote_critical"} else ("tencent",)
     names = list(dict.fromkeys([primary, *fallbacks]))
-    instances = [make_provider(name, transport=transport, request=request, timeout=timeout) for name in names]
+    instances = [
+        make_provider(name, transport=transport, request=request, timeout=timeout, health=health)
+        for name in names
+    ]
     if len(instances) == 1:
         return instances[0]
-    return FallbackQuoteProvider(instances, health=health or ProviderHealthRegistry())
+    return FallbackQuoteProvider(instances, health=health or get_runtime_provider_health_registry())
 
 
 def build_critical_quote_provider(

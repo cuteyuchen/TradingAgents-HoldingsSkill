@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from threading import Lock
+from threading import Lock, RLock
 from time import monotonic
 from typing import Callable
 
@@ -112,7 +112,7 @@ class ProviderHealthTracker:
         self._clock = clock or monotonic
         self._states: dict[tuple[str, str], ProviderHealth] = {}
         self._breakers: dict[tuple[str, str], CircuitBreaker] = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def _get(self, provider: str, data_type: str) -> tuple[ProviderHealth, CircuitBreaker]:
         key = (str(provider).lower(), str(data_type).lower())
@@ -130,7 +130,8 @@ class ProviderHealthTracker:
 
     def get(self, provider: str, data_type: str = "quote") -> ProviderHealth:
         state, breaker = self._get(provider, data_type)
-        self._sync_status(state, breaker)
+        with self._lock:
+            self._sync_status(state, breaker)
         return state
 
     def breaker(self, provider: str, data_type: str = "quote") -> CircuitBreaker:
@@ -139,7 +140,8 @@ class ProviderHealthTracker:
     def allow(self, provider: str, data_type: str = "quote") -> bool:
         state, breaker = self._get(provider, data_type)
         allowed = breaker.allow_request()
-        self._sync_status(state, breaker)
+        with self._lock:
+            self._sync_status(state, breaker)
         return allowed
 
     @staticmethod
@@ -161,13 +163,14 @@ class ProviderHealthTracker:
         latency_ms: float | None = None,
     ) -> ProviderHealth:
         state, breaker = self._get(provider, data_type)
-        state.success_count += 1
-        state.consecutive_failures = 0
-        state.last_success_at = datetime.now(UTC)
-        state.last_latency_ms = latency_ms
-        state.last_error = None
         breaker.record_success()
-        self._sync_status(state, breaker)
+        with self._lock:
+            state.success_count += 1
+            state.consecutive_failures = 0
+            state.last_success_at = datetime.now(UTC)
+            state.last_latency_ms = latency_ms
+            state.last_error = None
+            self._sync_status(state, breaker)
         return state
 
     def record_failure(
@@ -178,21 +181,83 @@ class ProviderHealthTracker:
         latency_ms: float | None = None,
     ) -> ProviderHealth:
         state, breaker = self._get(provider, data_type)
-        state.failure_count += 1
-        state.consecutive_failures += 1
-        state.last_failure_at = datetime.now(UTC)
-        state.last_latency_ms = latency_ms
-        state.last_error = str(error)
         breaker.record_failure()
-        self._sync_status(state, breaker)
+        with self._lock:
+            state.failure_count += 1
+            state.consecutive_failures += 1
+            state.last_failure_at = datetime.now(UTC)
+            state.last_latency_ms = latency_ms
+            state.last_error = str(error)
+            self._sync_status(state, breaker)
         return state
 
     def snapshot(self) -> list[ProviderHealth]:
         with self._lock:
             values = list(self._states.values())
-        for state in values:
-            self._sync_status(state, self.breaker(state.provider_name, state.data_type))
+            for state in values:
+                self._sync_status(state, self.breaker(state.provider_name, state.data_type))
         return values
+
+    def clear(self) -> None:
+        """Forget runtime counters, primarily for controlled lifecycle resets."""
+
+        with self._lock:
+            self._states.clear()
+            self._breakers.clear()
 
 
 ProviderHealthRegistry = ProviderHealthTracker
+
+
+_runtime_registry: ProviderHealthRegistry | None = None
+_runtime_registry_lock = Lock()
+
+
+def _runtime_defaults() -> tuple[int, float]:
+    # Import lazily so the provider primitives remain usable in standalone
+    # tests and tools that do not initialize the FastAPI application.
+    try:
+        from ...config import settings
+
+        return settings.PROVIDER_FAILURE_THRESHOLD, settings.PROVIDER_CIRCUIT_COOLDOWN_SECONDS
+    except (ImportError, AttributeError):
+        return 3, 60.0
+
+
+def get_runtime_provider_health_registry() -> ProviderHealthRegistry:
+    """Return the process-wide registry shared by independently built chains."""
+
+    global _runtime_registry
+    with _runtime_registry_lock:
+        if _runtime_registry is None:
+            failure_threshold, cooldown_seconds = _runtime_defaults()
+            _runtime_registry = ProviderHealthRegistry(
+                failure_threshold=failure_threshold,
+                cooldown_seconds=cooldown_seconds,
+            )
+        return _runtime_registry
+
+
+def reset_runtime_provider_health_registry(
+    *,
+    failure_threshold: int | None = None,
+    cooldown_seconds: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> ProviderHealthRegistry:
+    """Replace the shared registry for tests or an explicit app restart hook."""
+
+    global _runtime_registry
+    default_threshold, default_cooldown = _runtime_defaults()
+    with _runtime_registry_lock:
+        _runtime_registry = ProviderHealthRegistry(
+            failure_threshold=failure_threshold if failure_threshold is not None else default_threshold,
+            cooldown_seconds=cooldown_seconds if cooldown_seconds is not None else default_cooldown,
+            clock=clock,
+        )
+        return _runtime_registry
+
+
+def runtime_provider_health_snapshot() -> list[dict[str, object]]:
+    """Return a serializable copy suitable for persistence or health APIs."""
+
+    return [state.to_dict() for state in get_runtime_provider_health_registry().snapshot()]

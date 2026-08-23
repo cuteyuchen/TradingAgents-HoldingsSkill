@@ -1,14 +1,11 @@
-"""Normalized quote snapshot assembly and runtime metadata persistence.
+"""Quote snapshot orchestration and runtime metadata persistence.
 
-This module is intentionally provider-agnostic.  Providers may return mappings,
-dataclasses, or small model objects; the adapter boundary is normalized here and
-only snapshot metadata is persisted.
+Normalization and quality live in :mod:`app.market`; this service only selects
+the server-owned route/universe, invokes Providers, and persists provenance.
 """
 from __future__ import annotations
 
 import json
-import math
-import uuid
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from typing import Any, Callable
@@ -17,11 +14,14 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..market.codes import normalize_security_code
+from ..market.models import NormalizedQuote, QuoteSnapshot
+from ..market.providers.base import build_quote_snapshot as build_domain_quote_snapshot
 from ..market.providers.factory import (
     build_all_a_quote_provider,
     build_critical_quote_provider,
     create_quote_provider,
 )
+from ..market.providers.health import runtime_provider_health_snapshot
 from ..market_runtime_models import MarketSnapshot, ProviderHealth, SourceLineage
 from .security_master import get_market_universe
 
@@ -39,31 +39,35 @@ def set_snapshot_provider(provider: SnapshotProvider | None) -> None:
 
 
 def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
-    """Invoke an injected provider or an explicitly named configured route.
+    """Invoke a server-configured route and return trusted run metadata."""
 
-    Unknown provider names remain fail-closed and return a structured missing
-    result.  This keeps API tests and deployments without public-data access
-    deterministic while still making ``tencent``/``eastmoney_batch`` usable
-    when an operator explicitly selects them.
-    """
+    codes = list(
+        dict.fromkeys(
+            code
+            for value in (request.get("codes") or [])
+            if (code := normalize_security_code(value))
+        )
+    )
+    requested_name = str(request.get("route") or request.get("provider") or "").strip().lower()
+    sanitized_request = {"codes": codes, "route": requested_name, "provider": requested_name}
     if _snapshot_provider is not None:
-        return _snapshot_provider(dict(request))
-    requested_name = str(request.get("provider") or "").strip().lower()
+        return _snapshot_provider(sanitized_request)
     known = {"tencent", "eastmoney", "eastmoney_batch", "critical", "holding", "all_a", "auto", "fallback"}
     if not requested_name:
         return {
             "quotes": [],
             "provider": "unconfigured",
-            "expected_count": request.get("expected_count") or len(request.get("codes") or []),
+            "requested_route": None,
             "errors": [{"code": "provider_not_configured", "message": "No quote provider is configured."}],
         }
     if requested_name not in known:
         return {
             "quotes": [],
-            "provider": requested_name,
-            "expected_count": request.get("expected_count") or len(request.get("codes") or []),
+            "provider": "unconfigured",
+            "requested_route": requested_name,
             "errors": [{"code": "provider_not_configured", "message": "No quote provider is configured."}],
         }
+    provider = None
     try:
         if requested_name in {"tencent", "eastmoney", "eastmoney_batch"}:
             provider = create_quote_provider(requested_name)
@@ -77,28 +81,50 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
                 primary=settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER,
                 fallbacks=settings.MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS,
             )
-        codes = list(request.get("codes") or [])
         if not codes:
             return {
                 "quotes": [],
                 "provider": getattr(provider, "name", requested_name or "all_a"),
-                "expected_count": request.get("expected_count") or 0,
+                "requested_route": requested_name,
                 "errors": [{"code": "universe_not_supplied", "message": "Security universe is required for a quote snapshot."}],
             }
         quotes = provider.get_all_a_share_quotes(codes)
-        return {
+        run_metadata_method = getattr(provider, "get_run_metadata", None)
+        run_metadata = run_metadata_method() if callable(run_metadata_method) else {}
+        result = {
             "quotes": quotes,
-            "provider": getattr(provider, "name", requested_name or "all_a"),
-            "expected_count": request.get("expected_count") or len(codes),
+            "provider": run_metadata.get("provider") or getattr(provider, "name", requested_name or "all_a"),
+            "requested_route": requested_name,
             "errors": list(getattr(provider, "last_errors", []) or []),
+            "provider_attempts": run_metadata.get("provider_attempts") or [],
         }
+        for key in ("provider_counts", "provider_endpoints", "fallback_level", "fallback_errors"):
+            if key in run_metadata:
+                result[key] = run_metadata[key]
+        return result
     except Exception as exc:  # noqa: BLE001
-        return {
+        metadata_method = getattr(provider, "get_run_metadata", None)
+        run_metadata = metadata_method() if callable(metadata_method) else {}
+        provider_name = (
+            run_metadata.get("provider")
+            or getattr(provider, "name", None)
+            or requested_name
+            or "unknown"
+        )
+        provider_errors = list(getattr(provider, "last_errors", []) or [])
+        if not provider_errors:
+            provider_errors = [{"provider": provider_name, "error_code": "provider_failure", "message": str(exc)}]
+        result = {
             "quotes": [],
-            "provider": requested_name or "unconfigured",
-            "expected_count": request.get("expected_count") or len(request.get("codes") or []),
-            "errors": [{"code": "provider_failure", "message": str(exc)}],
+            "provider": provider_name,
+            "requested_route": requested_name or None,
+            "errors": provider_errors,
+            "provider_attempts": run_metadata.get("provider_attempts") or [],
         }
+        for key in ("provider_counts", "provider_endpoints", "fallback_level", "fallback_errors"):
+            if key in run_metadata:
+                result[key] = run_metadata[key]
+        return result
 
 
 def _value(source: Any, *keys: str, default: Any = None) -> Any:
@@ -113,16 +139,6 @@ def _value(source: Any, *keys: str, default: Any = None) -> Any:
     return default
 
 
-def _float(value: Any) -> float | None:
-    if value in (None, "", "-"):
-        return None
-    try:
-        parsed = float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
-
-
 def _datetime(value: Any) -> datetime | None:
     if value is None or isinstance(value, datetime):
         return value
@@ -131,6 +147,14 @@ def _datetime(value: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return parsed
+
+
+def _runtime_datetime(value: Any) -> datetime | None:
+    """Convert registry ISO timestamps to SQLAlchemy-friendly datetimes."""
+
+    if value is None or isinstance(value, datetime):
+        return value
+    return _datetime(value)
 
 
 def _date(value: Any) -> date | None:
@@ -164,80 +188,6 @@ def _serializable(value: Any) -> Any:
     return value
 
 
-def _normalise_quality(value: Any) -> str | None:
-    if value is None:
-        return None
-    if hasattr(value, "value"):
-        value = value.value
-    status = str(value).strip().upper()
-    aliases = {"OK": "VALID", "GOOD": "VALID", "PARTIAL": "DEGRADED", "BAD": "INVALID"}
-    status = aliases.get(status, status)
-    return status if status in QUALITY_STATUSES else None
-
-
-def normalize_quote(raw: Any, *, provider: str | None = None, fallback_level: int = 0) -> dict[str, Any]:
-    """Convert one provider quote to the Phase B normalized field contract."""
-    code = _canonical_code(_value(raw, "code", "symbol", "ticker", default=""))
-    price = _float(_value(raw, "price", "current_price", "last"))
-    prev_close = _float(_value(raw, "prev_close", "prevClose", "pre_close"))
-    open_price = _float(_value(raw, "open", "open_price"))
-    high = _float(_value(raw, "high", "high_price"))
-    low = _float(_value(raw, "low", "low_price"))
-    volume = _float(_value(raw, "volume", "vol"))
-    amount = _float(_value(raw, "amount", "turnover_amount", "成交额"))
-    pct_change = _float(_value(raw, "pct_change", "change_percent", "percent"))
-    turnover_rate = _float(_value(raw, "turnover_rate", "turnoverRatio"))
-    source_timestamp = _datetime(_value(raw, "source_timestamp", "quote_time", "timestamp", "trade_time"))
-    fetched_at = _datetime(_value(raw, "fetched_at", "retrieved_at")) or datetime.now(UTC)
-    trade_date = _date(_value(raw, "trade_date", "trading_date")) or (source_timestamp.date() if source_timestamp else None)
-    actual_provider = str(_value(raw, "provider", "source", default=provider or "unknown") or provider or "unknown")
-    raw_quality = _normalise_quality(_value(raw, "quality_status", "data_quality", "status"))
-
-    validation_error: str | None = None
-    if len(code) != 6 or not code.isdigit():
-        validation_error = "invalid_code"
-    elif price is None:
-        # A suspended instrument may legitimately have no current price; it is
-        # missing/stale data, not a zero-price crash.
-        validation_error = "missing_price"
-    elif price < 0 or any(value is not None and value < 0 for value in (prev_close, open_price, high, low, volume, amount)):
-        validation_error = "negative_quote_field"
-    elif high is not None and low is not None and high < low:
-        validation_error = "high_below_low"
-
-    if validation_error == "invalid_code" or validation_error in {"negative_quote_field", "high_below_low"}:
-        quality_status = "INVALID"
-    elif validation_error == "missing_price":
-        quality_status = "MISSING"
-    else:
-        quality_status = raw_quality or "VALID"
-
-    return {
-        "market": str(_value(raw, "market", default="CN") or "CN"),
-        "exchange": _value(raw, "exchange", default=None),
-        "code": code,
-        "name": _value(raw, "name", "security_name", default=None),
-        "security_type": _value(raw, "security_type", "instrument_type", default=None),
-        "price": price,
-        "prev_close": prev_close,
-        "open": open_price,
-        "high": high,
-        "low": low,
-        "pct_change": pct_change,
-        "volume": volume,
-        "amount": amount,
-        "turnover_rate": turnover_rate,
-        "trade_date": trade_date,
-        "source_timestamp": source_timestamp,
-        "provider": actual_provider,
-        "fetched_at": fetched_at,
-        "quality_status": quality_status,
-        "fallback_level": int(_value(raw, "fallback_level", default=fallback_level) or 0),
-        "raw_reference": _value(raw, "raw_reference", "raw_id", "source_id", default=None),
-        "validation_error": validation_error,
-    }
-
-
 def _coerce_raw_quotes(raw_quotes: Any) -> tuple[list[Any], dict[str, Any]]:
     metadata: dict[str, Any] = {}
     if isinstance(raw_quotes, Mapping) and "quotes" in raw_quotes:
@@ -250,7 +200,7 @@ def _coerce_raw_quotes(raw_quotes: Any) -> tuple[list[Any], dict[str, Any]]:
         return list(raw_quotes.values()), metadata
     object_quotes = _value(raw_quotes, "quotes", default=None)
     if object_quotes is not None:
-        for key in ("provider", "expected_count", "market", "trade_date", "errors", "fallback_level"):
+        for key in ("provider", "requested_route", "market", "errors", "provider_counts", "provider_endpoints", "provider_attempts"):
             value = _value(raw_quotes, key, default=None)
             if value is not None:
                 metadata[key] = value
@@ -263,20 +213,6 @@ def _coerce_raw_quotes(raw_quotes: Any) -> tuple[list[Any], dict[str, Any]]:
     return [], metadata
 
 
-def _snapshot_quality(quotes: list[dict[str, Any]], expected_count: int, received_count: int, errors: list[Any]) -> str:
-    if any(item["quality_status"] == "CONFLICT" for item in quotes):
-        return "CONFLICT"
-    if expected_count <= 0 or received_count == 0:
-        return "MISSING"
-    if any(item["quality_status"] == "INVALID" for item in quotes):
-        return "INVALID" if received_count == 0 else "DEGRADED"
-    if any(item["quality_status"] == "STALE" for item in quotes):
-        return "STALE"
-    if errors or received_count < expected_count or any(item["quality_status"] == "DEGRADED" for item in quotes):
-        return "DEGRADED"
-    return "VALID"
-
-
 def build_quote_snapshot(
     raw_quotes: Any,
     *,
@@ -286,77 +222,34 @@ def build_quote_snapshot(
     fallback_level: int = 0,
     trade_date: date | str | None = None,
     snapshot_key: str | None = None,
+    requested_route: str | None = None,
     errors: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a serializable snapshot and calculate coverage in O(N)."""
-    started_at = datetime.now(UTC)
+    """Compatibility wrapper around the canonical domain snapshot builder."""
     raw_items, provider_metadata = _coerce_raw_quotes(raw_quotes)
-    all_errors = list(provider_metadata.get("errors") or [])
-    all_errors.extend(list(errors or []))
-    normalized: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for raw in raw_items:
-        quote = normalize_quote(
-            raw,
-            provider=provider or provider_metadata.get("provider"),
-            fallback_level=fallback_level,
-        )
-        code = quote["code"]
-        if code and code in seen:
-            duplicates.append(code)
-            continue
-        if code:
-            seen.add(code)
-        normalized.append(quote)
-    if duplicates:
-        all_errors.append({"code": "duplicate_quote", "codes": sorted(set(duplicates))})
-
-    requested = [_canonical_code(code) for code in (requested_codes or [])]
-    requested = list(dict.fromkeys(code for code in requested if code))
-    inferred_expected = provider_metadata.get("expected_count")
+    requested = list(dict.fromkeys(code for code in (_canonical_code(value) for value in (requested_codes or [])) if code))
+    expected = len(requested) if requested else max(int(expected_count or 0), 0)
+    all_errors = list(provider_metadata.get("errors") or []) + list(errors or [])
+    metadata = {key: value for key, value in provider_metadata.items() if key != "quotes"}
+    effective_provider = provider or provider_metadata.get("provider")
     try:
-        expected = int(expected_count if expected_count is not None else inferred_expected if inferred_expected is not None else len(requested) or len(raw_items))
+        effective_fallback_level = max(int(fallback_level or 0), int(provider_metadata.get("fallback_level") or 0))
     except (TypeError, ValueError):
-        expected = len(requested) or len(raw_items)
-    expected = max(expected, 0)
-    received = sum(1 for item in normalized if item["quality_status"] not in {"MISSING", "INVALID"} and item["code"])
-    coverage = round(received / expected, 6) if expected else 0.0
-    coverage = min(max(coverage, 0.0), 1.0)
-    quality_status = _snapshot_quality(normalized, expected, received, all_errors)
-    parsed_trade_date = _date(trade_date)
-    if parsed_trade_date is None:
-        for item in normalized:
-            if item.get("trade_date"):
-                parsed_trade_date = item["trade_date"]
-                break
-    completed_at = datetime.now(UTC)
-    actual_provider = str(provider or provider_metadata.get("provider") or next((item["provider"] for item in normalized if item.get("provider")), "unknown"))
-    snapshot_id = uuid.uuid4().hex
-    result = {
-        "snapshot_id": snapshot_id,
-        "snapshot_key": snapshot_key or snapshot_id,
-        "market": str(provider_metadata.get("market") or "CN"),
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "trade_date": parsed_trade_date,
-        "provider": actual_provider,
-        "fallback_level": max([fallback_level, *[int(item.get("fallback_level") or 0) for item in normalized]], default=0),
-        "expected_count": expected,
-        "received_count": received,
-        "coverage_ratio": coverage,
-        "quality_status": quality_status,
-        "quotes": normalized,
-        "errors": [_serializable(error) for error in all_errors],
-        "metadata": {
-            "duplicate_count": len(duplicates),
-            "invalid_count": sum(1 for item in normalized if item["quality_status"] == "INVALID"),
-            "missing_count": max(expected - received, 0),
-            "requested_count": len(requested),
-            "provider_metadata": _serializable({key: value for key, value in provider_metadata.items() if key != "quotes"}),
-        },
-    }
-    return result
+        effective_fallback_level = max(int(fallback_level or 0), 0)
+    snapshot = build_domain_quote_snapshot(
+        raw_items,
+        expected_count=expected,
+        provider=effective_provider,
+        fallback_level=effective_fallback_level,
+        trade_date=None if trade_date is None else _date(trade_date),
+        snapshot_key=snapshot_key,
+        requested_codes=requested,
+        requested_route=requested_route or provider_metadata.get("requested_route"),
+        max_age_seconds=settings.QUOTE_FRESHNESS_SECONDS,
+        metadata=metadata,
+        errors=all_errors,
+    )
+    return snapshot.to_dict()
 
 
 def get_all_a_share_quote_snapshot(
@@ -365,7 +258,8 @@ def get_all_a_share_quote_snapshot(
     provider: str | None = None,
     trade_date: date | str | None = None,
     snapshot_key: str | None = None,
-    include_etf: bool = True,
+    include_etf: bool = False,
+    include_bse: bool = False,
     include_suspended: bool = False,
 ) -> dict[str, Any]:
     """Build one batch quote snapshot from the persisted SecurityMaster universe.
@@ -377,39 +271,45 @@ def get_all_a_share_quote_snapshot(
     stocks = get_market_universe(
         db,
         security_type="STOCK",
+        exchange=None,
         include_suspended=include_suspended,
         include_inactive=False,
     )
-    rows = list(stocks)
+    exchanges = {"SSE", "SZSE"}
+    if include_bse:
+        exchanges.add("BSE")
+    rows = [row for row in stocks if str(row.exchange or "").upper() in exchanges]
     if include_etf:
-        rows.extend(
-            get_market_universe(
+        etfs = get_market_universe(
                 db,
                 security_type="ETF",
                 include_suspended=include_suspended,
                 include_inactive=False,
-            )
         )
+        rows.extend(row for row in etfs if str(row.exchange or "").upper() in exchanges)
     codes = [row.code for row in rows]
     request = {
         "codes": codes,
-        "expected_count": len(codes),
-        "provider": provider or "all_a",
-        "trade_date": trade_date,
+        "route": provider or "all_a",
     }
     raw = collect_snapshot_quotes(request)
     return build_quote_snapshot(
         raw,
         expected_count=len(codes),
         requested_codes=codes,
-        provider=provider,
-        trade_date=trade_date,
+        provider=None,
+        trade_date=None,
+        requested_route=provider or "all_a",
         snapshot_key=snapshot_key,
     )
 
 
 def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str | None = None, operation: str = "quote_snapshot") -> MarketSnapshot:
-    """Persist metadata and one snapshot-level lineage row in one transaction."""
+    """Persist metadata and server-derived snapshot-level lineage.
+
+    ``endpoint`` remains a compatibility-only internal fallback.  API request
+    fields never reach it; real adapter references in snapshot metadata win.
+    """
     row = MarketSnapshot(
         snapshot_id=str(snapshot["snapshot_id"]),
         snapshot_key=str(snapshot.get("snapshot_key") or snapshot["snapshot_id"]),
@@ -427,13 +327,34 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
         metadata_json=_serializable(snapshot.get("metadata") or {}),
     )
     db.add(row)
-    db.add(
-        SourceLineage(
+    metadata = dict(snapshot.get("metadata") or {})
+    raw_counts = metadata.get("provider_counts") or {}
+    provider_counts = {
+        str(name): int(count)
+        for name, count in raw_counts.items()
+        if str(name).strip() and int(count or 0) > 0
+    }
+    raw_endpoints = metadata.get("provider_endpoints") or {}
+    provider_attempts = metadata.get("provider_attempts") or []
+    attempted_providers = list(
+        dict.fromkeys(
+            str(item.get("provider") or "").strip().lower()
+            for item in provider_attempts
+            if isinstance(item, Mapping) and str(item.get("provider") or "").strip()
+        )
+    )
+    providers = list(provider_counts) or attempted_providers or [row.provider]
+    for provider_name in providers:
+        endpoints = raw_endpoints.get(provider_name) or []
+        if isinstance(endpoints, str):
+            endpoints = [endpoints]
+        trusted_endpoint = str(endpoints[0])[:512] if endpoints else endpoint
+        db.add(SourceLineage(
             entity_type="market_snapshot",
             entity_key=row.snapshot_id,
             field_name=None,
-            provider=row.provider,
-            provider_endpoint=endpoint,
+            provider=provider_name,
+            provider_endpoint=trusted_endpoint,
             operation=operation,
             source_timestamp=None,
             fetched_at=row.completed_at,
@@ -446,9 +367,12 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
                 "expected_count": row.expected_count,
                 "received_count": row.received_count,
                 "coverage_ratio": row.coverage_ratio,
+                "requested_route": (snapshot.get("metadata") or {}).get("requested_route"),
+                "provider_counts": (snapshot.get("metadata") or {}).get("provider_counts", {}),
+                "provider_endpoints": (snapshot.get("metadata") or {}).get("provider_endpoints", {}),
+                "provider_contribution_count": provider_counts.get(provider_name, row.received_count),
             },
-        )
-    )
+        ))
     db.flush()
     return row
 
@@ -464,6 +388,43 @@ def _health_row(db: Session, provider_name: str, data_type: str) -> ProviderHeal
         db.add(row)
         db.flush()
     return row
+
+
+def sync_runtime_provider_health(
+    db: Session,
+    *,
+    data_type: str | None = None,
+) -> list[ProviderHealth]:
+    """Project the process-wide Provider registry into the metadata table.
+
+    Provider adapters are intentionally kept free of database handles.  The
+    request boundary is therefore the synchronization point: after a snapshot
+    attempt, runtime counters and circuit state are copied as one small set of
+    rows.  A health read also calls this helper so cooldown transitions (for
+    example ``RECOVERING``) are visible without another quote request.
+    """
+
+    persisted: list[ProviderHealth] = []
+    for state in runtime_provider_health_snapshot():
+        state_data_type = str(state.get("data_type") or "quote").lower()
+        if data_type is not None and state_data_type != str(data_type).lower():
+            continue
+        provider_name = str(state.get("provider_name") or "").strip().lower()
+        if not provider_name:
+            continue
+        row = _health_row(db, provider_name, state_data_type)
+        row.status = str(state.get("status") or "HEALTHY")
+        row.success_count = int(state.get("success_count") or 0)
+        row.failure_count = int(state.get("failure_count") or 0)
+        row.consecutive_failures = int(state.get("consecutive_failures") or 0)
+        row.last_success_at = _runtime_datetime(state.get("last_success_at"))
+        row.last_failure_at = _runtime_datetime(state.get("last_failure_at"))
+        row.last_error = str(state.get("last_error"))[:4000] if state.get("last_error") else None
+        latency = state.get("last_latency_ms")
+        row.last_latency_ms = float(latency) if latency is not None else None
+        persisted.append(row)
+    db.flush()
+    return persisted
 
 
 def record_provider_success(db: Session, provider_name: str, data_type: str, *, latency_ms: float | None = None) -> ProviderHealth:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -10,9 +11,12 @@ from app.market.models import DataQualityStatus, NormalizedQuote
 from app.market.providers import (
     EastmoneyBatchQuoteProvider,
     FallbackQuoteProvider,
+    HealthTrackedQuoteProvider,
     InMemoryQuoteProvider,
     TencentQuoteProvider,
     build_quote_snapshot,
+    create_quote_provider,
+    reset_runtime_provider_health_registry,
 )
 from app.market.providers.health import ProviderHealthStatus, ProviderHealthTracker
 from app.market.providers.base import QuoteProvider
@@ -38,11 +42,17 @@ def _quote(code: str, *, price: float = 10.0, provider: str = "fixture") -> Norm
     )
 
 
-def _tencent_line(*, code: str = "600519", name: str = "贵州茅台", quote_time: str = "10:30:00") -> str:
+def _tencent_line(
+    *,
+    code: str = "600519",
+    name: str = "贵州茅台",
+    price: str = "1600.00",
+    quote_time: str = "10:30:00",
+) -> str:
     fields = [""] * 38
     fields[1] = name
     fields[2] = code
-    fields[3] = "1600.00"
+    fields[3] = price
     fields[4] = "1590.00"
     fields[5] = "1595.00"
     fields[30] = quote_time
@@ -65,7 +75,11 @@ def test_code_normalization_and_exchange_inference_includes_sz_etf():
     assert normalize_security_code("000001.SZ") == "000001"
     assert normalize_security_code("not-a-code") == ""
     assert exchange_for_code("159915") == "SZSE"
+    assert exchange_for_code("920001") == "BSE"
+    assert exchange_for_code("900901") == "SSE"
+    assert exchange_for_code("912345") is None
     assert provider_symbol("159915", "tencent") == "sz159915"
+    assert provider_symbol("920001", "tencent") == "bj920001"
 
 
 def test_tencent_adapter_decodes_gbk_and_normalizes_wire_fields():
@@ -135,6 +149,18 @@ def test_eastmoney_batch_adapter_uses_paging_and_only_exposes_normalized_fields(
     assert normalized["raw_reference"].startswith("https://push2.eastmoney.com/")
 
 
+def test_eastmoney_factory_applies_configured_throttle():
+    from app.config import settings
+
+    provider = create_quote_provider("eastmoney")
+
+    assert isinstance(provider, HealthTrackedQuoteProvider)
+    assert isinstance(provider.provider, EastmoneyBatchQuoteProvider)
+    assert provider.provider.min_interval_seconds == pytest.approx(
+        settings.EASTMONEY_MIN_INTERVAL_SECONDS
+    )
+
+
 class _FailingProvider(QuoteProvider):
     name = "failing"
 
@@ -150,6 +176,32 @@ def test_fallback_preserves_primary_error_and_marks_fallback_level():
     assert quote.fallback_level == 1
     assert any("primary timeout" in error for error in quote.errors)
     assert any(item["error_code"] == "provider_failure" for item in fallback.last_errors)
+
+
+def test_fallback_run_metadata_records_each_provider_contribution():
+    primary = InMemoryQuoteProvider(
+        {"600519": _quote("600519", provider="primary")},
+        provider="primary",
+    )
+    secondary = InMemoryQuoteProvider(
+        {"000001": _quote("000001", provider="secondary")},
+        provider="secondary",
+    )
+    fallback = FallbackQuoteProvider([primary, secondary])
+
+    result = fallback.get_quotes(["600519", "000001"])
+    metadata = fallback.get_run_metadata()
+
+    assert result["600519"].provider == "primary"
+    assert result["000001"].provider == "secondary"
+    assert result["000001"].fallback_level == 1
+    assert metadata["provider"] == "mixed"
+    assert metadata["provider_counts"] == {"primary": 1, "secondary": 1}
+    assert metadata["fallback_level"] == 1
+    assert any(
+        item["provider"] == "primary" and item["error_code"] == "quote_unusable"
+        for item in metadata["fallback_errors"]
+    )
 
 
 def test_fallback_all_fail_returns_explicit_missing_quote_and_diagnostics():
@@ -187,6 +239,153 @@ def test_health_tracker_circuit_recovery_and_latency():
     assert state.last_latency_ms == pytest.approx(5.0)
 
 
+def test_independent_factory_requests_share_runtime_circuit_and_recover():
+    now = [0.0]
+    registry = reset_runtime_provider_health_registry(
+        failure_threshold=3, cooldown_seconds=10, clock=lambda: now[0]
+    )
+
+    def failing_request(url, **kwargs):
+        raise RuntimeError("upstream timeout")
+
+    for _ in range(3):
+        provider = create_quote_provider("tencent", request=failing_request)
+        with pytest.raises(RuntimeError):
+            provider.get_quotes(["600519"])
+    assert registry.get("tencent").status == ProviderHealthStatus.CIRCUIT_OPEN
+
+    blocked = create_quote_provider("tencent", request=failing_request)
+    with pytest.raises(RuntimeError, match="circuit"):
+        blocked.get_quotes(["600519"])
+
+    class Response:
+        content = _tencent_line(
+            quote_time=datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H:%M:%S")
+        ).encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    now[0] = 11.0
+    recovered = create_quote_provider("tencent", request=lambda *args, **kwargs: Response())
+    quote = recovered.get_quotes(["600519"])["600519"]
+    assert quote.quality_status == DataQualityStatus.VALID
+    assert registry.get("tencent").status == ProviderHealthStatus.HEALTHY
+
+
+def test_direct_all_missing_response_counts_as_provider_failure():
+    registry = reset_runtime_provider_health_registry(failure_threshold=2, cooldown_seconds=60)
+    provider = HealthTrackedQuoteProvider(InMemoryQuoteProvider({}), health=registry)
+    assert provider.get_quotes(["600519"])["600519"].quality_status == DataQualityStatus.MISSING
+    assert provider.get_quotes(["600519"])["600519"].quality_status == DataQualityStatus.MISSING
+    assert registry.get("inmemory").status == ProviderHealthStatus.CIRCUIT_OPEN
+
+
+def test_direct_empty_request_does_not_call_provider_or_pollute_health():
+    registry = reset_runtime_provider_health_registry(failure_threshold=1, cooldown_seconds=60)
+
+    class CountingProvider(QuoteProvider):
+        name = "counting"
+
+        def __init__(self):
+            self.calls = 0
+
+        def get_quotes(self, codes):
+            self.calls += 1
+            return {}
+
+    raw = CountingProvider()
+    provider = HealthTrackedQuoteProvider(raw, health=registry)
+
+    assert provider.get_quotes([]) == {}
+    assert raw.calls == 0
+    assert registry.snapshot() == []
+
+
+def test_fallback_empty_request_clears_previous_run_metadata():
+    registry = reset_runtime_provider_health_registry(failure_threshold=1, cooldown_seconds=60)
+    provider = FallbackQuoteProvider(
+        [InMemoryQuoteProvider({"600519": _quote("600519")}, provider="primary")],
+        health=registry,
+    )
+
+    assert provider.get_quotes(["600519"])["600519"].quality_status == DataQualityStatus.VALID
+    assert provider.get_quotes([]) == {}
+    assert provider.last_errors == []
+    assert provider.get_run_metadata()["provider"] == "fallback"
+
+
+def test_direct_provider_rejects_non_mapping_batch_and_records_failure():
+    registry = reset_runtime_provider_health_registry(failure_threshold=1, cooldown_seconds=60)
+
+    class MalformedProvider(QuoteProvider):
+        name = "malformed"
+
+        def get_quotes(self, codes):
+            return [_quote("600519")]
+
+    provider = HealthTrackedQuoteProvider(MalformedProvider(), health=registry)
+
+    with pytest.raises(TypeError, match="mapping"):
+        provider.get_quotes(["600519"])
+    state = registry.get("malformed")
+    assert state.failure_count == 1
+    assert state.status == ProviderHealthStatus.CIRCUIT_OPEN
+
+
+def test_direct_provider_drops_quotes_outside_requested_universe():
+    registry = reset_runtime_provider_health_registry(failure_threshold=1, cooldown_seconds=60)
+
+    class UnexpectedProvider(QuoteProvider):
+        name = "unexpected"
+
+        def get_quotes(self, codes):
+            return {"000001": _quote("000001")}
+
+    provider = HealthTrackedQuoteProvider(UnexpectedProvider(), health=registry)
+    result = provider.get_quotes(["600519"])
+
+    assert result == {}
+    assert registry.get("unexpected").failure_count == 1
+    assert any(item["error_code"] == "unexpected_quote" for item in provider.last_errors)
+
+
+def test_fallback_records_malformed_primary_and_uses_secondary():
+    registry = reset_runtime_provider_health_registry(failure_threshold=1, cooldown_seconds=60)
+
+    class MalformedProvider(QuoteProvider):
+        name = "malformed"
+
+        def get_quotes(self, codes):
+            return [_quote("600519")]
+
+    secondary = InMemoryQuoteProvider({"600519": _quote("600519", provider="secondary")}, provider="secondary")
+    provider = FallbackQuoteProvider([MalformedProvider(), secondary], health=registry)
+
+    result = provider.get_quotes(["600519"])
+
+    assert result["600519"].provider == "secondary"
+    assert result["600519"].fallback_level == 1
+    assert registry.get("malformed").failure_count == 1
+    assert any(item["provider"] == "malformed" for item in provider.last_errors)
+
+
+def test_tencent_missing_price_is_not_reported_as_valid():
+    class Response:
+        content = _tencent_line(
+            price="",
+            quote_time=datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H:%M:%S"),
+        ).encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    quote = TencentQuoteProvider(request=lambda *args, **kwargs: Response()).get_quotes(["600519"])["600519"]
+
+    assert quote.quality_status == DataQualityStatus.MISSING
+    assert "missing_price" in quote.errors
+
+
 def test_quote_validation_and_cross_provider_conflict():
     now = datetime.now(UTC)
     valid = _quote("600519", price=100.0)
@@ -201,6 +400,27 @@ def test_quote_validation_and_cross_provider_conflict():
     suspended.is_suspended = True
     status = compare_quotes(valid, suspended)
     assert status.trade_status_conflict is True
+
+
+def test_tencent_uses_bounded_batches_for_large_universe():
+    calls: list[str] = []
+
+    class Response:
+        content = b""
+
+        def raise_for_status(self):
+            return None
+
+    def request(url, **kwargs):
+        calls.append(url)
+        return Response()
+
+    codes = [f"{100000 + index:06d}" for index in range(1001)]
+    provider = TencentQuoteProvider(request=request, batch_size=400)
+    result = provider.get_quotes(codes)
+    assert len(calls) == 3
+    assert max(map(len, calls)) < 5000
+    assert len(result) == len(codes)
 
 
 def test_inmemory_provider_and_snapshot_scale_for_5000_quotes():

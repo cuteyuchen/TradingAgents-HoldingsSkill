@@ -47,7 +47,12 @@ def exchange_for_code(code: object) -> str | None:
     normalized = normalize_security_code(code)
     if not normalized:
         return None
-    if normalized.startswith(("5", "6", "9")):
+    # Beijing Stock Exchange started using the 920xxx range in 2024.  Check it
+    # before Shanghai's 900xxx B-share range and do not classify every 9xxxxx
+    # code as Shanghai.
+    if normalized.startswith("920"):
+        return "BSE"
+    if normalized.startswith(("5", "6", "900")):
         return "SSE"
     # Shenzhen-listed ETFs commonly use the 15/16/18 ranges in addition to
     # ordinary 0/2/3-prefixed shares.

@@ -1,7 +1,7 @@
 """Small authenticated V3 market-data foundation endpoints."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -9,26 +9,40 @@ from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
+from ..market.codes import normalize_security_code
+from ..market.providers.identity import build_calendar_provider, build_security_provider
 from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import MarketSnapshot, ProviderHealth
-from ..v2_models import User
+from ..services.market_identity_sync import (
+    calendar_status,
+    sync_calendar_from_provider,
+    sync_security_master_from_provider,
+)
 from ..services.market_snapshot_service import (
     build_quote_snapshot,
     collect_snapshot_quotes,
     health_payload,
     persist_snapshot,
     snapshot_payload,
+    sync_runtime_provider_health,
 )
 from ..services.security_master import get_market_universe, upsert_securities
-from ..services.trading_calendar import normalize_market, upsert_calendar
-from ..v2_dependencies import get_current_user
+from ..services.trading_calendar import CHINA_TZ, normalize_market, upsert_calendar
+from ..v2_dependencies import get_current_user, require_market_identity_sync
+from ..v2_models import User
 
 router = APIRouter(prefix="/api/v3/market", tags=["v3-market"])
 
 
 class MarketSnapshotRequest(BaseModel):
-    """Request a provider-layer snapshot without exposing provider raw fields."""
+    """Request a server-built snapshot.
+
+    The legacy derived fields remain accepted for wire compatibility, but are
+    deliberately ignored by the service.  Coverage, fallback, trade date, and
+    endpoint provenance are server-owned facts.
+    """
 
     codes: list[str] = Field(default_factory=list, max_length=100_000)
     expected_count: int | None = Field(default=None, ge=0)
@@ -41,11 +55,7 @@ class MarketSnapshotRequest(BaseModel):
 
 
 class SecuritySyncRequest(BaseModel):
-    """Provider-normalized SecurityMaster rows supplied by an operator/job.
-
-    The endpoint deliberately accepts normalized rows only.  Network/provider
-    discovery belongs to a separate job and is never performed by the API.
-    """
+    """Optional normalized rows; an empty object invokes the configured provider."""
 
     rows: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -57,7 +67,7 @@ class SecuritySyncRequest(BaseModel):
 
 
 class CalendarSyncRequest(BaseModel):
-    """TradingCalendar rows supplied by an operator/job, without networking."""
+    """Optional normalized rows; an empty object invokes the configured provider."""
 
     rows: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -66,6 +76,8 @@ class CalendarSyncRequest(BaseModel):
     )
     market: str = Field(default="CN", min_length=1, max_length=16)
     source: str | None = Field(default=None, max_length=64)
+    start_date: date | None = None
+    end_date: date | None = None
 
 
 def _security_payload(row: SecurityMaster) -> dict[str, Any]:
@@ -142,6 +154,13 @@ def list_provider_health(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
+    # Keep the persisted view aligned with the process-wide circuit breaker,
+    # including cooldown-driven RECOVERING transitions.
+    try:
+        sync_runtime_provider_health(db)
+        db.commit()
+    except Exception:  # pragma: no cover - defensive for pre-migration liveness
+        db.rollback()
     query = db.query(ProviderHealth)
     if provider:
         query = query.filter(ProviderHealth.provider_name == provider)
@@ -222,11 +241,30 @@ def list_securities(
 def sync_securities_endpoint(
     payload: SecuritySyncRequest | list[dict[str, Any]] = Body(...),
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_market_identity_sync),
 ) -> dict[str, Any]:
-    """Upsert provider-normalized SecurityMaster rows without network access."""
+    """Run an operator-authorized SecurityMaster synchronization."""
+
+    if not settings.SECURITY_MASTER_SYNC_ENABLED:
+        raise HTTPException(status_code=403, detail="security_master_sync_disabled")
 
     rows, market, source = _rows_from_sync_payload(payload)
+    if not rows and not isinstance(payload, list):
+        try:
+            provider = build_security_provider(
+                settings.SECURITY_MASTER_SYNC_PROVIDER,
+                min_interval_seconds=settings.EASTMONEY_MIN_INTERVAL_SECONDS,
+            )
+            persisted = sync_security_master_from_provider(db, provider, market=market)
+            return {
+                "synced_count": len(persisted),
+                "count": len(persisted),
+                "provider": getattr(provider, "name", settings.SECURITY_MASTER_SYNC_PROVIDER),
+                "items": [_security_payload(row) for row in persisted],
+            }
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            raise HTTPException(status_code=502, detail="security_provider_sync_failed") from exc
     prepared = []
     for item in rows:
         if not isinstance(item, dict):
@@ -282,15 +320,51 @@ def list_calendar(
     return [_calendar_payload(row) for row in rows]
 
 
+@router.get("/calendar/status")
+def calendar_status_endpoint(
+    market: str = Query(default="CN", min_length=1, max_length=16),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Expose explicit initialization/readiness state to UI and operators."""
+
+    return calendar_status(db, market=normalize_market(market))
+
+
 @router.post("/calendar/sync")
 def sync_calendar_endpoint(
     payload: CalendarSyncRequest | list[dict[str, Any]] = Body(...),
     db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_market_identity_sync),
 ) -> dict[str, Any]:
-    """Upsert provider-normalized TradingCalendar rows without network access."""
+    """Run an operator-authorized TradingCalendar synchronization."""
+
+    if not settings.CALENDAR_SYNC_ENABLED:
+        raise HTTPException(status_code=403, detail="calendar_sync_disabled")
 
     rows, market, source = _rows_from_sync_payload(payload)
+    if not rows and not isinstance(payload, list):
+        day = datetime.now(CHINA_TZ).date()
+        start_date = payload.start_date or (day - timedelta(days=settings.CALENDAR_SYNC_LOOKBACK_DAYS))
+        end_date = payload.end_date or day
+        try:
+            provider = build_calendar_provider(settings.CALENDAR_SYNC_PROVIDER)
+            persisted = sync_calendar_from_provider(
+                db,
+                provider,
+                start=start_date,
+                end=end_date,
+                market=market,
+            )
+            return {
+                "synced_count": len(persisted),
+                "count": len(persisted),
+                "provider": getattr(provider, "name", settings.CALENDAR_SYNC_PROVIDER),
+                "items": [_calendar_payload(row) for row in persisted],
+            }
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            raise HTTPException(status_code=502, detail="calendar_provider_sync_failed") from exc
     prepared = []
     for item in rows:
         if not isinstance(item, dict):
@@ -322,24 +396,43 @@ def create_quote_snapshot(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    request = payload.model_dump(mode="json")
+    codes = list(dict.fromkeys(normalize_security_code(code) for code in payload.codes if normalize_security_code(code)))
+    request = {
+        "codes": codes,
+        "route": str(payload.provider or "").strip().lower() or None,
+    }
     try:
         raw = collect_snapshot_quotes(request)
+        # Provider calls update the process-wide registry.  Persist that state
+        # before storing the snapshot so the two health surfaces agree.
+        try:
+            sync_runtime_provider_health(db)
+            db.commit()
+        except Exception:  # pragma: no cover - pre-migration compatibility
+            db.rollback()
         snapshot = build_quote_snapshot(
             raw,
-            expected_count=payload.expected_count,
-            requested_codes=payload.codes,
-            provider=payload.provider,
-            fallback_level=payload.fallback_level,
-            trade_date=payload.trade_date,
+            expected_count=len(codes),
+            requested_codes=codes,
+            provider=None,
+            fallback_level=0,
+            trade_date=None,
             snapshot_key=payload.snapshot_key,
         )
         if payload.persist:
-            persist_snapshot(db, snapshot, endpoint=payload.provider_endpoint)
+            persist_snapshot(db, snapshot)
             db.commit()
         return snapshot_payload(snapshot)
     except Exception as exc:  # noqa: BLE001
         db.rollback()
+        # A failed provider call is still a health event.  Project it after the
+        # request transaction is rolled back so circuit-open diagnostics remain
+        # visible across subsequent HTTP requests.
+        try:
+            sync_runtime_provider_health(db)
+            db.commit()
+        except Exception:  # pragma: no cover - pre-migration compatibility
+            db.rollback()
         raise HTTPException(status_code=502, detail=f"market_snapshot_failed:{exc}") from exc
 
 

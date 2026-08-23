@@ -32,6 +32,8 @@ from .providers import (
     DEFAULT_PROVIDER_REGISTRY,
     EastmoneyBatchQuoteProvider,
     FallbackQuoteProvider,
+    HealthTrackedQuoteProvider,
+    ProviderCircuitOpen,
     InMemoryQuoteProvider,
     ProviderRegistry,
     QuoteProvider,
@@ -43,6 +45,8 @@ from .providers import (
     build_quote_provider,
     create_quote_provider,
     make_provider,
+    get_runtime_provider_health_registry,
+    reset_runtime_provider_health_registry,
 )
 
 __all__ = [
@@ -52,6 +56,8 @@ __all__ = [
     "DEFAULT_PROVIDER_REGISTRY",
     "EastmoneyBatchQuoteProvider",
     "FallbackQuoteProvider",
+    "HealthTrackedQuoteProvider",
+    "ProviderCircuitOpen",
     "InMemoryQuoteProvider",
     "NormalizedQuote",
     "ProviderHealth",
@@ -77,4 +83,6 @@ __all__ = [
     "validate_quote",
     "TencentQuoteProvider",
     "make_provider",
+    "get_runtime_provider_health_registry",
+    "reset_runtime_provider_health_registry",
 ]
