@@ -116,6 +116,43 @@ def test_snapshot_freshness_uses_source_timestamp_and_exact_boundary():
     assert fresh_snapshot.quotes[0].quality_status == DataQualityStatus.VALID
 
 
+def test_persisted_snapshot_quality_is_revalidated_when_read() -> None:
+    from app.routers.market_v3 import _metadata_payload
+
+    completed_at = datetime(2026, 8, 23, 2, 0, tzinfo=UTC)
+    row = MarketSnapshot(
+        snapshot_id="stale-read",
+        snapshot_key="stale-read",
+        market="CN",
+        started_at=completed_at - timedelta(seconds=5),
+        completed_at=completed_at,
+        trade_date=date(2026, 8, 23),
+        provider="fixture",
+        fallback_level=0,
+        expected_count=1,
+        received_count=1,
+        coverage_ratio=1.0,
+        quality_status="VALID",
+        metadata_json={
+            "provider_source_timestamps": {
+                "fixture": (completed_at - timedelta(seconds=10)).isoformat(),
+            }
+        },
+    )
+    at_boundary = _metadata_payload(
+        row,
+        now=completed_at + timedelta(seconds=80),
+    )
+    stale = _metadata_payload(
+        row,
+        now=completed_at + timedelta(seconds=81),
+    )
+    assert at_boundary["freshness_seconds"] == 90
+    assert at_boundary["quality_status"] == "VALID"
+    assert stale["freshness_seconds"] == 91
+    assert stale["quality_status"] == "STALE"
+
+
 def test_snapshot_does_not_count_unexpected_quote_toward_requested_coverage():
     completed_at = datetime(2026, 8, 23, 2, 0, tzinfo=UTC)
     unexpected = _fresh_quote(
@@ -516,8 +553,14 @@ def test_partial_primary_fallback_persists_real_provider_contributions(monkeypat
         assert rows["tencent"].provider_endpoint == TencentRemainder.endpoint
         assert rows["eastmoney_batch"].metadata_json["provider_contribution_count"] == 2
         assert rows["tencent"].metadata_json["provider_contribution_count"] == 20
-        assert rows["eastmoney_batch"].fallback_level == 1
+        assert rows["eastmoney_batch"].fallback_level == 0
+        assert rows["tencent"].fallback_level == 1
+        assert rows["eastmoney_batch"].source_timestamp is not None
+        assert rows["tencent"].source_timestamp is not None
+        assert rows["eastmoney_batch"].quality_status == "VALID"
+        assert rows["tencent"].quality_status == "VALID"
         assert "primary_partial_missing" in str(rows["eastmoney_batch"].error_message)
+        assert rows["tencent"].error_message is None
     finally:
         db.close()
 

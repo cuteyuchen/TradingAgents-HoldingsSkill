@@ -230,6 +230,7 @@ class FallbackQuoteProvider(QuoteProvider):
                 provider_attempts.append(
                     {
                         "provider": provider_name,
+                        "fallback_level": level,
                         "endpoint": str(getattr(provider, "endpoint", "") or "") or None,
                         "status": "circuit_open",
                         "latency_ms": None,
@@ -258,6 +259,7 @@ class FallbackQuoteProvider(QuoteProvider):
                 provider_attempts.append(
                     {
                         "provider": provider_name,
+                        "fallback_level": level,
                         "endpoint": provider_endpoints[provider_name] or None,
                         "status": "failure",
                         "latency_ms": latency_ms,
@@ -313,6 +315,7 @@ class FallbackQuoteProvider(QuoteProvider):
             provider_attempts.append(
                 {
                     "provider": provider_name,
+                    "fallback_level": level,
                     "endpoint": provider_endpoints[provider_name] or None,
                     "status": "success" if usable_count else "unusable",
                     "latency_ms": latency_ms,

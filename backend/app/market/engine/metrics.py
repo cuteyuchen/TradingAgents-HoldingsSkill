@@ -362,10 +362,24 @@ def calculate_cross_section_metrics(
             identity = (identity_by_code or {}).get(code)
             board = _value(identity, "board") if identity is not None else _value(row, "board")
             is_st = bool(_value(identity, "is_st", False)) if identity is not None else bool(_value(row, "is_st", False))
-            if is_price_limit(value * 100.0, code, board=board, is_st=is_st):
-                limit_up_count += 1
-            if is_price_limit(value * 100.0, code, board=board, is_st=is_st, direction="down"):
-                limit_down_count += 1
+            current_price = _float(_value(row, "price", _value(row, "close")))
+            previous_close = _float(_value(row, "prev_close"))
+            if current_price is not None and previous_close is not None and previous_close > 0:
+                up_limit = theoretical_limit_price(
+                    previous_close,
+                    code,
+                    board=board,
+                    is_st=is_st,
+                )
+                down_limit = theoretical_limit_price(
+                    previous_close,
+                    code,
+                    board=board,
+                    is_st=is_st,
+                    direction="down",
+                )
+                limit_up_count += round(current_price, 2) >= up_limit
+                limit_down_count += round(current_price, 2) <= down_limit
         amount = _float(_value(row, "amount", _value(row, "turnover")))
         if amount is not None and amount >= 0:
             amounts.append(amount)
@@ -472,10 +486,18 @@ def calculate_ma_breadth(
     universe_codes: Iterable[str] | None = None,
     adjustment: str = "QFQ",
     windows: Sequence[int] = MA_WINDOWS,
+    current_prices: Mapping[str, Any] | Iterable[object] | None = None,
 ) -> dict[str, Any]:
-    """Calculate close-above-MA ratios with a separate denominator per window."""
+    """Calculate price-above-MA ratios with a separate denominator per window.
+
+    Intraday callers pass current quotes. The moving average then consists of
+    the live price plus the prior ``N-1`` completed daily closes. Callers that
+    omit current quotes retain the completed-daily-series behavior.
+    """
 
     grouped = _history_by_code(history, as_of=as_of, available_at=available_at, adjustment=adjustment)
+    live_prices = _current_price_map(current_prices)
+    current_day = _as_date(as_of)
     requested = {
         code
         for raw in (universe_codes or grouped.keys())
@@ -486,13 +508,26 @@ def calculate_ma_breadth(
         above_count = eligible_count = 0
         for code in requested:
             bars = grouped.get(code, [])
-            if len(bars) < window:
-                continue
-            closes = [_float(_value(bar, "close", _value(bar, "price"))) for bar in bars[-window:]]
-            if any(value is None for value in closes):
-                continue
+            current = live_prices.get(code)
+            if current is not None:
+                completed = [
+                    _float(_value(bar, "close", _value(bar, "price")))
+                    for bar in bars
+                    if current_day is None
+                    or (_as_date(_value(bar, "trade_date", _value(bar, "date"))) or date.min) < current_day
+                ]
+                completed = [value for value in completed if value is not None]
+                if len(completed) < window - 1:
+                    continue
+                closes = [*completed[-(window - 1):], current] if window > 1 else [current]
+            else:
+                if len(bars) < window:
+                    continue
+                closes = [_float(_value(bar, "close", _value(bar, "price"))) for bar in bars[-window:]]
+                if any(value is None for value in closes):
+                    continue
+                current = closes[-1]
             eligible_count += 1
-            current = closes[-1]
             average = fmean(value for value in closes if value is not None)
             above_count += bool(current is not None and current > average)
         result[f"above_ma{window}_count"] = above_count
@@ -557,10 +592,13 @@ def calculate_new_high_low(
     universe_codes: Iterable[str] | None = None,
     adjustment: str = "QFQ",
     windows: Sequence[int] = NEW_HIGH_LOW_WINDOWS,
+    current_prices: Mapping[str, Any] | Iterable[object] | None = None,
 ) -> dict[str, Any]:
-    """Use today's close versus the prior N valid closes; no current-day look-ahead."""
+    """Use the live price versus prior completed closes without look-ahead."""
 
     grouped = _history_by_code(history, as_of=as_of, available_at=available_at, adjustment=adjustment)
+    live_prices = _current_price_map(current_prices)
+    current_day = _as_date(as_of)
     requested = {
         code
         for raw in (universe_codes or grouped.keys())
@@ -570,16 +608,27 @@ def calculate_new_high_low(
     for window in windows:
         high_count = low_count = eligible_count = 0
         for code in requested:
-            closes = [
+            completed = [
                 value
                 for bar in grouped.get(code, [])
                 if (value := _float(_value(bar, "close", _value(bar, "price")))) is not None
+                and (
+                    code not in live_prices
+                    or current_day is None
+                    or (_as_date(_value(bar, "trade_date", _value(bar, "date"))) or date.min) < current_day
+                )
             ]
-            if len(closes) < window + 1:
-                continue
+            current = live_prices.get(code)
+            if current is not None:
+                if len(completed) < window:
+                    continue
+                prior = completed[-window:]
+            else:
+                if len(completed) < window + 1:
+                    continue
+                current = completed[-1]
+                prior = completed[-(window + 1):-1]
             eligible_count += 1
-            current = closes[-1]
-            prior = closes[-(window + 1):-1]
             high_count += current >= max(prior)
             low_count += current <= min(prior)
         result[f"new_high_{window}_count"] = high_count
@@ -591,3 +640,27 @@ def calculate_new_high_low(
             (high_count - low_count) / eligible_count if eligible_count else None
         )
     return result
+
+
+def _current_price_map(values: Mapping[str, Any] | Iterable[object] | None) -> dict[str, float]:
+    if values is None:
+        return {}
+    if isinstance(values, Mapping):
+        output: dict[str, float] = {}
+        for raw_code, raw_value in values.items():
+            code = normalize_security_code(raw_code)
+            value = _float(
+                _value(raw_value, "price", _value(raw_value, "close"))
+                if isinstance(raw_value, Mapping) or hasattr(raw_value, "price")
+                else raw_value
+            )
+            if code and value is not None:
+                output[code] = value
+        return output
+    output = {}
+    for row in values:
+        code = _code(row)
+        value = _float(_value(row, "price", _value(row, "close")))
+        if code and value is not None:
+            output[code] = value
+    return output

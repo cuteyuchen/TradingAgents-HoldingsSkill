@@ -339,6 +339,14 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
     }
     raw_endpoints = metadata.get("provider_endpoints") or {}
     provider_attempts = metadata.get("provider_attempts") or []
+    raw_fallback_levels = metadata.get("provider_fallback_levels") or {}
+    raw_source_timestamps = metadata.get("provider_source_timestamps") or {}
+    raw_quality_statuses = metadata.get("provider_quality_statuses") or {}
+    attempts_by_provider = {
+        str(item.get("provider") or "").strip().lower(): item
+        for item in provider_attempts
+        if isinstance(item, Mapping) and str(item.get("provider") or "").strip()
+    }
     attempted_providers = list(
         dict.fromkeys(
             str(item.get("provider") or "").strip().lower()
@@ -346,12 +354,45 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
             if isinstance(item, Mapping) and str(item.get("provider") or "").strip()
         )
     )
-    providers = list(provider_counts) or attempted_providers or [row.provider]
+    providers = list(dict.fromkeys([*attempted_providers, *provider_counts])) or [row.provider]
     for provider_name in providers:
+        attempt = attempts_by_provider.get(provider_name) or {}
         endpoints = raw_endpoints.get(provider_name) or []
         if isinstance(endpoints, str):
             endpoints = [endpoints]
         trusted_endpoint = str(endpoints[0])[:512] if endpoints else endpoint
+        raw_source = raw_source_timestamps.get(provider_name)
+        if isinstance(raw_source, Mapping):
+            raw_source = raw_source.get("earliest") or raw_source.get("latest")
+        source_timestamp = _datetime(raw_source)
+        try:
+            provider_level = int(
+                raw_fallback_levels.get(
+                    provider_name,
+                    attempt.get("fallback_level", row.fallback_level),
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            provider_level = row.fallback_level
+        provider_quality = str(raw_quality_statuses.get(provider_name) or "").upper()
+        if provider_quality not in QUALITY_STATUSES:
+            provider_quality = (
+                "MISSING"
+                if str(attempt.get("status") or "").lower() in {"failure", "unusable", "circuit_open"}
+                else row.quality_status
+            )
+        provider_errors = [
+            item
+            for item in (snapshot.get("errors") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("provider") or "").strip().lower() == provider_name
+        ]
+        first_error = provider_errors[0] if provider_errors else None
+        error_message = "; ".join(
+            str(item.get("message") or item.get("error") or item)
+            for item in provider_errors
+        )[:4000] or None
         db.add(SourceLineage(
             entity_type="market_snapshot",
             entity_key=row.snapshot_id,
@@ -359,13 +400,17 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
             provider=provider_name,
             provider_endpoint=trusted_endpoint,
             operation=operation,
-            source_timestamp=None,
+            source_timestamp=source_timestamp,
             fetched_at=row.completed_at,
             trade_date=row.trade_date,
-            fallback_level=row.fallback_level,
-            quality_status=row.quality_status,
-            error_code="provider_error" if snapshot.get("errors") else None,
-            error_message="; ".join(str(item) for item in snapshot.get("errors") or [])[:4000] or None,
+            fallback_level=provider_level,
+            quality_status=provider_quality,
+            error_code=(
+                str(first_error.get("error_code") or first_error.get("code") or "provider_error")
+                if first_error
+                else None
+            ),
+            error_message=error_message,
             metadata_json={
                 "expected_count": row.expected_count,
                 "received_count": row.received_count,
@@ -373,7 +418,11 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
                 "requested_route": (snapshot.get("metadata") or {}).get("requested_route"),
                 "provider_counts": (snapshot.get("metadata") or {}).get("provider_counts", {}),
                 "provider_endpoints": (snapshot.get("metadata") or {}).get("provider_endpoints", {}),
-                "provider_contribution_count": provider_counts.get(provider_name, row.received_count),
+                "provider_contribution_count": provider_counts.get(
+                    provider_name,
+                    row.received_count if not provider_counts and provider_name == row.provider else 0,
+                ),
+                "provider_attempt": _serializable(attempt),
             },
         ))
     db.flush()

@@ -13,10 +13,12 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app.market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
+from app.market.engine import ComponentScore
+from app.market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from app.market_models import SecurityMaster, TradingCalendar
 from app.routers.market_engine_v3 import MarketCalculateRequest
-from app.services.market_engine import MarketEngine
+from app.services.daily_bar_cache import sync_daily_bar_cache
+from app.services.market_engine import MarketEngine, _component_confidence, _preview_median_index
 
 
 def _session() -> Session:
@@ -27,9 +29,58 @@ def _session() -> Session:
         MarketMetricSnapshot,
         MarketScoreSnapshot,
         AllAMedianIndexDaily,
+        DailyBarCache,
     ):
         model.__table__.create(engine)
     return Session(engine)
+
+
+def test_overall_component_confidence_uses_component_confidence_values() -> None:
+    components = {
+        "breadth": ComponentScore("breadth", 60, confidence=100),
+        "trend": ComponentScore("trend", 60, confidence=100),
+        "liquidity": ComponentScore("liquidity", 60, confidence=10),
+        "profitability": ComponentScore("profitability", 60, confidence=100),
+        "diffusion": ComponentScore("diffusion", 60, confidence=100),
+        "crowding": ComponentScore("crowding", 60, confidence=100),
+        "tail_risk": ComponentScore("tail_risk", 60, confidence=100),
+    }
+    assert _component_confidence(components) == pytest.approx(86.5)
+
+
+def test_quote_trade_date_must_match_calculation_date() -> None:
+    db = _session()
+    try:
+        day = date(2026, 8, 23)
+        with pytest.raises(ValueError, match="quote_trade_date_mismatch"):
+            MarketEngine(db).calculate(
+                trade_date=day,
+                captured_at=datetime(2026, 8, 23, 1, 35, tzinfo=UTC),
+                securities=[
+                    {
+                        "code": "600519",
+                        "exchange": "SSE",
+                        "security_type": "STOCK",
+                        "listing_date": day - timedelta(days=400),
+                    }
+                ],
+                trading_calendar=[
+                    {"trade_date": day - timedelta(days=offset), "is_open": True}
+                    for offset in range(400, -1, -1)
+                ],
+                quotes=[
+                    {
+                        "code": "600519",
+                        "trade_date": day - timedelta(days=1),
+                        "price": 102,
+                        "prev_close": 100,
+                        "quality_status": "VALID",
+                    }
+                ],
+                persist=False,
+            )
+    finally:
+        db.close()
 
 
 def test_outage_uses_last_reliable_score_and_preview_does_not_persist() -> None:
@@ -157,6 +208,41 @@ def test_same_capture_persist_is_idempotent() -> None:
         assert second["metric_snapshot_id"] == first["metric_snapshot_id"]
         assert db.scalar(select(func.count()).select_from(MarketMetricSnapshot)) == 1
         assert db.scalar(select(func.count()).select_from(MarketScoreSnapshot)) == 1
+        # Intraday captures expose a preview only; the official daily row is
+        # finalized once the 15:00 CST close has passed.
+        assert db.scalar(select(func.count()).select_from(AllAMedianIndexDaily)) == 0
+
+        # This deliberately tiny fixture has insufficient component coverage,
+        # so a close-time run remains frozen and must not finalize the series.
+        finalized = engine.calculate(
+            trade_date=trade_date,
+            captured_at=datetime(2026, 8, 23, 7, 35, tzinfo=UTC),
+            securities=securities,
+            trading_calendar=calendar,
+            quotes=quotes,
+            persist=True,
+        )
+        assert finalized["median_index_finalized"] is False
+        assert db.scalar(select(func.count()).select_from(AllAMedianIndexDaily)) == 0
+    finally:
+        db.close()
+
+
+def test_close_persists_median_index_when_quality_passes() -> None:
+    db = _session()
+    try:
+        trade_date, _, securities, calendar, quotes, history = _coverage_fixture(100, universe_size=8)
+        captured_at = datetime(2026, 8, 23, 7, 35, tzinfo=UTC)
+        result = MarketEngine(db).calculate(
+            trade_date=trade_date,
+            captured_at=captured_at,
+            securities=securities,
+            trading_calendar=calendar,
+            quotes=quotes,
+            history=history,
+            persist=True,
+        )
+        assert result["median_index_finalized"] is True
         assert db.scalar(select(func.count()).select_from(AllAMedianIndexDaily)) == 1
     finally:
         db.close()
@@ -279,8 +365,12 @@ def test_component_percentile_uses_prior_daily_snapshots_without_lookahead() -> 
 
         breadth = result["components"]["breadth"]
         profitability = result["components"]["profitability"]
-        assert breadth["normalized_metrics"]["median_return"] == pytest.approx(2 / 3 * 100)
-        assert profitability["normalized_metrics"]["median_return"] == pytest.approx(2 / 3 * 100)
+        # Three prior daily samples are intentionally below the 60-sample
+        # threshold, so historical percentile is unavailable and the
+        # component uses its deterministic fallback instead.
+        assert breadth["normalized_metrics"]["median_return"] is None
+        assert breadth["raw_metrics"]["historical_scoring"]["all_a_median_return"]["used_historical_percentile"] is False
+        assert profitability["normalized_metrics"]["median_return"] is not None
         assert breadth["historical_sample_count"] == 3
     finally:
         db.close()
@@ -432,3 +522,169 @@ def test_market_calculate_request_forbids_derived_provenance_fields() -> None:
         MarketCalculateRequest(provider_endpoint="https://fake.example/quotes")
     with pytest.raises(ValidationError):
         MarketCalculateRequest(securities=[{"code": "600519"}])
+
+
+def test_median_index_preview_ignores_same_day_daily_row() -> None:
+    db = _session()
+    try:
+        day = date(2026, 8, 23)
+        db.add_all(
+            [
+                AllAMedianIndexDaily(
+                    market="CN",
+                    trade_date=day - timedelta(days=1),
+                    median_return=0.01,
+                    index_value=1000.0,
+                    eligible_count=100,
+                    quality_status="VALID",
+                    calculation_version="market-engine-v1.1",
+                ),
+                AllAMedianIndexDaily(
+                    market="CN",
+                    trade_date=day,
+                    median_return=0.01,
+                    index_value=1010.0,
+                    eligible_count=100,
+                    quality_status="VALID",
+                    calculation_version="market-engine-v1.1",
+                ),
+            ]
+        )
+        db.commit()
+        assert _preview_median_index(db, trade_date=day, median_return=0.02) == pytest.approx(1020.0)
+    finally:
+        db.close()
+
+
+def test_market_engine_reads_daily_bar_cache_without_provider_fanout() -> None:
+    db = _session()
+    try:
+        trade_date, captured_at, securities, calendar, quotes, history = _coverage_fixture(8, universe_size=8)
+        db.add_all(
+            [
+                DailyBarCache(
+                    market="CN",
+                    exchange="SSE",
+                    code=row["code"],
+                    trade_date=row["trade_date"],
+                    close=row["close"],
+                    adjustment="QFQ",
+                    provider="fixture",
+                    fetched_at=captured_at,
+                    available_at=datetime(
+                        row["trade_date"].year,
+                        row["trade_date"].month,
+                        row["trade_date"].day,
+                        7,
+                        tzinfo=UTC,
+                    ),
+                    quality_status="VALID",
+                )
+                for row in history
+                if row["trade_date"] < trade_date
+            ]
+        )
+        db.commit()
+
+        class ExplodingProvider:
+            def get_kline(self, *_args, **_kwargs):
+                raise AssertionError("calculation must not call the remote provider")
+
+        result = MarketEngine(db, history_provider=ExplodingProvider()).calculate(
+            trade_date=trade_date,
+            captured_at=captured_at,
+            securities=securities,
+            trading_calendar=calendar,
+            quotes=quotes,
+            persist=False,
+        )
+        assert result["is_frozen"] is False
+        assert result["core_metrics"]["ma60_eligible_count"] == 8
+    finally:
+        db.close()
+
+
+def test_daily_bar_cache_sync_is_incremental() -> None:
+    db = _session()
+    try:
+        day = date(2026, 8, 23)
+        db.add_all(
+            [
+                TradingCalendar(market="CN", trade_date=day - timedelta(days=offset), is_open=True)
+                for offset in range(3)
+            ]
+        )
+        db.add(
+            DailyBarCache(
+                market="CN",
+                exchange="SSE",
+                code="600519",
+                trade_date=day - timedelta(days=2),
+                close=100.0,
+                adjustment="QFQ",
+                provider="fixture",
+                fetched_at=datetime(2026, 8, 21, 8, tzinfo=UTC),
+                quality_status="VALID",
+            )
+        )
+        db.commit()
+
+        class Provider:
+            name = "fixture"
+
+            def __init__(self):
+                self.calls = []
+
+            def get_kline(self, code, *, limit=30):
+                self.calls.append((code, limit))
+                return [
+                    {
+                        "code": code,
+                        "date": (day - timedelta(days=offset)).isoformat(),
+                        "close": 103 - offset,
+                        "quality_status": "VALID",
+                    }
+                    for offset in range(3, -1, -1)
+                ]
+
+        provider = Provider()
+        result = sync_daily_bar_cache(
+            db,
+            provider,
+            ["600519"],
+            as_of=day,
+            available_at=datetime(2026, 8, 23, 23, tzinfo=UTC),
+        )
+        assert provider.calls == [("600519", 4)]
+        assert result["persisted_rows"] == 2
+        assert db.scalar(select(func.count()).select_from(DailyBarCache)) == 3
+    finally:
+        db.close()
+
+
+def test_capture_span_reduces_confidence() -> None:
+    def calculate_with_span(span_seconds: int) -> float:
+        db = _session()
+        try:
+            trade_date, captured_at, securities, calendar, quotes, history = _coverage_fixture(8, universe_size=8)
+            result = MarketEngine(db).calculate(
+                trade_date=trade_date,
+                captured_at=captured_at,
+                securities=securities,
+                trading_calendar=calendar,
+                quotes={
+                    "quality_status": "VALID",
+                    "started_at": captured_at - timedelta(seconds=span_seconds),
+                    "completed_at": captured_at,
+                    "quotes": quotes,
+                },
+                history=history,
+                persist=False,
+            )
+            return result["confidence"]
+        finally:
+            db.close()
+
+    short_confidence = calculate_with_span(15)
+    long_confidence = calculate_with_span(60)
+    assert long_confidence == pytest.approx(short_confidence / 2, abs=0.1)

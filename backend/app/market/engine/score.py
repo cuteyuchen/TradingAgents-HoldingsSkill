@@ -11,6 +11,7 @@ from .config import (
     CONFIDENCE_WEIGHTS,
     COVERAGE_THRESHOLDS,
     MIN_COMPONENT_WEIGHT_COVERAGE,
+    MIN_SUBCOMPONENT_WEIGHT_COVERAGE,
     REGIME_HYSTERESIS,
     REGIME_LOWER_BOUNDS,
     REGIME_ORDER,
@@ -196,6 +197,7 @@ def score_subcomponents(
     weights: Mapping[str, float],
     *,
     name: str = "component",
+    minimum_weight_coverage: float = MIN_SUBCOMPONENT_WEIGHT_COVERAGE,
 ) -> ComponentScore:
     """Aggregate already-normalised 0-100 subcomponent values."""
 
@@ -205,14 +207,22 @@ def score_subcomponents(
         if value is not None:
             available[metric_name] = max(0.0, min(100.0, value))
     eligible_weight = sum(weights[metric_name] for metric_name in available)
-    if eligible_weight <= 0:
+    if eligible_weight < minimum_weight_coverage:
         return ComponentScore(
             name=name,
             score=None,
             raw_metrics=dict(metrics),
             normalized_metrics={metric_name: None for metric_name in weights},
+            eligible_count=len(available),
+            denominator=len(weights),
             quality_status="UNAVAILABLE",
-            unavailable_reason="no_available_subcomponents",
+            unavailable_reason=(
+                "no_available_subcomponents"
+                if eligible_weight <= 0
+                else "insufficient_subcomponent_coverage"
+            ),
+            subcomponent_available_weight=round(eligible_weight, 6),
+            confidence=round(eligible_weight * 100.0, 2),
         )
     score = sum(available[metric_name] * weights[metric_name] for metric_name in available) / eligible_weight
     return ComponentScore(
@@ -224,7 +234,8 @@ def score_subcomponents(
         denominator=len(weights),
         quality_status="VALID" if len(available) == len(weights) else "DEGRADED",
         unavailable_reason=None if len(available) == len(weights) else "missing_subcomponents",
-        confidence=round(len(available) / len(weights) * 100.0, 2),
+        subcomponent_available_weight=round(eligible_weight, 6),
+        confidence=round(eligible_weight * 100.0, 2),
     )
 
 

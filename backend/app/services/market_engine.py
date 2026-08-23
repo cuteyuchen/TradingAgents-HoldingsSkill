@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable, Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, time as datetime_time
 from typing import Any
 from uuid import uuid4
 
@@ -22,17 +22,20 @@ from ..market.engine import (
     next_median_index,
 )
 from ..market.engine.config import (
+    COMPONENT_WEIGHTS,
     MARKET_ENGINE_VERSION,
     PERCENTILE_LOOKBACK_DAYS,
     SCORE_CONFIG_VERSION,
+    SNAPSHOT_CAPTURE_SPAN_FULL_CONFIDENCE_SECONDS,
     UNIVERSE_RULE_VERSION,
 )
-from ..market.engine.history import MarketHistoryAccessLayer
 from ..market.engine.models import ComponentScore
 from ..market.engine.score import calculate_confidence
 from ..market.codes import normalize_security_code
 from ..market_models import SecurityMaster, TradingCalendar
+from .trading_calendar import CHINA_TZ
 from .market_snapshot_service import get_all_a_share_quote_snapshot
+from .daily_bar_cache import load_daily_bars
 from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 
 logger = logging.getLogger(__name__)
@@ -117,6 +120,54 @@ def _capture_from_quotes(rows: list[Any]) -> datetime | None:
     return None
 
 
+def _capture_span_seconds(snapshot: Mapping[str, Any] | None, rows: list[Any]) -> float | None:
+    """Return the provider's cross-sectional capture span when available."""
+
+    source: Mapping[str, Any] = snapshot or {}
+    started = _dt(source.get("started_at"))
+    completed = _dt(source.get("completed_at"))
+    if started is None or completed is None:
+        starts = [_dt(_value(row, "started_at")) for row in rows]
+        completes = [_dt(_value(row, "completed_at")) for row in rows]
+        starts = [value for value in starts if value is not None]
+        completes = [value for value in completes if value is not None]
+        if starts and completes:
+            started, completed = min(starts), max(completes)
+    if started is None or completed is None:
+        return None
+    return max(0.0, (completed - started).total_seconds())
+
+
+def _quote_trade_dates(rows: Iterable[Any]) -> set[date]:
+    dates: set[date] = set()
+    for row in rows:
+        value = _date(_value(row, "trade_date", _value(row, "date")))
+        if value is not None:
+            dates.add(value)
+    return dates
+
+
+def _included_quality(rows: Iterable[Any], included_codes: set[str]) -> str:
+    """Aggregate quote quality only over the actual MarketScoreUniverse."""
+
+    statuses = {
+        _quote_quality(row)
+        for row in rows
+        if normalize_security_code(_value(row, "code", _value(row, "symbol"))) in included_codes
+    }
+    if statuses & {"INVALID", "CONFLICT", "STALE", "MISSING", "FROZEN"}:
+        if "CONFLICT" in statuses:
+            return "CONFLICT"
+        if "INVALID" in statuses:
+            return "INVALID"
+        if "STALE" in statuses:
+            return "STALE"
+        return "MISSING"
+    if "DEGRADED" in statuses:
+        return "DEGRADED"
+    return "VALID" if statuses else "MISSING"
+
+
 def _calendar_for(db: Session, trade_date: date, rows: Iterable[Any] | None) -> list[Any]:
     if rows is not None:
         return list(rows)
@@ -148,6 +199,7 @@ def _identity_map(rows: Iterable[Any]) -> dict[str, Any]:
 
 
 def _history_rows(
+    db: Session,
     codes: Iterable[str],
     history: Any,
     *,
@@ -166,14 +218,16 @@ def _history_rows(
                         flattened.append(bar)
             return flattened
         return _normalize_rows(history)
-    if history_provider is None:
-        return []
+    # Calculation is intentionally cache-only.  A provider is reserved for an
+    # explicit bootstrap/sync job and must never turn one Score request into a
+    # 5,000-name network fan-out.
     try:
-        return MarketHistoryAccessLayer(history_provider).get_bars(
+        return load_daily_bars(
+            db,
             codes,
-            limit=260,
-            as_of=trade_date,
+            trade_date=trade_date,
             available_at=captured_at,
+            limit=260,
         )
     except Exception:
         return []
@@ -319,6 +373,16 @@ def _drivers(components: Mapping[str, ComponentScore]) -> tuple[list[str], list[
     return positive, negative
 
 
+def _component_confidence(components: Mapping[str, ComponentScore]) -> float:
+    return round(
+        sum(
+            COMPONENT_WEIGHTS.get(name, 0.0) * max(0.0, min(100.0, component.confidence))
+            for name, component in components.items()
+        ),
+        2,
+    )
+
+
 def _upsert_median_index(
     db: Session,
     *,
@@ -413,15 +477,9 @@ def _preview_median_index(
 
     if median_return is None:
         return None
-    existing = db.execute(
-        select(AllAMedianIndexDaily).where(
-            AllAMedianIndexDaily.market == "CN",
-            AllAMedianIndexDaily.trade_date == trade_date,
-            AllAMedianIndexDaily.calculation_version == MARKET_ENGINE_VERSION,
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        return existing.index_value
+    # Intraday preview is always derived from the prior finalized day and the
+    # latest median return.  A same-day Daily row is deliberately ignored so a
+    # later 14:30 run cannot be stuck on an old 09:35 value.
     previous = db.execute(
         select(AllAMedianIndexDaily)
         .where(
@@ -451,15 +509,16 @@ class MarketEngine:
         trading_calendar: Iterable[Any] | None = None,
         quotes: Any | None = None,
         history: Any | None = None,
-        market_snapshot_id: str | None = None,
         previous_display_score: float | None = None,
         previous_regime: str | None = None,
         last_reliable_score: float | None = None,
         persist: bool = True,
     ) -> dict[str, Any]:
         started = time.perf_counter()
-        now = _dt(captured_at, default=datetime.now(UTC)) or datetime.now(UTC)
-        day = _date(trade_date) or now.date()
+        server_now = datetime.now(CHINA_TZ)
+        default_now = server_now.astimezone(UTC)
+        now = _dt(captured_at, default=default_now) or default_now
+        day = _date(trade_date) or now.astimezone(CHINA_TZ).date()
         identity_rows = _identities_for(self.db, securities)
         calendar_rows = _calendar_for(self.db, day, trading_calendar)
         universe = build_market_score_universe(
@@ -479,9 +538,14 @@ class MarketEngine:
                 quote_rows = []
         if raw_snapshot is not None:
             quote_rows = _normalize_rows(raw_snapshot)
+        quote_trade_dates = _quote_trade_dates(quote_rows)
+        if quote_trade_dates and quote_trade_dates != {day}:
+            raise ValueError("quote_trade_date_mismatch")
         quote_capture = _capture_from_quotes(quote_rows)
         if quote_capture and captured_at is None:
             now = quote_capture
+        elif quote_capture and captured_at is not None:
+            now = _dt(captured_at, default=quote_capture) or quote_capture
 
         code_set = set(universe.included_codes)
         identity_map = _identity_map(identity_rows)
@@ -489,19 +553,32 @@ class MarketEngine:
             quote_rows,
             universe_codes=code_set,
             captured_at=quote_capture if quote_capture else None,
-            snapshot_id=market_snapshot_id,
+            snapshot_id=None,
             identity_by_code=identity_map,
         )
         history_rows = _history_rows(
+            self.db,
             code_set,
             history,
             trade_date=day,
             captured_at=now,
             history_provider=self.history_provider,
         )
-        ma = calculate_ma_breadth(history_rows, as_of=day, available_at=now, universe_codes=code_set)
+        ma = calculate_ma_breadth(
+            history_rows,
+            as_of=day,
+            available_at=now,
+            universe_codes=code_set,
+            current_prices=quote_rows,
+        )
         trend = calculate_ma_trend_metrics(history_rows, as_of=day, available_at=now, universe_codes=code_set)
-        nhnl = calculate_new_high_low(history_rows, as_of=day, available_at=now, universe_codes=code_set)
+        nhnl = calculate_new_high_low(
+            history_rows,
+            as_of=day,
+            available_at=now,
+            universe_codes=code_set,
+            current_prices=quote_rows,
+        )
         metrics = dict(cross) | ma | trend | nhnl
         metrics["active_ratio"] = (cross.get("return_eligible_count") or 0) / max(cross.get("coherent_count") or 1, 1)
         metrics["market_volatility"] = cross.get("cross_section_return_std")
@@ -531,11 +608,14 @@ class MarketEngine:
         expected = universe.included_count
         received = int(cross.get("coherent_count") or 0)
         coverage = received / expected if expected else 0.0
-        raw_quality = (raw_snapshot or {}).get("quality_status")
-        quality = str(
-            getattr(raw_quality, "value", raw_quality)
-            or ("VALID" if coverage >= 0.98 else "DEGRADED" if coverage >= 0.95 else "MISSING")
-        ).upper()
+        quality = _included_quality(quote_rows, code_set)
+        raw_quality = str(getattr((raw_snapshot or {}).get("quality_status"), "value", (raw_snapshot or {}).get("quality_status") or "")).upper()
+        if raw_quality == "DEGRADED" and quality == "VALID":
+            quality = "DEGRADED"
+        if coverage < 0.95:
+            quality = "MISSING"
+        elif coverage < 0.98 and quality in {"VALID", "DEGRADED"}:
+            quality = "DEGRADED"
 
         previous = self.db.execute(
             select(MarketScoreSnapshot)
@@ -576,10 +656,19 @@ class MarketEngine:
             universe_coverage=coverage * 100,
             quote_freshness=100 if quality in {"VALID", "DEGRADED"} else 0,
             historical_coverage=min(100.0, history_coverage),
-            component_availability=sum(component.available for component in components.values()) / max(len(components), 1) * 100,
+            component_availability=_component_confidence(components),
             provider_quality=100 if quality == "VALID" else 60 if quality == "DEGRADED" else 0,
             conflict_quality=100 if quality != "CONFLICT" else 0,
         )
+        capture_span_seconds = _capture_span_seconds(raw_snapshot, quote_rows)
+        if (
+            capture_span_seconds is not None
+            and capture_span_seconds > SNAPSHOT_CAPTURE_SPAN_FULL_CONFIDENCE_SECONDS
+        ):
+            confidence = round(
+                confidence * SNAPSHOT_CAPTURE_SPAN_FULL_CONFIDENCE_SECONDS / capture_span_seconds,
+                2,
+            )
         score = build_market_score_snapshot(
             components,
             trade_date=day,
@@ -596,7 +685,15 @@ class MarketEngine:
         score_delta = None
         if display_score is not None and previous_display_score is not None:
             score_delta = _round_score(display_score - float(previous_display_score))
-        if persist:
+        china_capture = now.astimezone(CHINA_TZ)
+        median_finalized = (
+            persist
+            and china_capture.date() == day
+            and china_capture.time() >= datetime_time(15, 0)
+            and not score.is_frozen
+            and score.quality_status in {"VALID", "DEGRADED"}
+        )
+        if median_finalized:
             median_row = _upsert_median_index(
                 self.db,
                 trade_date=day,
@@ -624,7 +721,7 @@ class MarketEngine:
                 metric_id = existing_metric.snapshot_id
             metric_row = MarketMetricSnapshot(
                 snapshot_id=metric_id,
-                market_snapshot_id=market_snapshot_id,
+                market_snapshot_id=None,
                 market="CN",
                 trade_date=day,
                 captured_at=now,
@@ -688,6 +785,9 @@ class MarketEngine:
                     "universe": _serial(universe.to_dict()),
                     "core_metrics": _serial(metrics),
                     "score_delta": score_delta,
+                    "capture_span_seconds": capture_span_seconds,
+                    "median_index_preview": median_index,
+                    "median_index_finalized": median_finalized,
                 },
                 calculation_version=MARKET_ENGINE_VERSION,
                 score_config_version=SCORE_CONFIG_VERSION,
@@ -735,6 +835,9 @@ class MarketEngine:
             "positive_drivers": positive,
             "negative_drivers": negative,
             "median_index": median_index,
+            "median_index_preview": median_index,
+            "median_index_finalized": median_finalized,
+            "capture_span_seconds": capture_span_seconds,
             "calculation_version": MARKET_ENGINE_VERSION,
             "score_config_version": SCORE_CONFIG_VERSION,
             "universe_rule_version": UNIVERSE_RULE_VERSION,

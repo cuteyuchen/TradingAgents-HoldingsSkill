@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -20,7 +21,7 @@ os.environ.setdefault("SCHEDULER_ENABLED", "false")
 
 
 def _engine_session_factory():
-    from app.market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
+    from app.market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
     from app.market_models import SecurityMaster, TradingCalendar
 
     engine = create_engine(
@@ -35,6 +36,7 @@ def _engine_session_factory():
         MarketMetricSnapshot,
         MarketScoreSnapshot,
         AllAMedianIndexDaily,
+        DailyBarCache,
     ):
         model.__table__.create(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
@@ -84,7 +86,7 @@ def test_market_engine_api_calculate_and_read_paths(monkeypatch) -> None:
 
     from app.database import get_db
     from app.main import app
-    from app.market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
+    from app.market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
     from pydantic import ValidationError
 
     from app.routers.market_engine_v3 import MarketCalculateRequest
@@ -96,6 +98,31 @@ def test_market_engine_api_calculate_and_read_paths(monkeypatch) -> None:
     captured_at = datetime(2026, 8, 23, 1, 35, tzinfo=UTC)
     with SessionLocal() as db:
         _seed_identity(db, trade_date=trade_date)
+        db.add_all(
+            [
+                DailyBarCache(
+                    market="CN",
+                    exchange="SSE",
+                    code="600519",
+                    trade_date=trade_date - timedelta(days=offset),
+                    close=100 + (65 - offset) * 0.1,
+                    prev_close=100 + (64 - offset) * 0.1,
+                    adjustment="QFQ",
+                    provider="fixture",
+                    fetched_at=captured_at,
+                    available_at=datetime(
+                        (trade_date - timedelta(days=offset)).year,
+                        (trade_date - timedelta(days=offset)).month,
+                        (trade_date - timedelta(days=offset)).day,
+                        7,
+                        tzinfo=UTC,
+                    ),
+                    quality_status="VALID",
+                )
+                for offset in range(65, 0, -1)
+            ]
+        )
+        db.commit()
 
     def fake_snapshot(_db, **_kwargs):
         return {
@@ -127,6 +154,10 @@ def test_market_engine_api_calculate_and_read_paths(monkeypatch) -> None:
         ]
 
     monkeypatch.setattr(market_engine_service, "get_all_a_share_quote_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        "app.routers.market_engine_v3._server_now",
+        lambda: datetime(2026, 8, 23, 9, 35, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
     monkeypatch.setattr(
         "app.market.engine.history.LegacyMarketDataHistoryProvider.get_kline",
         fake_kline,
@@ -185,13 +216,15 @@ def test_market_engine_api_calculate_and_read_paths(monkeypatch) -> None:
 
         median = client.get("/api/v3/market/median-index")
         assert median.status_code == 200
-        assert median.json()[0]["trade_date"] == trade_date.isoformat()
+        # Intraday calculation exposes a preview but does not finalize the
+        # official Daily series before 15:00 CST.
+        assert median.json() == []
 
         preview = client.post(
             "/api/v3/market/calculate",
             json={
                 "trade_date": trade_date.isoformat(),
-                "captured_at": datetime(2026, 8, 23, 2, 35, tzinfo=UTC).isoformat(),
+                "captured_at": captured_at.isoformat(),
                 "persist": False,
             },
         )
@@ -200,7 +233,7 @@ def test_market_engine_api_calculate_and_read_paths(monkeypatch) -> None:
         with SessionLocal() as db:
             assert db.scalar(select(func.count()).select_from(MarketScoreSnapshot)) == 1
             assert db.scalar(select(func.count()).select_from(MarketMetricSnapshot)) == 1
-            assert db.scalar(select(func.count()).select_from(AllAMedianIndexDaily)) == 1
+            assert db.scalar(select(func.count()).select_from(AllAMedianIndexDaily)) == 0
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_current_user, None)

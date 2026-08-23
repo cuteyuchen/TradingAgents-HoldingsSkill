@@ -107,4 +107,41 @@ class AllAMedianIndexDaily(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
-__all__ = ["MarketMetricSnapshot", "MarketScoreSnapshot", "AllAMedianIndexDaily"]
+class DailyBarCache(Base):
+    """Local QFQ daily-bar cache consumed by the Market Engine."""
+
+    __tablename__ = "daily_bar_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "code",
+            "trade_date",
+            "adjustment",
+            name="uq_daily_bar_cache_market_code_day_adjustment",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    market: Mapped[str] = mapped_column(String(16), default="CN", index=True)
+    exchange: Mapped[str | None] = mapped_column(String(8), index=True)
+    code: Mapped[str] = mapped_column(String(6), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    open: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float | None] = mapped_column(Float)
+    prev_close: Mapped[float | None] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    turnover_rate: Mapped[float | None] = mapped_column(Float)
+    adjustment: Mapped[str] = mapped_column(String(8), default="QFQ", index=True)
+    provider: Mapped[str] = mapped_column(String(64), default="")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    quality_status: Mapped[str] = mapped_column(String(24), default="VALID", index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+__all__ = ["MarketMetricSnapshot", "MarketScoreSnapshot", "AllAMedianIndexDaily", "DailyBarCache"]

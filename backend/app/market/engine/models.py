@@ -83,6 +83,7 @@ class ComponentScore:
     quality_status: str = "VALID"
     unavailable_reason: str | None = None
     historical_sample_count: int = 0
+    subcomponent_available_weight: float = 0.0
     confidence: float = 100.0
 
     @property

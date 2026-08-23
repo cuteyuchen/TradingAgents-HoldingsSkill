@@ -187,9 +187,31 @@ def build_quote_snapshot(
 
     provider_counts: dict[str, int] = {}
     provider_endpoints: dict[str, list[str]] = {}
+    provider_fallback_levels: dict[str, int] = {}
+    provider_source_timestamps: dict[str, datetime] = {}
+    provider_quality_statuses: dict[str, str] = {}
+    quality_rank = {
+        DataQualityStatus.VALID: 0,
+        DataQualityStatus.DEGRADED: 1,
+        DataQualityStatus.STALE: 2,
+        DataQualityStatus.MISSING: 3,
+        DataQualityStatus.INVALID: 4,
+        DataQualityStatus.CONFLICT: 5,
+    }
     for quote in received:
         provider_name = str(quote.provider or provider or "unknown").strip().lower() or "unknown"
         provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
+        provider_fallback_levels[provider_name] = max(
+            provider_fallback_levels.get(provider_name, 0),
+            int(quote.fallback_level or 0),
+        )
+        if quote.source_timestamp is not None:
+            current_source = provider_source_timestamps.get(provider_name)
+            if current_source is None or quote.source_timestamp < current_source:
+                provider_source_timestamps[provider_name] = quote.source_timestamp
+        current_quality = provider_quality_statuses.get(provider_name)
+        if current_quality is None or quality_rank[quote.quality_status] > quality_rank[DataQualityStatus(current_quality)]:
+            provider_quality_statuses[provider_name] = quote.quality_status.value
         if quote.raw_reference:
             endpoints = provider_endpoints.setdefault(provider_name, [])
             if quote.raw_reference not in endpoints:
@@ -230,6 +252,12 @@ def build_quote_snapshot(
             "requested_route": requested_route,
             "provider_counts": provider_counts,
             "provider_endpoints": attempted_endpoints,
+            "provider_fallback_levels": provider_fallback_levels,
+            "provider_source_timestamps": {
+                name: timestamp.isoformat()
+                for name, timestamp in provider_source_timestamps.items()
+            },
+            "provider_quality_statuses": provider_quality_statuses,
         }
     )
     actual_trade_date = trade_date or next((quote.trade_date for quote in received if quote.trade_date), None)

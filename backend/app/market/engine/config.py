@@ -4,9 +4,9 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Mapping
 
-MARKET_ENGINE_VERSION = "market-engine-v1"
+MARKET_ENGINE_VERSION = "market-engine-v1.1"
 UNIVERSE_RULE_VERSION = "market-universe-v1"
-SCORE_CONFIG_VERSION = "market-score-config-v1"
+SCORE_CONFIG_VERSION = "market-score-config-v1.1"
 
 COMPONENT_WEIGHTS: Mapping[str, float] = MappingProxyType(
     {
@@ -90,12 +90,17 @@ MA_WINDOWS = (5, 10, 20, 60, 120, 250)
 NEW_HIGH_LOW_WINDOWS = (20, 60, 120, 250)
 PERCENTILE_LOOKBACK_DAYS = MappingProxyType({"1y": 250, "3y": 750, "5y": 1250})
 PERCENTILE_MIN_SAMPLES = 60
+SNAPSHOT_CAPTURE_SPAN_FULL_CONFIDENCE_SECONDS = 30.0
 
 # Ratios: >=98% valid, >=95% degraded, <95% frozen.
 COVERAGE_THRESHOLDS: Mapping[str, float] = MappingProxyType(
     {"valid": 0.98, "degraded": 0.95}
 )
-MIN_COMPONENT_WEIGHT_COVERAGE = 0.80
+# Missing components are omitted and their peers are reweighted.  A score is
+# still meaningful when at least half of the configured component weight is
+# available; confidence carries the remaining uncertainty.
+MIN_COMPONENT_WEIGHT_COVERAGE = 0.50
+MIN_SUBCOMPONENT_WEIGHT_COVERAGE = 0.50
 SMOOTHING_ALPHA = 0.70
 
 REGIME_ORDER = (

@@ -10,6 +10,7 @@ from .config import (
     CROWDING_WEIGHTS,
     DIFFUSION_WEIGHTS,
     LIQUIDITY_WEIGHTS,
+    PERCENTILE_MIN_SAMPLES,
     PROFITABILITY_WEIGHTS,
     TAIL_RISK_WEIGHTS,
     TREND_WEIGHTS,
@@ -51,14 +52,27 @@ def _history_score(
     value: Any,
     history: Mapping[str, Iterable[float | int | None]] | None,
     *,
+    component_metric: str | None = None,
     inverse: bool = False,
     fallback: float | None = None,
+    audit: dict[str, dict[str, Any]] | None = None,
 ) -> float | None:
-    samples = list((history or {}).get(metric_name, []))
-    if samples:
-        percentile = historical_percentile(value, samples)
-        if percentile is not None:
-            return normalize_percentile(percentile, direction="inverse" if inverse else "positive")
+    samples = [sample for sample in (history or {}).get(metric_name, []) if _number(sample) is not None]
+    percentile = historical_percentile(
+        value,
+        samples,
+        min_samples=PERCENTILE_MIN_SAMPLES,
+    )
+    if audit is not None:
+        audit[metric_name] = {
+            "component_metric": component_metric or metric_name,
+            "sample_count": len(samples),
+            "minimum_samples": PERCENTILE_MIN_SAMPLES,
+            "used_historical_percentile": percentile is not None,
+            "used_fallback": percentile is None and fallback is not None,
+        }
+    if percentile is not None:
+        return normalize_percentile(percentile, direction="inverse" if inverse else "positive")
     return fallback
 
 
@@ -67,9 +81,43 @@ def _finish(
     raw_metrics: Mapping[str, Any],
     normalized: Mapping[str, float | None],
     weights: Mapping[str, float],
+    historical_audit: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> ComponentScore:
     result = score_subcomponents(normalized, weights, name=name)
     result.raw_metrics = dict(raw_metrics)
+    audit = dict(historical_audit or {})
+    if audit:
+        result.raw_metrics["historical_scoring"] = audit
+        result.historical_sample_count = max(
+            (int(item.get("sample_count") or 0) for item in audit.values()),
+            default=0,
+        )
+        confidence_weight = 0.0
+        available_weight = 0.0
+        for metric_name, weight in weights.items():
+            if normalized.get(metric_name) is None:
+                continue
+            available_weight += weight
+            history_detail = audit.get(metric_name)
+            if history_detail is None:
+                history_detail = next(
+                    (
+                        detail
+                        for detail in audit.values()
+                        if detail.get("component_metric") == metric_name
+                    ),
+                    None,
+                )
+            if history_detail is None:
+                confidence_weight += weight
+                continue
+            sample_count = int(history_detail.get("sample_count") or 0)
+            confidence_weight += weight * min(1.0, sample_count / PERCENTILE_MIN_SAMPLES)
+        if available_weight > 0:
+            result.confidence = round(
+                min(result.confidence, confidence_weight / available_weight * 100.0),
+                2,
+            )
     return result
 
 
@@ -77,6 +125,7 @@ def calculate_breadth_component(
     metrics: Mapping[str, Any],
     history: Mapping[str, Iterable[float | int | None]] | None = None,
 ) -> ComponentScore:
+    audit: dict[str, dict[str, Any]] = {}
     median_return = metrics.get("all_a_median_return", metrics.get("median_return"))
     median_fallback = _linear_score(median_return, lower=-0.03, upper=0.03)
     high_ratio = _number(metrics.get("new_high_60_ratio"))
@@ -87,20 +136,26 @@ def calculate_breadth_component(
         nhnl = 50.0 if total == 0 else _clamp(high_ratio / total * 100.0)
     normalized = {
         "median_return": _history_score(
-            "all_a_median_return", median_return, history, fallback=median_fallback
+            "all_a_median_return",
+            median_return,
+            history,
+            component_metric="median_return",
+            fallback=median_fallback,
+            audit=audit,
         ),
         "advancing_ratio": _ratio_score(metrics.get("advance_ratio")),
         "above_ma20": _ratio_score(metrics.get("above_ma20_ratio")),
         "above_ma60": _ratio_score(metrics.get("above_ma60_ratio")),
         "nhnl60": nhnl,
     }
-    return _finish("breadth", metrics, normalized, BREADTH_WEIGHTS)
+    return _finish("breadth", metrics, normalized, BREADTH_WEIGHTS, audit)
 
 
 def calculate_trend_component(
     metrics: Mapping[str, Any],
     history: Mapping[str, Iterable[float | int | None]] | None = None,
 ) -> ComponentScore:
+    audit: dict[str, dict[str, Any]] = {}
     median_trend = _number(metrics.get("median_index_trend_score"))
     if median_trend is None:
         median_return_20 = metrics.get("median_index_return_20")
@@ -108,7 +163,9 @@ def calculate_trend_component(
             "median_index_return_20",
             median_return_20,
             history,
+            component_metric="median_index_trend",
             fallback=_linear_score(median_return_20, lower=-0.10, upper=0.10),
+            audit=audit,
         )
     index_confirmation = metrics.get("index_confirmation_score")
     if _number(index_confirmation) is None:
@@ -120,35 +177,45 @@ def calculate_trend_component(
         "median_index_trend": _number(median_trend),
         "index_confirmation": _number(index_confirmation),
     }
-    return _finish("trend", metrics, normalized, TREND_WEIGHTS)
+    return _finish("trend", metrics, normalized, TREND_WEIGHTS, audit)
 
 
 def calculate_liquidity_component(
     metrics: Mapping[str, Any],
     history: Mapping[str, Iterable[float | int | None]] | None = None,
 ) -> ComponentScore:
+    audit: dict[str, dict[str, Any]] = {}
     same_time = metrics.get("same_time_amount_ratio", metrics.get("same_time_turnover_ratio"))
     projected = metrics.get("projected_full_day_amount_ratio")
     normalized = {
         "same_time_amount": _history_score(
-            "same_time_amount_ratio", same_time, history, fallback=_linear_score(same_time, lower=0.0, upper=2.0)
+            "same_time_amount_ratio", same_time, history,
+            component_metric="same_time_amount",
+            fallback=_linear_score(same_time, lower=0.0, upper=2.0), audit=audit
         ),
         "projected_amount": _history_score(
-            "projected_full_day_amount_ratio", projected, history, fallback=_linear_score(projected, lower=0.0, upper=2.0)
+            "projected_full_day_amount_ratio", projected, history,
+            component_metric="projected_amount",
+            fallback=_linear_score(projected, lower=0.0, upper=2.0), audit=audit
         ),
-        "median_amount": _history_score("median_amount", metrics.get("median_amount"), history),
+        "median_amount": _history_score("median_amount", metrics.get("median_amount"), history, audit=audit),
         "median_turnover": _history_score(
-            "median_turnover_rate", metrics.get("median_turnover_rate"), history
+            "median_turnover_rate",
+            metrics.get("median_turnover_rate"),
+            history,
+            component_metric="median_turnover",
+            audit=audit,
         ),
         "active_ratio": _ratio_score(metrics.get("active_ratio")),
     }
-    return _finish("liquidity", metrics, normalized, LIQUIDITY_WEIGHTS)
+    return _finish("liquidity", metrics, normalized, LIQUIDITY_WEIGHTS, audit)
 
 
 def calculate_profitability_component(
     metrics: Mapping[str, Any],
     history: Mapping[str, Iterable[float | int | None]] | None = None,
 ) -> ComponentScore:
+    audit: dict[str, dict[str, Any]] = {}
     median_return = metrics.get("all_a_median_return", metrics.get("median_return"))
     up = _number(metrics.get("limit_up_ratio"))
     down = _number(metrics.get("limit_down_ratio"))
@@ -161,7 +228,9 @@ def calculate_profitability_component(
             "all_a_median_return",
             median_return,
             history,
+            component_metric="median_return",
             fallback=_linear_score(median_return, lower=-0.03, upper=0.03),
+            audit=audit,
         ),
         "return_gt_3": _ratio_score(metrics.get("return_gt_3_ratio")),
         "return_lt_minus_3": _ratio_score(metrics.get("return_lt_minus3_ratio"), inverse=True),
@@ -171,7 +240,7 @@ def calculate_profitability_component(
             metrics.get("large_loss_ratio", metrics.get("return_lt_minus5_ratio")), inverse=True
         ),
     }
-    return _finish("profitability", metrics, normalized, PROFITABILITY_WEIGHTS)
+    return _finish("profitability", metrics, normalized, PROFITABILITY_WEIGHTS, audit)
 
 
 def calculate_diffusion_component(
@@ -192,6 +261,7 @@ def calculate_diffusion_component(
     if strong_ratio is None:
         strong_count = _number(metrics.get("strong_industry_count"))
         strong_ratio = strong_count / industry_count if strong_count is not None else None
+    audit: dict[str, dict[str, Any]] = {}
     normalized = {
         "up_industry_ratio": _ratio_score(metrics.get("up_industry_ratio")),
         "median_industry_return": _history_score(
@@ -199,23 +269,27 @@ def calculate_diffusion_component(
             metrics.get("median_industry_return"),
             history,
             fallback=_linear_score(metrics.get("median_industry_return"), lower=-0.03, upper=0.03),
+            audit=audit,
         ),
         "strong_industry_count": _ratio_score(strong_ratio),
         "industry_dispersion": _history_score(
             "industry_return_dispersion",
             metrics.get("industry_return_dispersion"),
             history,
+            component_metric="industry_dispersion",
             inverse=True,
+            audit=audit,
         ),
         "large_small_sync": _ratio_score(metrics.get("large_small_sync_ratio")),
     }
-    return _finish("diffusion", metrics, normalized, DIFFUSION_WEIGHTS)
+    return _finish("diffusion", metrics, normalized, DIFFUSION_WEIGHTS, audit)
 
 
 def calculate_crowding_component(
     metrics: Mapping[str, Any],
     history: Mapping[str, Iterable[float | int | None]] | None = None,
 ) -> ComponentScore:
+    audit: dict[str, dict[str, Any]] = {}
     normalized: dict[str, float | None] = {}
     for level in (1, 3, 5, 10, 20):
         metric_name = f"top{level}_concentration"
@@ -224,11 +298,13 @@ def calculate_crowding_component(
             metric_name,
             value,
             history,
+            component_metric=f"top{level}",
             inverse=True,
             fallback=_linear_score(value, lower=0.0, upper=0.80, inverse=True),
+            audit=audit,
         )
 
-    interaction_score = 100.0
+    interaction_score: float | None = None
     concentration_change = _number(metrics.get("top5_concentration_change"))
     advance_change = _number(metrics.get("advance_ratio_change"))
     median_change = _number(metrics.get("median_return_change"))
@@ -240,48 +316,68 @@ def calculate_crowding_component(
         and advance_change <= -CROWDING_INTERACTION["advance_ratio_drop_threshold"]
         and median_change <= -CROWDING_INTERACTION["median_return_drop_threshold"]
     ):
-        interaction_score -= CROWDING_INTERACTION["deterioration_penalty"]
+        interaction_score = 100.0 - CROWDING_INTERACTION["deterioration_penalty"]
+    # Relief is an interaction score too: without a complete prior-period
+    # comparison we cannot assert that the market is becoming healthier.
+    # Missing change data must therefore remain unavailable, never a free 100.
     if (
-        (_number(metrics.get("advance_ratio")) or 0.0) >= CROWDING_INTERACTION["healthy_breadth_ratio"]
+        concentration_change is not None
+        and advance_change is not None
+        and median_change is not None
+        and (_number(metrics.get("advance_ratio")) or 0.0) >= CROWDING_INTERACTION["healthy_breadth_ratio"]
         and (_number(metrics.get("all_a_median_return")) or 0.0) > 0
         and (_number(metrics.get("diffusion_score")) or 0.0) >= CROWDING_INTERACTION["healthy_diffusion_score"]
     ):
-        interaction_score += CROWDING_INTERACTION["healthy_relief"]
-    normalized["interaction"] = _clamp(interaction_score)
-    return _finish("crowding", metrics, normalized, CROWDING_WEIGHTS)
+        interaction_score = min(
+            100.0,
+            (interaction_score if interaction_score is not None else 90.0)
+            + CROWDING_INTERACTION["healthy_relief"],
+        )
+    normalized["interaction"] = _clamp(interaction_score) if interaction_score is not None else None
+    return _finish("crowding", metrics, normalized, CROWDING_WEIGHTS, audit)
 
 
 def calculate_tail_risk_component(
     metrics: Mapping[str, Any],
     history: Mapping[str, Iterable[float | int | None]] | None = None,
 ) -> ComponentScore:
+    audit: dict[str, dict[str, Any]] = {}
     index_return = _number(metrics.get("major_index_return"))
     index_decline = max(0.0, -index_return) if index_return is not None else None
     normalized = {
         "limit_down_ratio": _history_score(
             "limit_down_ratio", metrics.get("limit_down_ratio"), history, inverse=True,
             fallback=_ratio_score(metrics.get("limit_down_ratio"), inverse=True),
+            audit=audit,
         ),
         "return_lt_minus_5": _history_score(
             "return_lt_minus5_ratio", metrics.get("return_lt_minus5_ratio"), history, inverse=True,
+            component_metric="return_lt_minus_5",
             fallback=_ratio_score(metrics.get("return_lt_minus5_ratio"), inverse=True),
+            audit=audit,
         ),
         "dispersion": _history_score(
-            "cross_section_return_iqr", metrics.get("cross_section_return_iqr"), history, inverse=True
+            "cross_section_return_iqr", metrics.get("cross_section_return_iqr"), history,
+            component_metric="dispersion", inverse=True, audit=audit
         ),
         "volatility": _history_score(
-            "market_volatility", metrics.get("market_volatility"), history, inverse=True
+            "market_volatility", metrics.get("market_volatility"), history,
+            component_metric="volatility", inverse=True, audit=audit
         ),
         "new_low_surge": _history_score(
             "new_low_60_ratio", metrics.get("new_low_60_ratio"), history, inverse=True,
+            component_metric="new_low_surge",
             fallback=_ratio_score(metrics.get("new_low_60_ratio"), inverse=True),
+            audit=audit,
         ),
         "index_decline": _history_score(
             "major_index_decline", index_decline, history, inverse=True,
+            component_metric="index_decline",
             fallback=_linear_score(index_decline, lower=0.0, upper=0.05, inverse=True),
+            audit=audit,
         ),
     }
-    result = _finish("tail_risk", metrics, normalized, TAIL_RISK_WEIGHTS)
+    result = _finish("tail_risk", metrics, normalized, TAIL_RISK_WEIGHTS, audit)
     result.raw_metrics["tail_risk_features_available"] = [
         name for name, value in normalized.items() if value is not None
     ]

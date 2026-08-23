@@ -17,7 +17,10 @@ from app.market.engine import (
     apply_regime_hysteresis,
     build_market_score_universe,
     build_market_score_snapshot,
+    calculate_breadth_component,
+    calculate_crowding_component,
     calculate_cross_section_metrics,
+    calculate_liquidity_component,
     calculate_ma_breadth,
     calculate_median_index,
     calculate_new_high_low,
@@ -49,6 +52,121 @@ def _bar(code: str, day: date, close: float, *, prev_close: float | None = None,
         "quality_status": "VALID",
         **extra,
     }
+
+
+def test_component_percentile_requires_sixty_daily_samples() -> None:
+    metrics = {
+        "all_a_median_return": 0.0105,
+        "advance_ratio": 0.55,
+        "above_ma20_ratio": 0.55,
+        "above_ma60_ratio": 0.50,
+        "new_high_60_ratio": 0.04,
+        "new_low_60_ratio": 0.02,
+    }
+    samples = [-0.03 + index * 0.001 for index in range(60)]
+
+    insufficient = calculate_breadth_component(
+        metrics,
+        {"all_a_median_return": samples[:59]},
+    )
+    ready = calculate_breadth_component(
+        metrics,
+        {"all_a_median_return": samples},
+    )
+
+    insufficient_audit = insufficient.raw_metrics["historical_scoring"]["all_a_median_return"]
+    ready_audit = ready.raw_metrics["historical_scoring"]["all_a_median_return"]
+    assert insufficient_audit["used_historical_percentile"] is False
+    assert insufficient_audit["used_fallback"] is True
+    assert insufficient.confidence < ready.confidence
+    assert ready_audit["used_historical_percentile"] is True
+    assert ready.normalized_metrics["median_return"] == pytest.approx(41 / 60 * 100)
+
+
+def test_liquidity_active_ratio_alone_is_not_a_full_component() -> None:
+    component = calculate_liquidity_component({"active_ratio": 1.0})
+    assert component.available is False
+    assert component.score is None
+    assert component.subcomponent_available_weight == pytest.approx(0.10)
+    assert component.unavailable_reason == "insufficient_subcomponent_coverage"
+
+
+def test_crowding_interaction_is_unavailable_without_change_metrics() -> None:
+    component = calculate_crowding_component(
+        {
+            "top1_concentration": 0.10,
+            "top3_concentration": 0.20,
+            "top5_concentration": 0.30,
+            "top10_concentration": 0.40,
+            "top20_concentration": 0.50,
+        }
+    )
+    assert component.normalized_metrics["interaction"] is None
+    assert component.subcomponent_available_weight == pytest.approx(0.90)
+
+
+def test_intraday_ma_and_new_high_low_use_live_price() -> None:
+    day = date(2026, 8, 23)
+    history = [_bar("600519", day - timedelta(days=offset), 100.0) for offset in range(20, 0, -1)]
+
+    strong_ma = calculate_ma_breadth(
+        history,
+        as_of=day,
+        universe_codes=["600519"],
+        windows=[20],
+        current_prices={"600519": 110.0},
+    )
+    weak_ma = calculate_ma_breadth(
+        history,
+        as_of=day,
+        universe_codes=["600519"],
+        windows=[20],
+        current_prices={"600519": 90.0},
+    )
+    strong_nhnl = calculate_new_high_low(
+        history,
+        as_of=day,
+        universe_codes=["600519"],
+        windows=[20],
+        current_prices={"600519": 110.0},
+    )
+    weak_nhnl = calculate_new_high_low(
+        history,
+        as_of=day,
+        universe_codes=["600519"],
+        windows=[20],
+        current_prices={"600519": 90.0},
+    )
+
+    assert strong_ma["above_ma20_count"] == 1
+    assert weak_ma["above_ma20_count"] == 0
+    assert strong_nhnl["new_high_20_count"] == 1
+    assert weak_nhnl["new_low_20_count"] == 1
+
+
+def test_limit_counts_use_rounded_theoretical_price() -> None:
+    metrics = calculate_cross_section_metrics(
+        [
+            {
+                "code": "600519",
+                "price": 1.10,
+                "prev_close": 1.00,
+                # A percentage-only tolerance would also classify 1.09 as a
+                # limit-up, but the exchange price is exactly 1.10.
+                "pct_change": 9.0,
+                "quality_status": "VALID",
+            },
+            {
+                "code": "600520",
+                "price": 1.09,
+                "prev_close": 1.00,
+                "pct_change": 9.9,
+                "quality_status": "VALID",
+            },
+        ],
+        universe_codes=["600519", "600520"],
+    )
+    assert metrics["limit_up_count"] == 1
 
 
 def test_market_score_universe_exclusions_are_auditable() -> None:

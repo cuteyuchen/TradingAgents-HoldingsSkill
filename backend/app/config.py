@@ -105,6 +105,7 @@ class Settings:
     # explicit feature flag and a separate operator token.  JWT login alone is
     # intentionally insufficient for these writes.
     MARKET_IDENTITY_SYNC_TOKEN: str = os.getenv("MARKET_IDENTITY_SYNC_TOKEN", "").strip()
+    DAILY_BAR_SYNC_ENABLED: bool = _bool_env("DAILY_BAR_SYNC_ENABLED", "false")
 
     # Server.
     HOST: str = os.getenv("ADVISOR_HOST", "0.0.0.0")

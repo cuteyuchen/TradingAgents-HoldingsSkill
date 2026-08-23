@@ -63,3 +63,19 @@ def require_market_identity_sync(
     if not configured or not presented or not secrets.compare_digest(presented, configured):
         raise HTTPException(status_code=403, detail="market_identity_sync_forbidden")
     return current_user
+
+
+def require_daily_bar_sync(
+    current_user: User = Depends(get_current_user),
+    sync_token: str | None = Header(default=None, alias="X-Market-Identity-Sync-Token"),
+    internal_token: str | None = Header(default=None, alias="X-Internal-Sync-Token"),
+) -> User:
+    """Protect the long-running, global daily-bar cache bootstrap."""
+
+    if not settings.DAILY_BAR_SYNC_ENABLED:
+        raise HTTPException(status_code=403, detail="daily_bar_sync_disabled")
+    configured = settings.MARKET_IDENTITY_SYNC_TOKEN
+    presented = sync_token or internal_token
+    if not configured or not presented or not secrets.compare_digest(presented, configured):
+        raise HTTPException(status_code=403, detail="daily_bar_sync_forbidden")
+    return current_user

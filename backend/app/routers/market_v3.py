@@ -1,7 +1,7 @@
 """Small authenticated V3 market-data foundation endpoints."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -127,7 +127,34 @@ def _rows_from_sync_payload(payload: SecuritySyncRequest | CalendarSyncRequest |
     return payload.rows, normalize_market(payload.market), payload.source
 
 
-def _metadata_payload(row: MarketSnapshot) -> dict[str, Any]:
+def _utc(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _metadata_payload(row: MarketSnapshot, *, now: datetime | None = None) -> dict[str, Any]:
+    metadata = row.metadata_json or {}
+    source_times = [
+        parsed
+        for value in (metadata.get("provider_source_timestamps") or {}).values()
+        if (parsed := _utc(value)) is not None
+    ]
+    reference = min(source_times) if source_times else _utc(row.completed_at)
+    current = _utc(now) or datetime.now(UTC)
+    freshness_seconds = max(0.0, (current - reference).total_seconds()) if reference else None
+    quality_status = row.quality_status
+    if (
+        quality_status in {"VALID", "DEGRADED"}
+        and freshness_seconds is not None
+        and freshness_seconds > settings.QUOTE_FRESHNESS_SECONDS
+    ):
+        quality_status = "STALE"
     return {
         "snapshot_id": row.snapshot_id,
         "snapshot_key": row.snapshot_key,
@@ -140,9 +167,10 @@ def _metadata_payload(row: MarketSnapshot) -> dict[str, Any]:
         "expected_count": row.expected_count,
         "received_count": row.received_count,
         "coverage_ratio": row.coverage_ratio,
-        "quality_status": row.quality_status,
+        "quality_status": quality_status,
+        "freshness_seconds": freshness_seconds,
         "errors": row.errors_json or [],
-        "metadata": row.metadata_json or {},
+        "metadata": metadata,
         "quotes": [],
     }
 
