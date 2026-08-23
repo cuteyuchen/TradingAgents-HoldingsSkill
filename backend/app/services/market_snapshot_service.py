@@ -21,7 +21,10 @@ from ..market.providers.factory import (
     build_critical_quote_provider,
     create_quote_provider,
 )
-from ..market.providers.health import runtime_provider_health_snapshot
+from ..market.providers.health import (
+    get_runtime_provider_health_registry,
+    runtime_provider_health_snapshot,
+)
 from ..market_runtime_models import MarketSnapshot, ProviderHealth, SourceLineage
 from .security_master import get_market_universe
 
@@ -425,6 +428,38 @@ def sync_runtime_provider_health(
         persisted.append(row)
     db.flush()
     return persisted
+
+
+def hydrate_runtime_provider_health(db: Session) -> list[dict[str, object]]:
+    """Restore durable ProviderHealth rows into a newly started process.
+
+    The runtime registry is deliberately in-memory for hot-path Provider
+    calls, while the database remains the restart-safe source of the last
+    observed state.  Hydration happens once during application startup; later
+    request-boundary projections always flow from runtime to storage.
+    """
+
+    rows = db.query(ProviderHealth).all()
+    return [
+        state.to_dict()
+        for state in get_runtime_provider_health_registry().hydrate(
+            (
+                {
+                    "provider_name": row.provider_name,
+                    "data_type": row.data_type,
+                    "status": row.status,
+                    "success_count": row.success_count,
+                    "failure_count": row.failure_count,
+                    "consecutive_failures": row.consecutive_failures,
+                    "last_success_at": row.last_success_at,
+                    "last_failure_at": row.last_failure_at,
+                    "last_error": row.last_error,
+                    "last_latency_ms": row.last_latency_ms,
+                }
+                for row in rows
+            )
+        )
+    ]
 
 
 def record_provider_success(db: Session, provider_name: str, data_type: str, *, latency_ms: float | None = None) -> ProviderHealth:

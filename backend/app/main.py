@@ -17,6 +17,10 @@ from .services.market_identity_sync import (
     initialize_local_market_identity,
     start_remote_market_identity_sync,
 )
+from .services.market_snapshot_service import (
+    hydrate_runtime_provider_health,
+    sync_runtime_provider_health,
+)
 from .services.scheduler import start_scheduler, stop_scheduler
 from .services.skill_runtime import runtime_metadata, runtime_prompt
 
@@ -28,6 +32,14 @@ logger = logging.getLogger("advisor")
 async def lifespan(app: FastAPI):
     """Initialize storage, the versioned Skill runtime, and the scheduler."""
     init_db()
+    # Prevent a process restart from forgetting an already-open provider
+    # circuit while the durable health table still reports it as blocked.
+    with SessionLocal() as db:
+        restored_provider_health = hydrate_runtime_provider_health(db)
+        sync_runtime_provider_health(db)
+        db.commit()
+    if restored_provider_health:
+        logger.info("Restored %s provider health states", len(restored_provider_health))
     token = auth.ensure_token()
     logger.info("Legacy ADVISOR_TOKEN in use: %s", token[:12] + "...")
     if settings.APP_SECRET_KEY == "dev-only-change-me":

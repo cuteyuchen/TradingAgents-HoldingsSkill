@@ -415,10 +415,11 @@ def test_tencent_uses_bounded_batches_for_large_universe():
         calls.append(url)
         return Response()
 
-    codes = [f"{100000 + index:06d}" for index in range(1001)]
+    codes = [f"{100000 + index:06d}" for index in range(5001)]
     provider = TencentQuoteProvider(request=request, batch_size=400)
     result = provider.get_quotes(codes)
-    assert len(calls) == 3
+    assert len(calls) == 13
+    assert len(calls) < len(codes)
     assert max(map(len, calls)) < 5000
     assert len(result) == len(codes)
 

@@ -6,7 +6,8 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND_DIR)
@@ -14,10 +15,12 @@ sys.path.insert(0, BACKEND_DIR)
 from app.market.models import DataQualityStatus, NormalizedQuote
 from app.market.providers import (
     FallbackQuoteProvider,
+    HealthTrackedQuoteProvider,
     InMemoryQuoteProvider,
     reset_runtime_provider_health_registry,
 )
-from app.market.providers.base import build_quote_snapshot
+from app.market.providers.base import QuoteProvider, build_quote_snapshot
+from app.market.providers.health import ProviderHealthTracker
 from app.market.providers.identity import EastmoneySecurityProvider
 from app.market_models import SecurityMaster
 from app.market_runtime_models import MarketSnapshot, ProviderHealth, SourceLineage
@@ -30,6 +33,19 @@ def _runtime_session() -> Session:
     ProviderHealth.__table__.create(engine)
     SourceLineage.__table__.create(engine)
     return Session(engine)
+
+
+def _http_runtime_session_factory():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        future=True,
+    )
+    MarketSnapshot.__table__.create(engine)
+    ProviderHealth.__table__.create(engine)
+    SourceLineage.__table__.create(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def _security_session() -> Session:
@@ -242,6 +258,268 @@ def test_runtime_health_circuit_state_is_persisted_and_recovers_after_cooldown()
     finally:
         db.close()
         reset_runtime_provider_health_registry()
+
+
+def test_runtime_health_hydrates_open_circuit_after_process_restart():
+    from app.services.market_snapshot_service import hydrate_runtime_provider_health
+
+    clock = [100.0]
+    db = _runtime_session()
+    try:
+        persisted_failure_at = datetime.now(UTC) - timedelta(seconds=3)
+        db.add(
+            ProviderHealth(
+                provider_name="eastmoney_batch",
+                data_type="quote",
+                status="CIRCUIT_OPEN",
+                success_count=4,
+                failure_count=7,
+                consecutive_failures=3,
+                last_failure_at=persisted_failure_at,
+                last_error="timeout",
+                last_latency_ms=51.0,
+            )
+        )
+        db.commit()
+
+        registry = reset_runtime_provider_health_registry(
+            failure_threshold=3,
+            cooldown_seconds=10,
+            clock=lambda: clock[0],
+        )
+        restored = hydrate_runtime_provider_health(db)
+
+        assert restored[0]["provider_name"] == "eastmoney_batch"
+        state = registry.get("eastmoney_batch")
+        assert state.status.value == "CIRCUIT_OPEN"
+        assert state.failure_count == 7
+        assert state.success_count == 4
+        assert state.last_error == "timeout"
+        assert registry.allow("eastmoney_batch") is False
+
+        clock[0] = 108.0
+        assert registry.get("eastmoney_batch").status.value == "RECOVERING"
+        assert registry.allow("eastmoney_batch") is True
+    finally:
+        db.close()
+        reset_runtime_provider_health_registry()
+
+
+def test_runtime_health_hydration_projects_expired_cooldown_as_recovering():
+    from app.services.market_snapshot_service import (
+        hydrate_runtime_provider_health,
+        sync_runtime_provider_health,
+    )
+
+    db = _runtime_session()
+    try:
+        db.add(
+            ProviderHealth(
+                provider_name="tencent",
+                data_type="quote",
+                status="CIRCUIT_OPEN",
+                failure_count=3,
+                consecutive_failures=3,
+                last_failure_at=datetime.now(UTC) - timedelta(seconds=30),
+                last_error="timeout",
+            )
+        )
+        db.commit()
+
+        registry = reset_runtime_provider_health_registry(
+            failure_threshold=3,
+            cooldown_seconds=10,
+        )
+        hydrate_runtime_provider_health(db)
+        sync_runtime_provider_health(db)
+        db.commit()
+
+        assert registry.get("tencent").status.value == "RECOVERING"
+        persisted = db.query(ProviderHealth).filter_by(provider_name="tencent").one()
+        assert persisted.status == "RECOVERING"
+        assert persisted.failure_count == 3
+        assert persisted.consecutive_failures == 3
+    finally:
+        db.close()
+        reset_runtime_provider_health_registry()
+
+
+def test_snapshot_http_requests_share_circuit_state_and_persist_recovery(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    from app.main import app
+    from app.services import market_snapshot_service
+    from app.v2_dependencies import get_current_user
+
+    clock = [0.0]
+    registry = reset_runtime_provider_health_registry(
+        failure_threshold=3,
+        cooldown_seconds=10,
+        clock=lambda: clock[0],
+    )
+    SessionLocal = _http_runtime_session_factory()
+    upstream_calls = {"count": 0}
+    should_fail = {"value": True}
+
+    class StatefulTencent(QuoteProvider):
+        name = "tencent"
+        endpoint = "https://qt.gtimg.cn/q"
+
+        def get_quotes(self, codes):
+            upstream_calls["count"] += 1
+            if should_fail["value"]:
+                raise RuntimeError("upstream timeout")
+            return {code: _fresh_quote(code, provider=self.name) for code in codes}
+
+    def build_tencent(_name, **_kwargs):
+        return HealthTrackedQuoteProvider(StatefulTencent(), health=registry)
+
+    def override_db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    monkeypatch.setattr(market_snapshot_service, "create_quote_provider", build_tencent)
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: object()
+    client = TestClient(app)
+    try:
+        for _ in range(3):
+            response = client.post(
+                "/api/v3/market/quotes/snapshot",
+                json={"codes": ["600519"], "provider": "tencent", "persist": False},
+            )
+            assert response.status_code == 201, response.text
+        assert upstream_calls["count"] == 3
+
+        health = client.get(
+            "/api/v3/market/providers/health",
+            params={"provider": "tencent", "data_type": "quote"},
+        )
+        assert health.status_code == 200, health.text
+        assert health.json()[0]["status"] == "CIRCUIT_OPEN"
+        assert health.json()[0]["failure_count"] == 3
+
+        blocked = client.post(
+            "/api/v3/market/quotes/snapshot",
+            json={"codes": ["600519"], "provider": "tencent", "persist": False},
+        )
+        assert blocked.status_code == 201, blocked.text
+        assert upstream_calls["count"] == 3
+
+        clock[0] = 11.0
+        recovering = client.get(
+            "/api/v3/market/providers/health",
+            params={"provider": "tencent", "data_type": "quote"},
+        )
+        assert recovering.status_code == 200, recovering.text
+        assert recovering.json()[0]["status"] == "RECOVERING"
+
+        should_fail["value"] = False
+        recovered = client.post(
+            "/api/v3/market/quotes/snapshot",
+            json={"codes": ["600519"], "provider": "tencent", "persist": False},
+        )
+        assert recovered.status_code == 201, recovered.text
+        assert recovered.json()["received_count"] == 1
+        assert upstream_calls["count"] == 4
+
+        healthy = client.get(
+            "/api/v3/market/providers/health",
+            params={"provider": "tencent", "data_type": "quote"},
+        )
+        assert healthy.json()[0]["status"] == "HEALTHY"
+        assert healthy.json()[0]["success_count"] == 1
+        assert healthy.json()[0]["consecutive_failures"] == 0
+
+        with SessionLocal() as db:
+            row = db.query(ProviderHealth).filter_by(provider_name="tencent", data_type="quote").one()
+            assert row.status == "HEALTHY"
+            assert row.failure_count == 3
+            assert row.success_count == 1
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
+        reset_runtime_provider_health_registry()
+
+
+def test_partial_primary_fallback_persists_real_provider_contributions(monkeypatch):
+    from app.services import market_snapshot_service
+    from app.services.market_snapshot_service import build_quote_snapshot, persist_snapshot
+
+    codes = ["600519", "000001", *[f"300{index:03d}" for index in range(20)]]
+    primary_codes = set(codes[:2])
+
+    class PartialEastmoney(QuoteProvider):
+        name = "eastmoney_batch"
+        endpoint = "https://push2.eastmoney.com/api/qt/clist/get"
+
+        def get_quotes(self, requested):
+            return {
+                code: (
+                    _fresh_quote(code, provider=self.name, raw_reference=self.endpoint)
+                    if code in primary_codes
+                    else NormalizedQuote(
+                        code=code,
+                        provider=self.name,
+                        fetched_at=datetime.now(UTC),
+                        quality_status=DataQualityStatus.MISSING,
+                        raw_reference=self.endpoint,
+                        errors=["primary_partial_missing"],
+                    )
+                )
+                for code in requested
+            }
+
+    class TencentRemainder(QuoteProvider):
+        name = "tencent"
+        endpoint = "https://qt.gtimg.cn/q"
+
+        def get_quotes(self, requested):
+            return {
+                code: _fresh_quote(
+                    code,
+                    provider=self.name,
+                    raw_reference=self.endpoint,
+                )
+                for code in requested
+            }
+
+    chain = FallbackQuoteProvider(
+        [PartialEastmoney(), TencentRemainder()],
+        health=ProviderHealthTracker(),
+    )
+    monkeypatch.setattr(market_snapshot_service, "build_all_a_quote_provider", lambda **_kwargs: chain)
+
+    raw = market_snapshot_service.collect_snapshot_quotes({"codes": codes, "route": "all_a"})
+    snapshot = build_quote_snapshot(raw, requested_codes=codes, expected_count=len(codes))
+
+    assert snapshot["provider"] == "mixed"
+    assert snapshot["fallback_level"] == 1
+    assert snapshot["received_count"] == 22
+    assert snapshot["metadata"]["provider_counts"] == {"eastmoney_batch": 2, "tencent": 20}
+    assert any(error.get("provider") == "eastmoney_batch" for error in snapshot["errors"])
+    fallback_quotes = [quote for quote in snapshot["quotes"] if quote["provider"] == "tencent"]
+    assert len(fallback_quotes) == 20
+    assert all("primary_partial_missing" in quote["errors"] for quote in fallback_quotes)
+
+    db = _runtime_session()
+    try:
+        persist_snapshot(db, snapshot)
+        db.commit()
+        rows = {row.provider: row for row in db.query(SourceLineage).all()}
+        assert set(rows) == {"eastmoney_batch", "tencent"}
+        assert rows["eastmoney_batch"].provider_endpoint == PartialEastmoney.endpoint
+        assert rows["tencent"].provider_endpoint == TencentRemainder.endpoint
+        assert rows["eastmoney_batch"].metadata_json["provider_contribution_count"] == 2
+        assert rows["tencent"].metadata_json["provider_contribution_count"] == 20
+        assert rows["eastmoney_batch"].fallback_level == 1
+        assert "primary_partial_missing" in str(rows["eastmoney_batch"].error_message)
+    finally:
+        db.close()
 
 
 def test_security_provider_classifies_supported_code_families_conservatively():

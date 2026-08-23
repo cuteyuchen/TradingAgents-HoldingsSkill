@@ -1,12 +1,13 @@
 """In-memory provider-health tracking and a lightweight circuit breaker."""
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from threading import Lock, RLock
 from time import monotonic
-from typing import Callable
+from typing import Any, Callable
 
 
 class ProviderHealthStatus(str, Enum):
@@ -97,6 +98,22 @@ class CircuitBreaker:
 
     def reset(self) -> None:
         self.record_success()
+
+    def restore(self, *, failures: int, opened_elapsed_seconds: float | None = None) -> None:
+        """Restore a persisted breaker without serializing a monotonic clock.
+
+        ``opened_elapsed_seconds`` is measured from a wall-clock failure time
+        at the process boundary.  Internally the breaker continues to use its
+        monotonic clock, so NTP adjustments cannot affect a live circuit.
+        """
+
+        with self._lock:
+            self._failures = max(0, int(failures))
+            self._probe_in_flight = False
+            if opened_elapsed_seconds is None:
+                self._opened_at = None
+            else:
+                self._opened_at = self._clock() - max(0.0, float(opened_elapsed_seconds))
 
 
 class ProviderHealthTracker:
@@ -198,12 +215,83 @@ class ProviderHealthTracker:
                 self._sync_status(state, self.breaker(state.provider_name, state.data_type))
         return values
 
+    def hydrate(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        overwrite: bool = False,
+    ) -> list[ProviderHealth]:
+        """Restore process state from durable health metadata after a restart.
+
+        The database cannot persist ``monotonic()`` values.  For an open
+        circuit, reconstruct its age from ``last_failure_at`` so the remaining
+        cooldown is honored instead of silently reopening the provider.
+        Existing runtime state wins by default because it may already contain
+        newer requests than the durable projection.
+        """
+
+        now = datetime.now(UTC)
+        restored: list[ProviderHealth] = []
+        for raw_row in rows:
+            provider = str(raw_row.get("provider_name") or "").strip().lower()
+            data_type = str(raw_row.get("data_type") or "quote").strip().lower()
+            if not provider:
+                continue
+            key = (provider, data_type)
+            with self._lock:
+                if key in self._states and not overwrite:
+                    restored.append(self._states[key])
+                    continue
+            state, breaker = self._get(provider, data_type)
+            raw_status = str(raw_row.get("status") or "HEALTHY").upper()
+            consecutive_failures = max(0, int(raw_row.get("consecutive_failures") or 0))
+            failure_count = max(0, int(raw_row.get("failure_count") or 0))
+            last_failure_at = _as_utc_datetime(raw_row.get("last_failure_at"))
+            is_open = raw_status in {
+                ProviderHealthStatus.CIRCUIT_OPEN.value,
+                ProviderHealthStatus.RECOVERING.value,
+            }
+            elapsed_seconds = None
+            if is_open:
+                elapsed_seconds = (
+                    max(0.0, (now - last_failure_at).total_seconds())
+                    if last_failure_at
+                    else 0.0
+                )
+            breaker.restore(
+                failures=max(consecutive_failures, self.failure_threshold if is_open else 0),
+                opened_elapsed_seconds=elapsed_seconds,
+            )
+            with self._lock:
+                state.success_count = max(0, int(raw_row.get("success_count") or 0))
+                state.failure_count = failure_count
+                state.consecutive_failures = consecutive_failures
+                state.last_success_at = _as_utc_datetime(raw_row.get("last_success_at"))
+                state.last_failure_at = last_failure_at
+                state.last_error = str(raw_row.get("last_error")) if raw_row.get("last_error") else None
+                latency = raw_row.get("last_latency_ms")
+                state.last_latency_ms = float(latency) if latency is not None else None
+                self._sync_status(state, breaker)
+                restored.append(state)
+        return restored
+
     def clear(self) -> None:
         """Forget runtime counters, primarily for controlled lifecycle resets."""
 
         with self._lock:
             self._states.clear()
             self._breakers.clear()
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 ProviderHealthRegistry = ProviderHealthTracker
