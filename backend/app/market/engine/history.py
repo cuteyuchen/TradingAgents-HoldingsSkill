@@ -85,7 +85,13 @@ class NormalizedDailyBar:
         self.adjustment = str(self.adjustment or "QFQ").upper()
         self.provider = str(self.provider or "").lower()
         self.fetched_at = _datetime(self.fetched_at, default=datetime.now(UTC)) or datetime.now(UTC)
-        self.available_at = _datetime(self.available_at, default=self.fetched_at)
+        # Daily bars become available at the A-share close (15:00 CST = 07:00 UTC).
+        # Do not use fetched_at: a replay captured before the close must not see
+        # today's still-forming bar, and a later fetch must not look like look-ahead.
+        session_close = None
+        if self.trade_date and self.trade_date != date.min:
+            session_close = datetime(self.trade_date.year, self.trade_date.month, self.trade_date.day, 7, 0, tzinfo=UTC)
+        self.available_at = _datetime(self.available_at, default=session_close or self.fetched_at)
         self.quality_status = str(getattr(self.quality_status, "value", self.quality_status) or "VALID").upper()
         for name in ("open", "high", "low", "close", "prev_close", "volume", "amount", "turnover_rate"):
             setattr(self, name, _number(getattr(self, name)))
@@ -164,7 +170,10 @@ class MarketHistoryAccessLayer:
         cutoff_available = _datetime(available_at)
         output: list[NormalizedDailyBar] = []
         for raw_code in dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)):
-            rows = self.provider.get_kline(raw_code, limit=limit) or []
+            try:
+                rows = self.provider.get_kline(raw_code, limit=limit) or []
+            except Exception:
+                continue
             previous: float | None = None
             normalized: list[NormalizedDailyBar] = []
             for row in rows:
@@ -195,6 +204,8 @@ class LegacyMarketDataHistoryProvider:
     """Adapter around the existing Eastmoney daily K-line helper."""
 
     name = "eastmoney_daily_qfq"
+    _cache: dict[tuple[str, int], tuple[datetime, list[dict[str, Any]]]] = {}
+    _cache_ttl_seconds = 6 * 60 * 60
 
     def __init__(self, fetcher: Any | None = None) -> None:
         if fetcher is None:
@@ -203,9 +214,23 @@ class LegacyMarketDataHistoryProvider:
             fetcher = fetch_kline
         self.fetcher = fetcher
 
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._cache.clear()
+
     def get_kline(self, code: str, *, limit: int = 30) -> list[dict[str, Any]]:
-        payload = self.fetcher(code, limit=limit) or {}
-        return list(payload.get("rows") or []) if isinstance(payload, Mapping) else []
+        key = (normalize_security_code(code), int(limit))
+        cached = self._cache.get(key)
+        now = datetime.now(UTC)
+        if cached is not None and (now - cached[0]).total_seconds() < self._cache_ttl_seconds:
+            return list(cached[1])
+        try:
+            payload = self.fetcher(code, limit=limit) or {}
+            rows = list(payload.get("rows") or []) if isinstance(payload, Mapping) else []
+        except Exception:
+            return []
+        self._cache[key] = (now, rows)
+        return list(rows)
 
 
 __all__ = ["NormalizedDailyBar", "MarketHistoryAccessLayer", "LegacyMarketDataHistoryProvider"]

@@ -22,6 +22,7 @@ from .config import (
     TREND_WEIGHTS,
     UNIVERSE_RULE_VERSION,
 )
+from .history import LegacyMarketDataHistoryProvider, MarketHistoryAccessLayer, NormalizedDailyBar
 from .metrics import (
     calculate_cross_section_metrics,
     calculate_ma_breadth,
@@ -45,8 +46,6 @@ from .models import (
     SecurityIdentity,
     UniverseSnapshot,
 )
-from .history import LegacyMarketDataHistoryProvider, MarketHistoryAccessLayer, NormalizedDailyBar
-from .history import LegacyMarketDataHistoryProvider, MarketHistoryAccessLayer, NormalizedDailyBar
 from .score import (
     CoverageDecision,
     aggregate_component_scores,
@@ -87,9 +86,6 @@ __all__ = [
     "MarketScoreUniverse",
     "PercentileResult",
     "ComponentScore",
-    "NormalizedDailyBar",
-    "MarketHistoryAccessLayer",
-    "LegacyMarketDataHistoryProvider",
     "MarketMetricsSnapshot",
     "MarketScoreSnapshot",
     "MarketQualityStatus",

@@ -324,6 +324,7 @@ def build_market_score_snapshot(
     previous_display_score: float | None = None,
     previous_regime: str | None = None,
     coverage: float | None = None,
+    quality_status: str | None = None,
     confidence: float | None = None,
     last_reliable_score: float | None = None,
 ) -> MarketScoreSnapshot:
@@ -331,7 +332,14 @@ def build_market_score_snapshot(
 
     aggregation = aggregate_component_scores(components)
     gate = coverage_gate(coverage) if coverage is not None else CoverageDecision(1.0, "VALID", False)
-    if aggregation.score is None:
+    source_quality = str(getattr(quality_status, "value", quality_status) or "").upper()
+    if source_quality and source_quality not in {"VALID", "DEGRADED"}:
+        gate = CoverageDecision(gate.coverage, "FROZEN", True, "data_quality")
+    elif source_quality == "DEGRADED" and not gate.is_frozen and gate.status == "VALID":
+        gate = CoverageDecision(gate.coverage, "DEGRADED", False, "provider_quality_degraded")
+    # A coverage failure is the more fundamental signal: do not replace the
+    # provider/data-quality freeze reason with a secondary component failure.
+    if aggregation.score is None and not gate.is_frozen:
         gate = CoverageDecision(gate.coverage, "FROZEN", True, "insufficient_component_coverage")
     if gate.is_frozen:
         raw_score = None

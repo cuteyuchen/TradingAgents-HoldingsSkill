@@ -288,19 +288,36 @@ def calculate_tail_risk_component(
     return result
 
 
+def _safe_component(name: str, factory) -> ComponentScore:
+    try:
+        return factory()
+    except Exception:
+        return ComponentScore(
+            name=name,
+            score=None,
+            quality_status="UNAVAILABLE",
+            unavailable_reason="component_failure",
+            confidence=0.0,
+        )
+
+
 def calculate_all_components(
     metrics: Mapping[str, Any],
     histories: Mapping[str, Mapping[str, Iterable[float | int | None]]] | None = None,
 ) -> dict[str, ComponentScore]:
     history = histories or {}
-    breadth = calculate_breadth_component(metrics, history.get("breadth"))
-    trend = calculate_trend_component(metrics, history.get("trend"))
-    liquidity = calculate_liquidity_component(metrics, history.get("liquidity"))
-    profitability = calculate_profitability_component(metrics, history.get("profitability"))
-    diffusion = calculate_diffusion_component(metrics, history.get("diffusion"))
+    breadth = _safe_component("breadth", lambda: calculate_breadth_component(metrics, history.get("breadth")))
+    trend = _safe_component("trend", lambda: calculate_trend_component(metrics, history.get("trend")))
+    liquidity = _safe_component("liquidity", lambda: calculate_liquidity_component(metrics, history.get("liquidity")))
+    profitability = _safe_component(
+        "profitability", lambda: calculate_profitability_component(metrics, history.get("profitability"))
+    )
+    diffusion = _safe_component("diffusion", lambda: calculate_diffusion_component(metrics, history.get("diffusion")))
     metrics_with_diffusion = dict(metrics) | {"diffusion_score": diffusion.score}
-    crowding = calculate_crowding_component(metrics_with_diffusion, history.get("crowding"))
-    tail_risk = calculate_tail_risk_component(metrics, history.get("tail_risk"))
+    crowding = _safe_component(
+        "crowding", lambda: calculate_crowding_component(metrics_with_diffusion, history.get("crowding"))
+    )
+    tail_risk = _safe_component("tail_risk", lambda: calculate_tail_risk_component(metrics, history.get("tail_risk")))
     return {
         "breadth": breadth,
         "trend": trend,

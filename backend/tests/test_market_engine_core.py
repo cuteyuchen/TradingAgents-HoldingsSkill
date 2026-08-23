@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
+
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
 from app.market.engine import (
     ComponentScore,
     aggregate_component_scores,
     apply_regime_hysteresis,
     build_market_score_universe,
+    build_market_score_snapshot,
     calculate_cross_section_metrics,
     calculate_ma_breadth,
     calculate_median_index,
@@ -121,6 +128,42 @@ def test_coverage_and_frozen_contract() -> None:
     assert decision.is_frozen is True
 
 
+def test_data_quality_freeze_reason_wins_over_missing_components() -> None:
+    result = build_market_score_snapshot(
+        {"breadth": ComponentScore(name="breadth", score=None, quality_status="UNAVAILABLE")},
+        coverage=0.0,
+        last_reliable_score=68,
+    )
+    assert result.is_frozen is True
+    assert result.quality_status == "FROZEN"
+    assert result.freeze_reason == "data_quality"
+    assert result.display_score == pytest.approx(68)
+
+
+@pytest.mark.parametrize("quality_status", ["STALE", "CONFLICT"])
+def test_non_consumable_quote_quality_freezes_score(quality_status: str) -> None:
+    components = {
+        "breadth": 60,
+        "trend": 60,
+        "liquidity": 60,
+        "profitability": 60,
+        "diffusion": 60,
+        "crowding": 60,
+        "tail_risk": 60,
+    }
+    result = build_market_score_snapshot(
+        components,
+        coverage=1.0,
+        quality_status=quality_status,
+        last_reliable_score=68,
+    )
+    assert result.raw_score is None
+    assert result.display_score == pytest.approx(68)
+    assert result.quality_status == "FROZEN"
+    assert result.is_frozen is True
+    assert result.freeze_reason == "data_quality"
+
+
 def test_smoothing_and_hysteresis() -> None:
     assert smooth_display_score(70, 50, alpha=0.7) == pytest.approx(64)
     assert apply_regime_hysteresis(60, "RISK_ON") == "RISK_ON"
@@ -150,3 +193,93 @@ def test_board_specific_limit_rules() -> None:
     assert is_price_limit(19.9, "300750")
     assert not is_price_limit(10.0, "300750")
     assert is_price_limit(-9.95, "600519", direction="down")
+
+
+def test_component_weights_sum_to_one() -> None:
+    from app.market.engine.config import validate_config
+
+    assert validate_config() is True
+
+
+@pytest.mark.parametrize("quality_status", ["INVALID", "MISSING"])
+def test_invalid_or_missing_quote_quality_freezes_score(quality_status: str) -> None:
+    result = build_market_score_snapshot(
+        {
+            "breadth": 60,
+            "trend": 60,
+            "liquidity": 60,
+            "profitability": 60,
+            "diffusion": 60,
+            "crowding": 60,
+            "tail_risk": 60,
+        },
+        coverage=1.0,
+        quality_status=quality_status,
+        last_reliable_score=68,
+    )
+    assert result.raw_score is None
+    assert result.display_score == pytest.approx(68)
+    assert result.quality_status == "FROZEN"
+    assert result.is_frozen is True
+    assert result.freeze_reason == "data_quality"
+
+
+def test_component_failure_does_not_crash_aggregation(monkeypatch) -> None:
+    from app.market.engine import components as component_mod
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("component exploded")
+
+    monkeypatch.setattr(component_mod, "calculate_diffusion_component", boom)
+    result = component_mod.calculate_all_components(
+        {
+            "all_a_median_return": 0.01,
+            "advance_ratio": 0.6,
+            "above_ma20_ratio": 0.55,
+            "above_ma60_ratio": 0.5,
+            "new_high_60_ratio": 0.04,
+            "new_low_60_ratio": 0.01,
+        }
+    )
+    assert result["diffusion"].available is False
+    assert result["diffusion"].unavailable_reason == "component_failure"
+    assert result["breadth"].available is True
+
+
+def test_5000_name_cross_section_completes_quickly() -> None:
+    import time
+
+    captured_at = "2026-08-21T01:35:00+00:00"
+    codes = [f"{600000 + index:06d}" for index in range(5000)]
+    rows = [
+        {
+            "code": code,
+            "price": 10 + (index % 50) * 0.01,
+            "prev_close": 10,
+            "amount": 1_000 + index,
+            "captured_at": captured_at,
+            "quality_status": "VALID",
+        }
+        for index, code in enumerate(codes)
+    ]
+    as_of = date(2026, 8, 21)
+    history = []
+    for code in codes[:5000]:
+        # 60 closes is enough for MA60 breadth without making fixture setup dominate the test.
+        history.extend(
+            _bar(code, as_of - timedelta(days=offset), 100 + (60 - offset) * 0.01)
+            for offset in range(60, -1, -1)
+        )
+    started = time.perf_counter()
+    metrics = calculate_cross_section_metrics(rows, universe_codes=codes, captured_at=captured_at)
+    ma = calculate_ma_breadth(history, as_of=as_of, universe_codes=codes)
+    nhnl = calculate_new_high_low(history, as_of=as_of, universe_codes=codes, windows=[20])
+    from app.market.engine import calculate_all_components
+
+    components = calculate_all_components(dict(metrics) | ma | nhnl)
+    elapsed = time.perf_counter() - started
+    assert metrics["coherent_count"] == 5000
+    assert metrics["top5_count"] == 250
+    assert ma["ma60_eligible_count"] == 5000
+    assert components["breadth"].available is True
+    assert elapsed < 20
