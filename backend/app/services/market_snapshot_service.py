@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from typing import Any, Callable
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -54,7 +55,10 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
     requested_name = str(request.get("route") or request.get("provider") or "").strip().lower()
     sanitized_request = {"codes": codes, "route": requested_name, "provider": requested_name}
     if _snapshot_provider is not None:
-        return _snapshot_provider(sanitized_request)
+        started_at = datetime.now(UTC)
+        raw = _snapshot_provider(sanitized_request)
+        completed_at = datetime.now(UTC)
+        return _with_capture_metadata(raw, started_at, completed_at)
     known = {"tencent", "eastmoney", "eastmoney_batch", "critical", "holding", "all_a", "auto", "fallback"}
     if not requested_name:
         return {
@@ -91,7 +95,9 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
                 "requested_route": requested_name,
                 "errors": [{"code": "universe_not_supplied", "message": "Security universe is required for a quote snapshot."}],
             }
+        started_at = datetime.now(UTC)
         quotes = provider.get_all_a_share_quotes(codes)
+        completed_at = datetime.now(UTC)
         run_metadata_method = getattr(provider, "get_run_metadata", None)
         run_metadata = run_metadata_method() if callable(run_metadata_method) else {}
         result = {
@@ -100,12 +106,15 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
             "requested_route": requested_name,
             "errors": list(getattr(provider, "last_errors", []) or []),
             "provider_attempts": run_metadata.get("provider_attempts") or [],
+            "started_at": started_at,
+            "completed_at": completed_at,
         }
         for key in ("provider_counts", "provider_endpoints", "fallback_level", "fallback_errors"):
             if key in run_metadata:
                 result[key] = run_metadata[key]
         return result
     except Exception as exc:  # noqa: BLE001
+        completed_at = datetime.now(UTC)
         metadata_method = getattr(provider, "get_run_metadata", None)
         run_metadata = metadata_method() if callable(metadata_method) else {}
         provider_name = (
@@ -123,11 +132,28 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
             "requested_route": requested_name or None,
             "errors": provider_errors,
             "provider_attempts": run_metadata.get("provider_attempts") or [],
+            "started_at": started_at if "started_at" in locals() else completed_at,
+            "completed_at": completed_at,
         }
         for key in ("provider_counts", "provider_endpoints", "fallback_level", "fallback_errors"):
             if key in run_metadata:
                 result[key] = run_metadata[key]
         return result
+
+
+def _with_capture_metadata(raw: Any, started_at: datetime, completed_at: datetime) -> Any:
+    """Attach the measured Provider call span to callback output."""
+
+    if isinstance(raw, Mapping):
+        result = dict(raw)
+        result["started_at"] = started_at
+        result["completed_at"] = completed_at
+        return result
+    return {
+        "quotes": raw,
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }
 
 
 def _value(source: Any, *keys: str, default: Any = None) -> Any:
@@ -203,7 +229,12 @@ def _coerce_raw_quotes(raw_quotes: Any) -> tuple[list[Any], dict[str, Any]]:
         return list(raw_quotes.values()), metadata
     object_quotes = _value(raw_quotes, "quotes", default=None)
     if object_quotes is not None:
-        for key in ("provider", "requested_route", "market", "errors", "provider_counts", "provider_endpoints", "provider_attempts"):
+        for key in (
+            "provider", "requested_route", "market", "errors", "provider_counts",
+            "provider_endpoints", "provider_attempts", "fallback_level",
+            "provider_fallback_levels", "provider_source_timestamps",
+            "provider_quality_statuses", "started_at", "completed_at",
+        ):
             value = _value(raw_quotes, key, default=None)
             if value is not None:
                 metadata[key] = value
@@ -244,6 +275,8 @@ def build_quote_snapshot(
         expected_count=expected,
         provider=effective_provider,
         fallback_level=effective_fallback_level,
+        started_at=_datetime(provider_metadata.get("started_at")),
+        completed_at=_datetime(provider_metadata.get("completed_at")),
         trade_date=None if trade_date is None else _date(trade_date),
         snapshot_key=snapshot_key,
         requested_codes=requested,
@@ -301,7 +334,7 @@ def get_all_a_share_quote_snapshot(
         expected_count=len(codes),
         requested_codes=codes,
         provider=None,
-        trade_date=None,
+        trade_date=None if trade_date is None else _date(trade_date),
         requested_route=provider or "all_a",
         snapshot_key=snapshot_key,
     )
@@ -313,8 +346,14 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
     ``endpoint`` remains a compatibility-only internal fallback.  API request
     fields never reach it; real adapter references in snapshot metadata win.
     """
+    snapshot_id = str(snapshot["snapshot_id"])
+    existing = db.execute(
+        select(MarketSnapshot).where(MarketSnapshot.snapshot_id == snapshot_id)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
     row = MarketSnapshot(
-        snapshot_id=str(snapshot["snapshot_id"]),
+        snapshot_id=snapshot_id,
         snapshot_key=str(snapshot.get("snapshot_key") or snapshot["snapshot_id"]),
         market=str(snapshot.get("market") or "CN"),
         started_at=_datetime(snapshot.get("started_at")) or datetime.now(UTC),

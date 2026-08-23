@@ -34,7 +34,7 @@ from ..market.engine.score import calculate_confidence
 from ..market.codes import normalize_security_code
 from ..market_models import SecurityMaster, TradingCalendar
 from .trading_calendar import CHINA_TZ
-from .market_snapshot_service import get_all_a_share_quote_snapshot
+from .market_snapshot_service import get_all_a_share_quote_snapshot, persist_snapshot
 from .daily_bar_cache import load_daily_bars
 from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 
@@ -136,6 +136,24 @@ def _capture_span_seconds(snapshot: Mapping[str, Any] | None, rows: list[Any]) -
     if started is None or completed is None:
         return None
     return max(0.0, (completed - started).total_seconds())
+
+
+def _source_provenance(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not snapshot:
+        return {}
+    metadata = snapshot.get("metadata") or {}
+    return _serial({
+        "provider": snapshot.get("provider"),
+        "requested_route": metadata.get("requested_route"),
+        "fallback_level": snapshot.get("fallback_level"),
+        "quality_status": snapshot.get("quality_status"),
+        "started_at": snapshot.get("started_at"),
+        "completed_at": snapshot.get("completed_at"),
+        "provider_counts": metadata.get("provider_counts") or {},
+        "provider_endpoints": metadata.get("provider_endpoints") or {},
+        "provider_source_timestamps": metadata.get("provider_source_timestamps") or {},
+        "provider_quality_statuses": metadata.get("provider_quality_statuses") or {},
+    })
 
 
 def _quote_trade_dates(rows: Iterable[Any]) -> set[date]:
@@ -527,6 +545,7 @@ class MarketEngine:
             trading_calendar=calendar_rows,
         )
 
+        server_owned_snapshot = quotes is None
         raw_snapshot: Mapping[str, Any] | None = quotes if isinstance(quotes, Mapping) and "quotes" in quotes else None
         quote_rows = _normalize_rows(quotes)
         if quotes is None:
@@ -538,6 +557,12 @@ class MarketEngine:
                 quote_rows = []
         if raw_snapshot is not None:
             quote_rows = _normalize_rows(raw_snapshot)
+        source_snapshot_id = (
+            str(raw_snapshot.get("snapshot_id"))
+            if server_owned_snapshot and raw_snapshot and raw_snapshot.get("snapshot_id")
+            else None
+        )
+        source_provenance = _source_provenance(raw_snapshot) if server_owned_snapshot else {}
         quote_trade_dates = _quote_trade_dates(quote_rows)
         if quote_trade_dates and quote_trade_dates != {day}:
             raise ValueError("quote_trade_date_mismatch")
@@ -708,8 +733,11 @@ class MarketEngine:
 
         metric_id = str(uuid4())
         score_id = str(uuid4())
+        market_snapshot_id = None
         positive, negative = _drivers(components)
         if persist:
+            if server_owned_snapshot and source_snapshot_id and raw_snapshot is not None:
+                market_snapshot_id = persist_snapshot(self.db, raw_snapshot).snapshot_id
             existing_metric = _upsert_capture(
                 self.db,
                 MarketMetricSnapshot,
@@ -721,7 +749,7 @@ class MarketEngine:
                 metric_id = existing_metric.snapshot_id
             metric_row = MarketMetricSnapshot(
                 snapshot_id=metric_id,
-                market_snapshot_id=None,
+                market_snapshot_id=market_snapshot_id,
                 market="CN",
                 trade_date=day,
                 captured_at=now,
@@ -788,6 +816,8 @@ class MarketEngine:
                     "capture_span_seconds": capture_span_seconds,
                     "median_index_preview": median_index,
                     "median_index_finalized": median_finalized,
+                    "market_snapshot_id": market_snapshot_id,
+                    "source_provenance": source_provenance,
                 },
                 calculation_version=MARKET_ENGINE_VERSION,
                 score_config_version=SCORE_CONFIG_VERSION,
@@ -818,6 +848,9 @@ class MarketEngine:
         return {
             "snapshot_id": score_id,
             "metric_snapshot_id": metric_id,
+            "market_snapshot_id": market_snapshot_id,
+            "source_snapshot_id": source_snapshot_id,
+            "source_provenance": source_provenance,
             "trade_date": day.isoformat(),
             "captured_at": now.isoformat(),
             "raw_score": raw_score,

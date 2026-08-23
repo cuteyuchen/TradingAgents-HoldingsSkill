@@ -9,7 +9,7 @@ from typing import Any
 
 from ..codes import normalize_security_code
 from ..models import DataQualityStatus, NormalizedQuote, QuoteSnapshot
-from ..quality import DEFAULT_QUOTE_FRESHNESS_SECONDS, validate_quote
+from ..quality import DEFAULT_QUOTE_FRESHNESS_SECONDS, is_final_close_timestamp, validate_quote
 
 
 # Keep the historical provider import path while using one canonical model.
@@ -21,10 +21,16 @@ def apply_quote_validation(
     *,
     now: datetime | None = None,
     max_age_seconds: float | None = DEFAULT_QUOTE_FRESHNESS_SECONDS,
+    session_trade_date: date | None = None,
 ) -> NormalizedQuote:
     """Apply the canonical deterministic quality rules to one quote in place."""
 
-    validation = validate_quote(quote, now=now, max_age_seconds=max_age_seconds)
+    validation = validate_quote(
+        quote,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        session_trade_date=session_trade_date,
+    )
     if quote.quality_status in {DataQualityStatus.VALID, DataQualityStatus.DEGRADED} and validation.status in {
         DataQualityStatus.STALE,
         DataQualityStatus.INVALID,
@@ -32,11 +38,21 @@ def apply_quote_validation(
         DataQualityStatus.CONFLICT,
     }:
         quote.quality_status = validation.status
-    elif quote.quality_status == DataQualityStatus.STALE and validation.status in {
-        DataQualityStatus.INVALID,
-        DataQualityStatus.MISSING,
-        DataQualityStatus.CONFLICT,
-    }:
+    elif quote.quality_status == DataQualityStatus.STALE and (
+        validation.status in {
+            DataQualityStatus.INVALID,
+            DataQualityStatus.MISSING,
+            DataQualityStatus.CONFLICT,
+        }
+        or (
+            validation.status in {DataQualityStatus.VALID, DataQualityStatus.DEGRADED}
+            and is_final_close_timestamp(
+                quote.source_timestamp,
+                session_trade_date=session_trade_date,
+                now=now,
+            )
+        )
+    ):
         quote.quality_status = validation.status
     if validation.errors:
         quote.errors.extend(error for error in validation.errors if error not in quote.errors)
@@ -139,7 +155,12 @@ def build_quote_snapshot(
             local_errors.append({"code": code, "error_code": "duplicate_quote", "message": "duplicate quote filtered"})
             continue
         quote.code = code
-        apply_quote_validation(quote, now=completed, max_age_seconds=max_age_seconds)
+        apply_quote_validation(
+            quote,
+            now=completed,
+            max_age_seconds=max_age_seconds,
+            session_trade_date=trade_date,
+        )
         if quote.quality_status == DataQualityStatus.INVALID:
             local_errors.append(
                 {

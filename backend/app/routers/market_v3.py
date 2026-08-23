@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..market.codes import normalize_security_code
+from ..market.quality import is_final_close_timestamp
 from ..market.providers.identity import build_calendar_provider, build_security_provider
 from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import MarketSnapshot, ProviderHealth
@@ -149,10 +150,16 @@ def _metadata_payload(row: MarketSnapshot, *, now: datetime | None = None) -> di
     current = _utc(now) or datetime.now(UTC)
     freshness_seconds = max(0.0, (current - reference).total_seconds()) if reference else None
     quality_status = row.quality_status
+    final_close = is_final_close_timestamp(
+        reference,
+        session_trade_date=row.trade_date,
+        now=current,
+    )
     if (
         quality_status in {"VALID", "DEGRADED"}
         and freshness_seconds is not None
         and freshness_seconds > settings.QUOTE_FRESHNESS_SECONDS
+        and not final_close
     ):
         quality_status = "STALE"
     return {

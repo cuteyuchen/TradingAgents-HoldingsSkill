@@ -16,9 +16,11 @@ if BACKEND_DIR not in sys.path:
 from app.market.engine import ComponentScore
 from app.market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from app.market_models import SecurityMaster, TradingCalendar
+from app.market_runtime_models import MarketSnapshot, SourceLineage
 from app.routers.market_engine_v3 import MarketCalculateRequest
 from app.services.daily_bar_cache import sync_daily_bar_cache
 from app.services.market_engine import MarketEngine, _component_confidence, _preview_median_index
+from app.services.market_snapshot_service import build_quote_snapshot
 
 
 def _session() -> Session:
@@ -28,6 +30,8 @@ def _session() -> Session:
         TradingCalendar,
         MarketMetricSnapshot,
         MarketScoreSnapshot,
+        MarketSnapshot,
+        SourceLineage,
         AllAMedianIndexDaily,
         DailyBarCache,
     ):
@@ -688,3 +692,101 @@ def test_capture_span_reduces_confidence() -> None:
     short_confidence = calculate_with_span(15)
     long_confidence = calculate_with_span(60)
     assert long_confidence == pytest.approx(short_confidence / 2, abs=0.1)
+
+
+def test_persisted_market_score_is_linked_to_quote_snapshot_lineage(monkeypatch) -> None:
+    db = _session()
+    try:
+        trade_date, captured_at, securities, calendar, quotes, history = _coverage_fixture(8, universe_size=8)
+        source_time = datetime(2026, 8, 23, 1, 35, tzinfo=UTC)
+        raw = build_quote_snapshot(
+            {
+                "quotes": [
+                    dict(row, source_timestamp=source_time, fetched_at=source_time)
+                    for row in quotes
+                ],
+                "provider": "fixture",
+                "started_at": source_time - timedelta(seconds=2),
+                "completed_at": source_time,
+            },
+            requested_codes=[row["code"] for row in securities],
+            trade_date=trade_date,
+        )
+        monkeypatch.setattr(
+            "app.services.market_engine.get_all_a_share_quote_snapshot",
+            lambda _db, **_kwargs: raw,
+        )
+        result = MarketEngine(db).calculate(
+            trade_date=trade_date,
+            captured_at=captured_at,
+            securities=securities,
+            trading_calendar=calendar,
+            history=history,
+            persist=True,
+        )
+        assert result["market_snapshot_id"] == result["source_snapshot_id"]
+        assert db.scalar(select(func.count()).select_from(MarketSnapshot)) == 1
+        assert db.scalar(select(func.count()).select_from(SourceLineage)) >= 1
+        metric = db.scalar(select(MarketMetricSnapshot).where(MarketMetricSnapshot.snapshot_id == result["metric_snapshot_id"]))
+        score = db.scalar(select(MarketScoreSnapshot).where(MarketScoreSnapshot.snapshot_id == result["snapshot_id"]))
+        snapshot = db.scalar(select(MarketSnapshot).where(MarketSnapshot.snapshot_id == result["market_snapshot_id"]))
+        assert metric is not None and metric.market_snapshot_id == snapshot.snapshot_id
+        assert score is not None and score.metric_snapshot_id == metric.snapshot_id
+        assert db.query(SourceLineage).filter_by(entity_type="market_snapshot", entity_key=snapshot.snapshot_id).count() >= 1
+
+        preview_db = _session()
+        try:
+            preview = MarketEngine(preview_db).calculate(
+                trade_date=trade_date,
+                captured_at=captured_at,
+                securities=securities,
+                trading_calendar=calendar,
+                history=history,
+                persist=False,
+            )
+            assert preview["source_snapshot_id"] == raw["snapshot_id"]
+            assert preview_db.scalar(select(func.count()).select_from(MarketSnapshot)) == 0
+            assert preview_db.scalar(select(func.count()).select_from(SourceLineage)) == 0
+        finally:
+            preview_db.close()
+    finally:
+        db.close()
+
+
+def test_1510_provider_close_snapshot_does_not_freeze_or_block_median_finalize(monkeypatch) -> None:
+    db = _session()
+    try:
+        trade_date, _, securities, calendar, quotes, history = _coverage_fixture(8, universe_size=8)
+        captured_at = datetime(2026, 8, 23, 7, 10, tzinfo=UTC)
+        source_time = datetime(2026, 8, 23, 7, 0, tzinfo=UTC)
+        raw = build_quote_snapshot(
+            {
+                "quotes": [
+                    dict(row, source_timestamp=source_time, fetched_at=captured_at)
+                    for row in quotes
+                ],
+                "provider": "fixture",
+                "started_at": source_time,
+                "completed_at": captured_at,
+            },
+            requested_codes=[row["code"] for row in securities],
+            trade_date=trade_date,
+        )
+        monkeypatch.setattr(
+            "app.services.market_engine.get_all_a_share_quote_snapshot",
+            lambda _db, **_kwargs: raw,
+        )
+        result = MarketEngine(db).calculate(
+            trade_date=trade_date,
+            captured_at=captured_at,
+            securities=securities,
+            trading_calendar=calendar,
+            history=history,
+            persist=True,
+        )
+        assert result["quality_status"] in {"VALID", "DEGRADED"}
+        assert result["is_frozen"] is False
+        assert result["median_index_finalized"] is True
+        assert db.scalar(select(func.count()).select_from(AllAMedianIndexDaily)) == 1
+    finally:
+        db.close()

@@ -13,6 +13,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND_DIR)
 
 from app.market.models import DataQualityStatus, NormalizedQuote
+from app.market.quality import is_stale
 from app.market.providers import (
     FallbackQuoteProvider,
     HealthTrackedQuoteProvider,
@@ -114,6 +115,35 @@ def test_snapshot_freshness_uses_source_timestamp_and_exact_boundary():
     assert "quote_stale" in stale_snapshot.quotes[0].errors
     assert fresh_snapshot.quality_status == DataQualityStatus.VALID
     assert fresh_snapshot.quotes[0].quality_status == DataQualityStatus.VALID
+
+
+def test_close_snapshot_remains_fresh_at_1510_but_not_next_session():
+    day = date(2026, 8, 21)
+    close = datetime(2026, 8, 21, 7, 0, tzinfo=UTC)
+    deep_review = datetime(2026, 8, 21, 7, 10, tzinfo=UTC)
+    quote = _fresh_quote("600519", source_timestamp=close, fetched_at=deep_review)
+    assert is_stale(quote, max_age_seconds=90, now=deep_review, session_trade_date=day) is False
+    monday = datetime(2026, 8, 24, 1, 0, tzinfo=UTC)
+    assert is_stale(quote, max_age_seconds=90, now=monday, session_trade_date=day) is True
+
+
+def test_provider_capture_span_wraps_real_callback(monkeypatch):
+    import time
+    from app.services import market_snapshot_service
+
+    now = datetime(2026, 8, 21, 7, 0, tzinfo=UTC)
+
+    def callback(_request):
+        time.sleep(0.05)
+        return {"quotes": [_fresh_quote("600519", source_timestamp=now, fetched_at=now)], "provider": "fixture"}
+
+    market_snapshot_service.set_snapshot_provider(callback)
+    try:
+        result = market_snapshot_service.collect_snapshot_quotes({"codes": ["600519"], "route": "fixture"})
+        assert result["completed_at"] > result["started_at"]
+        assert (result["completed_at"] - result["started_at"]).total_seconds() >= 0.04
+    finally:
+        market_snapshot_service.set_snapshot_provider(None)
 
 
 def test_persisted_snapshot_quality_is_revalidated_when_read() -> None:

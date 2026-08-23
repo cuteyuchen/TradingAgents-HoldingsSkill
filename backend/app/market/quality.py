@@ -1,7 +1,7 @@
 """Validation, freshness, and cross-provider quote comparison."""
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,13 +31,47 @@ def freshness_seconds(quote: NormalizedQuote, now: datetime | None = None) -> fl
     return max(0.0, (current - reference).total_seconds())
 
 
+def is_final_close_timestamp(
+    source_timestamp: datetime | None,
+    *,
+    session_trade_date: date | None,
+    now: datetime | None = None,
+    close_time: time = time(15, 0),
+) -> bool:
+    """Return whether a quote is the same-day official close snapshot.
+
+    The exception is deliberately bounded to the same Shanghai calendar date.
+    A Friday close therefore cannot remain fresh throughout the weekend or the
+    next trading session.
+    """
+
+    if source_timestamp is None or session_trade_date is None:
+        return False
+    source_local = _as_utc(source_timestamp).astimezone(ZoneInfo("Asia/Shanghai"))
+    current_local = (_as_utc(now) or datetime.now(UTC)).astimezone(ZoneInfo("Asia/Shanghai"))
+    return (
+        source_local.date() == session_trade_date
+        and current_local.date() == session_trade_date
+        and source_local.time() >= close_time
+    )
+
+
 def is_stale(
     quote: NormalizedQuote,
     max_age_seconds: float = DEFAULT_QUOTE_FRESHNESS_SECONDS,
     now: datetime | None = None,
+    session_trade_date: date | None = None,
 ) -> bool:
     age = freshness_seconds(quote, now)
-    return quote.quality_status == DataQualityStatus.STALE or (age is not None and age > max_age_seconds)
+    if is_final_close_timestamp(
+        quote.source_timestamp,
+        session_trade_date=session_trade_date,
+        now=now,
+    ):
+        return False
+    if quote.quality_status == DataQualityStatus.STALE:
+        return True
+    return age is not None and age > max_age_seconds
 
 
 def validate_normalized_quote(
@@ -45,6 +79,7 @@ def validate_normalized_quote(
     *,
     now: datetime | None = None,
     max_age_seconds: float | None = DEFAULT_QUOTE_FRESHNESS_SECONDS,
+    session_trade_date: date | None = None,
 ) -> QuoteValidation:
     """Apply provider-independent sanity checks without inventing missing data."""
 
@@ -94,7 +129,12 @@ def validate_normalized_quote(
     status = quote.quality_status
     if status in {DataQualityStatus.INVALID, DataQualityStatus.MISSING, DataQualityStatus.CONFLICT}:
         return QuoteValidation(status, tuple(errors))
-    if max_age_seconds is not None and is_stale(quote, max_age_seconds=max_age_seconds, now=now):
+    if max_age_seconds is not None and is_stale(
+        quote,
+        max_age_seconds=max_age_seconds,
+        now=now,
+        session_trade_date=session_trade_date,
+    ):
         return QuoteValidation(DataQualityStatus.STALE, ("quote_stale",))
 
     optional_missing = [
