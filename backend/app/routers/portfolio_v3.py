@@ -8,13 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..portfolio.ledger import create_ledger_entry, revise_ledger_entry, void_ledger_entry
+from ..portfolio.ledger import confirm_ledger_entry, create_ledger_entry, revise_ledger_entry, void_ledger_entry
 from ..portfolio.service import calculate_portfolio_risk
-from ..portfolio.snapshot_diff import upsert_snapshot_diff
+from ..portfolio.snapshot_diff import refresh_affected_snapshot_reconciliations
 from ..portfolio_models import PortfolioRiskSnapshot, PortfolioSnapshotDiff, TradeLedgerEntry, TradeLedgerRevision
 from ..portfolio_schemas import (
     PortfolioRiskCalculateRequest,
     TradeLedgerCreate,
+    TradeLedgerConfirm,
     TradeLedgerEntryResponse,
     TradeLedgerRevisionCreate,
     TradeLedgerRevisionResponse,
@@ -22,7 +23,7 @@ from ..portfolio_schemas import (
 )
 from ..v2_dependencies import get_current_user
 from ..v2_models import Portfolio, PortfolioSnapshot, User
-from ..v2_models import AnalysisRun
+from ..v2_models import AnalysisJob, AnalysisRun
 from ..trigger_models import TriggerEvent
 
 router = APIRouter(prefix="/api/v3", tags=["v3-portfolio"])
@@ -162,9 +163,10 @@ def create_ledger(
 ) -> TradeLedgerEntry:
     _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
     if payload.analysis_run_id is not None:
-        run = db.execute(select(AnalysisRun).where(
+        run = db.execute(select(AnalysisRun).join(AnalysisJob, AnalysisRun.job_id == AnalysisJob.id).where(
             AnalysisRun.id == payload.analysis_run_id,
             AnalysisRun.user_id == current_user.id,
+            AnalysisJob.portfolio_id == portfolio_id,
         )).scalar_one_or_none()
         if run is None:
             raise HTTPException(status_code=422, detail="Analysis run link is invalid.")
@@ -179,6 +181,9 @@ def create_ledger(
     try:
         row, _created = create_ledger_entry(
             db, user_id=current_user.id, portfolio_id=portfolio_id, payload=payload.model_dump()
+        )
+        refresh_affected_snapshot_reconciliations(
+            db, portfolio_id=portfolio_id, available_at_values=[row.available_at]
         )
         db.commit()
         db.refresh(row)
@@ -199,7 +204,11 @@ def revise_ledger(
     _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
     row = _entry(db, user_id=current_user.id, portfolio_id=portfolio_id, entry_id=entry_id)
     try:
+        previous_available_at = row.available_at
         revise_ledger_entry(db, entry=row, user_id=current_user.id, changes=payload.changes, reason=payload.reason)
+        refresh_affected_snapshot_reconciliations(
+            db, portfolio_id=portfolio_id, available_at_values=[previous_available_at, row.available_at]
+        )
         db.commit()
         db.refresh(row)
         return row
@@ -220,6 +229,32 @@ def void_ledger(
     row = _entry(db, user_id=current_user.id, portfolio_id=portfolio_id, entry_id=entry_id)
     try:
         void_ledger_entry(db, entry=row, user_id=current_user.id, reason=payload.reason)
+        refresh_affected_snapshot_reconciliations(
+            db, portfolio_id=portfolio_id, available_at_values=[row.available_at]
+        )
+        db.commit()
+        db.refresh(row)
+        return row
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/portfolios/{portfolio_id}/ledger/{entry_id}/confirm", response_model=TradeLedgerEntryResponse)
+def confirm_ledger(
+    portfolio_id: int,
+    entry_id: int,
+    payload: TradeLedgerConfirm,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TradeLedgerEntry:
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    row = _entry(db, user_id=current_user.id, portfolio_id=portfolio_id, entry_id=entry_id)
+    try:
+        confirm_ledger_entry(db, entry=row, user_id=current_user.id, reason=payload.reason)
+        refresh_affected_snapshot_reconciliations(
+            db, portfolio_id=portfolio_id, available_at_values=[row.available_at]
+        )
         db.commit()
         db.refresh(row)
         return row

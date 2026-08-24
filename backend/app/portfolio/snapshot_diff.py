@@ -165,9 +165,32 @@ def upsert_snapshot_diff(db: Session, *, before: PortfolioSnapshot, after: Portf
     return existing
 
 
+def refresh_affected_snapshot_reconciliations(
+    db: Session,
+    *,
+    portfolio_id: int,
+    available_at_values: list[datetime | None],
+) -> list[PortfolioSnapshotDiff]:
+    """Refresh only adjacent confirmed snapshot pairs touched by ledger timing."""
+
+    moments = [value for value in available_at_values if value is not None]
+    if not moments:
+        return []
+    snapshots = db.execute(select(PortfolioSnapshot).where(
+        PortfolioSnapshot.portfolio_id == portfolio_id,
+        PortfolioSnapshot.status == "confirmed",
+    ).order_by(PortfolioSnapshot.snapshot_time.asc(), PortfolioSnapshot.id.asc())).scalars().all()
+    refreshed: list[PortfolioSnapshotDiff] = []
+    for before, after in zip(snapshots, snapshots[1:]):
+        if any(before.snapshot_time < moment <= after.snapshot_time for moment in moments):
+            refreshed.append(upsert_snapshot_diff(db, before=before, after=after))
+    return refreshed
+
+
 __all__ = [
     "calculate_snapshot_diff",
     "reconcile_snapshot_diff_with_ledger",
     "snapshot_cash",
+    "refresh_affected_snapshot_reconciliations",
     "upsert_snapshot_diff",
 ]

@@ -1074,6 +1074,52 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
     return "\n".join(lines)
 
 
+def _fail_closed_portfolio_gate_result(final: dict[str, Any], error: Exception) -> dict[str, Any]:
+    """Remove executable portfolio changes when the deterministic Gate fails."""
+
+    final["portfolio_engine"] = {"status": "unavailable", "error": str(error)[:300]}
+    final["decision_gate"] = {
+        "status": "REVIEW_ONLY",
+        "portfolio_action": "WATCH_ONLY",
+        "blocking_reasons": ["PORTFOLIO_ENGINE_UNAVAILABLE"],
+        "calculation_version": "portfolio-decision-gate-v1",
+    }
+    safe_holdings: list[dict[str, Any]] = []
+    for raw in final.get("holdings") or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        if str(row.get("action") or "").lower() in {"add", "conditional_add", "reduce", "sell"}:
+            row["action"] = "watch"
+            row["quantity"] = None
+            row["target_weight"] = None
+        row["portfolio_gate"] = "BLOCKED"
+        row["portfolio_gate_reasons"] = ["PORTFOLIO_ENGINE_UNAVAILABLE"]
+        safe_holdings.append(row)
+    safe_candidates: list[dict[str, Any]] = []
+    for raw in final.get("candidates") or []:
+        if not isinstance(raw, dict):
+            continue
+        candidate = dict(raw)
+        candidate["buyable"] = False
+        candidate["actionable"] = False
+        candidate["gate_status"] = "blocked"
+        candidate["portfolio_gate"] = "BLOCKED"
+        candidate["portfolio_gate_reasons"] = ["PORTFOLIO_ENGINE_UNAVAILABLE"]
+        safe_candidates.append(candidate)
+    final["holdings"] = safe_holdings
+    final["today_actions"] = safe_holdings
+    final["candidates"] = safe_candidates
+    final["buy_candidates"] = safe_candidates
+    final["final_rating"] = "watch_only"
+    final["portfolio_conclusion"] = "组合约束引擎暂不可用，本次不输出可执行交易动作。"
+    portfolio_final = final.get("portfolio_manager_final") if isinstance(final.get("portfolio_manager_final"), dict) else {}
+    portfolio_final["portfolio_rating"] = "watch_only"
+    portfolio_final["final_actions"] = safe_holdings
+    final["portfolio_manager_final"] = portfolio_final
+    return final
+
+
 def run_analysis_job(job_id: int) -> None:
     db = SessionLocal()
     job: AnalysisJob | None = None
@@ -1411,16 +1457,9 @@ def run_analysis_job(job_id: int) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Portfolio Decision Gate failed for analysis job %s", job.id)
             workflow["phase_errors"].append("portfolio_decision_gate_unavailable")
-            final["portfolio_engine"] = {"status": "unavailable", "error": str(exc)[:300]}
-            final["decision_gate"] = {
-                "status": "REVIEW_ONLY",
-                "portfolio_action": "WATCH_ONLY",
-                "blocking_reasons": ["PORTFOLIO_ENGINE_UNAVAILABLE"],
-                "calculation_version": "portfolio-decision-gate-v1",
-            }
-            if any(str(row.get("action") or "").lower() in {"add", "conditional_add", "reduce", "sell"} for row in final.get("holdings") or []):
-                final["final_rating"] = "watch_only"
+            final = _fail_closed_portfolio_gate_result(final, exc)
         final["portfolio_engine"] = {
+            **(final.get("portfolio_engine") if isinstance(final.get("portfolio_engine"), dict) else {}),
             "portfolio_context": workflow.get("portfolio_context"),
             "calculation_version": "portfolio-engine-v1",
         }

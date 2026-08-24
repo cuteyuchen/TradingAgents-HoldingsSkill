@@ -118,6 +118,7 @@ def calculate_portfolio_risk(
 ) -> dict[str, Any]:
     """Calculate a bounded deterministic state from confirmed, server-owned facts."""
 
+    requested_as_of = as_of is not None
     moment = _as_of(as_of)
     snapshot = snapshot or latest_confirmed_snapshot(db, portfolio_id=portfolio_id, as_of=moment)
     if snapshot is None or snapshot.user_id != user_id:
@@ -129,6 +130,7 @@ def calculate_portfolio_risk(
         snapshot=snapshot,
         quote_loader=quote_loader,
         quote_rows=quote_rows,
+        allow_live_quotes=not requested_as_of,
     )
     state["user_id"] = user_id
     market_state = latest_market_state(db, as_of=moment)
@@ -174,7 +176,7 @@ def portfolio_context_for_analysis(
         db,
         portfolio_id=snapshot.portfolio_id,
         user_id=snapshot.user_id,
-        as_of=datetime.now(UTC),
+        as_of=None,
         persist=False,
         snapshot=snapshot,
         quote_rows=quote_rows,
@@ -203,6 +205,8 @@ def portfolio_context_for_analysis(
     return {
         "interpretation": "这是后端确定性组合风险事实和动作约束，不是交易指令；模型不得覆盖 hard_cap、max_additional_weight 或 max_sellable_qty。",
         "snapshot_id": state["snapshot_id"],
+        "snapshot_total_assets": state.get("snapshot_total_assets"),
+        "current_estimated_total_assets": state.get("current_estimated_total_assets"),
         "cash_ratio": state.get("cash_ratio"),
         "gross_exposure": state.get("gross_exposure"),
         "top1_weight": risk.get("top1_weight"),
@@ -216,6 +220,8 @@ def portfolio_context_for_analysis(
             for row in risk.get("positions") or []
         ],
         "market_regime": market_state.get("regime"),
+        "market_state_available": market_state.get("available"),
+        "market_quality_status": market_state.get("quality_status"),
         "market_state_frozen": market_state.get("is_frozen"),
         "portfolio_quality": risk.get("quality_status"),
         "portfolio_confidence": risk.get("confidence"),

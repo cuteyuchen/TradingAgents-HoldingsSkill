@@ -54,6 +54,10 @@ class TradeLedgerVoid(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class TradeLedgerConfirm(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class TradeLedgerEntryResponse(BaseModel):
     id: int
     portfolio_id: int

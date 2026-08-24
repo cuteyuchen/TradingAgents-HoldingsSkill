@@ -222,6 +222,30 @@ def void_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, rea
     return entry
 
 
+def confirm_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, reason: str) -> TradeLedgerEntry:
+    """Confirm a security-master-pending fact through an auditable revision."""
+
+    if entry.status == "VOIDED":
+        raise ValueError("voided ledger entry cannot be confirmed")
+    if entry.status != "PENDING_REVIEW":
+        raise ValueError("only pending review ledger entries can be confirmed")
+    if not reason or not reason.strip():
+        raise ValueError("confirmation reason is required")
+    revision_no = (db.scalar(
+        select(func.max(TradeLedgerRevision.revision_no)).where(TradeLedgerRevision.ledger_entry_id == entry.id)
+    ) or 0) + 1
+    db.add(TradeLedgerRevision(
+        ledger_entry_id=entry.id,
+        revision_no=revision_no,
+        changes_json={"before_status": "PENDING_REVIEW", "after_status": "CONFIRMED"},
+        reason=reason.strip(),
+        created_by_user_id=user_id,
+    ))
+    entry.status = "CONFIRMED"
+    db.flush()
+    return entry
+
+
 def transaction_cost_estimate(*, side: str | None, gross_amount: float | None, commission_bps: float | None, minimum_commission: float | None, sell_tax_bps: float | None) -> float | None:
     """Return a transparent estimate only when the configured inputs exist."""
 
@@ -237,6 +261,7 @@ __all__ = [
     "LEDGER_SOURCES",
     "LEDGER_STATUSES",
     "create_ledger_entry",
+    "confirm_ledger_entry",
     "revise_ledger_entry",
     "transaction_cost_estimate",
     "void_ledger_entry",

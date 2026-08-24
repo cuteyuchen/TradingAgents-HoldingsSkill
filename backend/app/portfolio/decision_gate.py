@@ -53,6 +53,9 @@ def apply_portfolio_decision_gate(
 
     constraints = {row.get("code"): row for row in portfolio_context.get("position_constraints") or [] if row.get("code")}
     market_frozen = bool(portfolio_context.get("market_state_frozen"))
+    market_available = bool(portfolio_context.get("market_state_available", True))
+    market_quality = str(portfolio_context.get("market_quality_status") or "VALID").upper()
+    market_unavailable = not market_available or market_quality in {"MISSING", "INVALID"}
     quality = str(portfolio_context.get("portfolio_quality") or "DEGRADED").upper()
     action_results: list[dict[str, Any]] = []
     statuses: list[str] = []
@@ -80,6 +83,8 @@ def apply_portfolio_decision_gate(
             reasons = list(constraint.get("blocking_reasons") or []) if constraint else ["POSITION_CONSTRAINT_UNAVAILABLE"]
             if market_frozen and "MARKET_STATE_FROZEN" not in reasons:
                 reasons.append("MARKET_STATE_FROZEN")
+            if market_unavailable and "MARKET_STATE_UNAVAILABLE" not in reasons:
+                reasons.append("MARKET_STATE_UNAVAILABLE")
             if quality in {"BLOCKED", "FROZEN"}:
                 reasons.append("PORTFOLIO_DATA_QUALITY")
             if requested_target is None:
@@ -162,12 +167,12 @@ def apply_portfolio_decision_gate(
             continue
         candidate = dict(raw)
         candidate["candidate_portfolio_fit_status"] = "NOT_EVALUATED_V3"
-        if market_frozen or quality in {"BLOCKED", "FROZEN"} or portfolio_context.get("cash_ratio") is None:
+        if market_frozen or market_unavailable or quality in {"BLOCKED", "FROZEN"} or portfolio_context.get("cash_ratio") is None:
             candidate["buyable"] = False
             candidate["gate_status"] = "blocked"
             candidate["portfolio_gate"] = "BLOCKED"
             candidate["portfolio_gate_reasons"] = [
-                "MARKET_STATE_FROZEN" if market_frozen else "INSUFFICIENT_CASH_DATA" if portfolio_context.get("cash_ratio") is None else "PORTFOLIO_DATA_QUALITY"
+                "MARKET_STATE_FROZEN" if market_frozen else "MARKET_STATE_UNAVAILABLE" if market_unavailable else "INSUFFICIENT_CASH_DATA" if portfolio_context.get("cash_ratio") is None else "PORTFOLIO_DATA_QUALITY"
             ]
             blocked_reasons.extend(candidate["portfolio_gate_reasons"])
             statuses.append("BLOCKED")
@@ -218,6 +223,7 @@ def apply_portfolio_decision_gate(
             "gross_exposure": portfolio_context.get("gross_exposure"),
             "market_regime": portfolio_context.get("market_regime"),
             "market_state_frozen": market_frozen,
+            "market_state_available": market_available,
             "portfolio_quality": quality,
         },
         "calculation_version": PORTFOLIO_GATE_VERSION,

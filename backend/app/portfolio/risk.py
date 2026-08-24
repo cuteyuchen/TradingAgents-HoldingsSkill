@@ -17,7 +17,7 @@ from ..market_models import SecurityMaster
 from ..services.daily_bar_cache import load_daily_bars
 from ..services.market_snapshot_service import collect_snapshot_quotes
 from ..v2_models import HoldingItem, PortfolioSnapshot
-from .config import KEEP_SCORE_WEIGHTS
+from .config import KEEP_SCORE_MIN_AVAILABLE_WEIGHT, KEEP_SCORE_WEIGHTS
 from .constraints import hard_cap_for_security
 from .snapshot_diff import snapshot_cash
 
@@ -91,6 +91,7 @@ def build_portfolio_state(
     snapshot: PortfolioSnapshot | None = None,
     quote_loader: QuoteLoader | None = None,
     quote_rows: Any = None,
+    allow_live_quotes: bool = True,
 ) -> dict[str, Any]:
     """Build a current or replay-bounded state without treating screenshots as live prices."""
 
@@ -100,14 +101,14 @@ def build_portfolio_state(
         raise ValueError("confirmed_snapshot_not_found")
     codes = [normalize_security_code(item.code) for item in snapshot.holdings if normalize_security_code(item.code)]
     raw_quotes = quote_rows
-    if raw_quotes is None and codes:
+    historical_snapshot_valuation = not allow_live_quotes and raw_quotes is None
+    if raw_quotes is None and codes and allow_live_quotes:
         raw_quotes = (quote_loader or _default_quote_loader)(codes)
     quote_by_code = _quote_map(raw_quotes or [])
     masters = {
         row.code: row
         for row in db.execute(select(SecurityMaster).where(SecurityMaster.market == "CN", SecurityMaster.code.in_(codes))).scalars()
     } if codes else {}
-    historical_snapshot_view = as_of <= snapshot.snapshot_time
     positions: list[dict[str, Any]] = []
     risk_flags: list[str] = []
     accepted_quotes = 0
@@ -146,10 +147,10 @@ def build_portfolio_state(
             flags.append("SECURITY_CLASSIFICATION_UNKNOWN")
         hard_cap, cap_flags = hard_cap_for_security(security_type, etf_category)
         flags.extend(cap_flags)
-        # Historical risk replay may use the broker's contemporaneous market
-        # value. Live calculations never substitute screenshot_price.
+        # Historical replay may only use contemporaneous snapshot valuation or
+        # explicitly supplied archived quotes; it must never fetch live data.
         market_value = item.qty * price if quote_usable and item.qty is not None else (
-            item.market_value if historical_snapshot_view else None
+            item.market_value if historical_snapshot_valuation else None
         )
         positions.append({
             "code": code,
@@ -171,12 +172,21 @@ def build_portfolio_state(
     valued_positions = [float(row["market_value"]) for row in positions if row.get("market_value") is not None]
     complete_valuation = len(valued_positions) == len(positions)
     market_value = sum(valued_positions) if complete_valuation else None
-    total_assets = snapshot.total_assets
-    if total_assets is None and market_value is not None and cash is not None:
-        total_assets = market_value + cash
+    snapshot_total_assets = snapshot.total_assets
+    current_estimated_total_assets = market_value + cash if market_value is not None and cash is not None else None
+    total_assets = snapshot_total_assets if historical_snapshot_valuation else current_estimated_total_assets
+    if total_assets is None and historical_snapshot_valuation:
+        total_assets = current_estimated_total_assets
     flags = list(dict.fromkeys(risk_flags))
-    if total_assets is not None and total_assets > 0 and market_value is not None and market_value + (cash or 0.0) > total_assets * 1.02:
-        flags.append("TOTAL_ASSETS_CONFLICT")
+    if historical_snapshot_valuation:
+        flags.append("HISTORICAL_SNAPSHOT_VALUATION")
+    if (
+        snapshot_total_assets is not None
+        and snapshot_total_assets > 0
+        and current_estimated_total_assets is not None
+        and abs(current_estimated_total_assets - snapshot_total_assets) > snapshot_total_assets * 0.02
+    ):
+        flags.append("VALUATION_DRIFT")
     if total_assets is None or total_assets <= 0:
         flags.append("TOTAL_ASSETS_UNKNOWN")
     for row in positions:
@@ -187,9 +197,9 @@ def build_portfolio_state(
     cash_ratio = cash / total_assets if cash is not None and total_assets and total_assets > 0 else None
     gross_exposure = sum(float(row["weight"] or 0.0) for row in positions if row.get("weight") is not None) if total_assets else None
     missing_quotes = len(codes) - accepted_quotes
-    if codes and accepted_quotes == 0 and not historical_snapshot_view:
+    if codes and accepted_quotes == 0 and not historical_snapshot_valuation:
         quality = "BLOCKED"
-    elif missing_quotes or not complete_valuation or "TOTAL_ASSETS_CONFLICT" in flags:
+    elif missing_quotes or not complete_valuation or "VALUATION_DRIFT" in flags or historical_snapshot_valuation:
         quality = "DEGRADED"
     else:
         quality = "VALID"
@@ -199,6 +209,8 @@ def build_portfolio_state(
         "snapshot_time": snapshot.snapshot_time.isoformat(),
         "as_of": as_of.isoformat(),
         "total_assets": total_assets,
+        "snapshot_total_assets": snapshot_total_assets,
+        "current_estimated_total_assets": current_estimated_total_assets,
         "total_market_value": market_value,
         "cash": cash,
         "cash_ratio": cash_ratio,
@@ -274,7 +286,7 @@ def _keep_score(
     closes: list[float],
     max_corr: float | None,
     benchmark_return_20: float | None,
-) -> tuple[float | None, dict[str, float | None]]:
+) -> tuple[float | None, dict[str, float | None], float, float]:
     price = position.get("current_price")
     ma20, ma60 = _ma(closes, 20), _ma(closes, 60)
     trend = None
@@ -291,20 +303,24 @@ def _keep_score(
     risk_quality = max(0.0, min(100.0, 100.0 - float(vol) * 100.0)) if vol is not None else None
     diversification = max(0.0, min(100.0, 100.0 * (1.0 - max_corr))) if max_corr is not None else None
     qty, available = position.get("qty"), position.get("available_qty")
-    liquidity = (100.0 * max(0.0, min(1.0, float(available) / float(qty)))) if qty and available is not None else None
+    execution_availability = (100.0 * max(0.0, min(1.0, float(available) / float(qty)))) if qty and available is not None else None
     parts = {
         "trend_health": trend,
         "relative_strength": relative,
         "risk_quality": risk_quality,
         "diversification_contribution": diversification,
-        "liquidity_tradability": liquidity,
+        "execution_availability": execution_availability,
     }
-    usable = {key: value for key, value in parts.items() if value is not None}
+    usable = {key: value for key, value in parts.items() if key in KEEP_SCORE_WEIGHTS and value is not None}
     if not usable:
-        return None, parts
+        return None, parts, 0.0, 0.0
     total_weight = sum(KEEP_SCORE_WEIGHTS[key] for key in usable)
+    available_weight = total_weight
+    confidence = 100.0 * available_weight / sum(KEEP_SCORE_WEIGHTS.values())
+    if available_weight < KEEP_SCORE_MIN_AVAILABLE_WEIGHT:
+        return None, parts, available_weight, confidence
     score = sum(float(value) * KEEP_SCORE_WEIGHTS[key] / total_weight for key, value in usable.items())
-    return score, parts
+    return score, parts, available_weight, confidence
 
 
 def _clusters(nodes: list[str], pairs: list[dict[str, Any]]) -> list[list[str]]:
@@ -402,7 +418,7 @@ def calculate_risk_metrics(db: Session, *, state: dict[str, Any], as_of: datetim
         position["history_coverage"] = len(returns.get(code, {}))
         position["max_correlation_with_other"] = max_by_code.get(code)
         position["risk_contribution_ratio"] = risk_contrib.get(code)
-        score, breakdown = _keep_score(
+        score, breakdown, available_weight, keep_confidence = _keep_score(
             position,
             closes_by_code.get(code, []),
             max_by_code.get(code),
@@ -410,6 +426,9 @@ def calculate_risk_metrics(db: Session, *, state: dict[str, Any], as_of: datetim
         )
         position["keep_score"] = score
         position["keep_score_breakdown"] = breakdown
+        position["keep_score_available_weight"] = available_weight
+        position["keep_score_confidence"] = keep_confidence
+        position["execution_availability"] = breakdown.get("execution_availability")
     concentration_weights = sorted((float(row["weight"]) for row in positions if row.get("weight") is not None), reverse=True)
     history_coverage = sum(1 for row in positions if len(returns.get(row["code"], {})) >= settings.PORTFOLIO_CORRELATION_MIN_SAMPLES) / len(positions) if positions else 1.0
     confidence = 100.0 * (

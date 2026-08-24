@@ -11,10 +11,15 @@ from app.market_engine_models import DailyBarCache, MarketScoreSnapshot
 from app.market_models import SecurityMaster
 from app.portfolio.constraints import build_portfolio_constraints
 from app.portfolio.decision_gate import apply_portfolio_decision_gate
-from app.portfolio.ledger import create_ledger_entry, revise_ledger_entry
+from app.portfolio.ledger import confirm_ledger_entry, create_ledger_entry, revise_ledger_entry
 from app.portfolio.risk import build_portfolio_state, calculate_risk_metrics, latest_confirmed_snapshot
 from app.portfolio.service import calculate_portfolio_risk
-from app.portfolio.snapshot_diff import calculate_snapshot_diff, reconcile_snapshot_diff_with_ledger
+from app.portfolio.snapshot_diff import (
+    calculate_snapshot_diff,
+    reconcile_snapshot_diff_with_ledger,
+    refresh_affected_snapshot_reconciliations,
+    upsert_snapshot_diff,
+)
 from app.portfolio_models import PortfolioRiskSnapshot, TradeLedgerEntry, TradeLedgerRevision
 from app.trigger_models import TriggerEvent  # noqa: F401 - register FK target metadata
 from app.v2_models import HoldingItem, Portfolio, PortfolioSnapshot, User
@@ -86,8 +91,10 @@ def test_current_state_uses_latest_confirmed_not_unconfirmed_and_cash_is_a_posit
         state = build_portfolio_state(db, portfolio_id=portfolio.id, as_of=moment, quote_rows=_quotes(("600519", 180, "VALID")))
         assert state["snapshot_id"] == confirmed.id
         assert state["cash"] == 20_000
-        assert state["cash_ratio"] == pytest.approx(0.20)
-        assert state["positions"][0]["weight"] == pytest.approx(0.18)
+        assert state["snapshot_total_assets"] == 100_000
+        assert state["current_estimated_total_assets"] == 38_000
+        assert state["cash_ratio"] == pytest.approx(20_000 / 38_000)
+        assert state["positions"][0]["weight"] == pytest.approx(18_000 / 38_000)
     finally:
         db.close()
 
@@ -159,11 +166,11 @@ def test_hard_caps_and_unknown_etf_classification_are_deterministic():
         _master(db, "512000", security_type="ETF", etf_category="SECTOR_ETF")
         snapshot = _snapshot(db, user, portfolio, snapshot_time=moment, total_assets=100_000, cash=20_000, holdings=[
             {"code": "600519", "qty": 100, "available_qty": 60, "market_value": 18_000, "name": "Stock"},
-            {"code": "510300", "qty": 100, "available_qty": 100, "market_value": 10_000, "name": "Unknown ETF"},
-            {"code": "512000", "qty": 100, "available_qty": 100, "market_value": 10_000, "name": "Sector ETF"},
+            {"code": "510300", "qty": 100, "available_qty": 100, "market_value": 31_000, "name": "Unknown ETF"},
+            {"code": "512000", "qty": 100, "available_qty": 100, "market_value": 31_000, "name": "Sector ETF"},
         ])
         state = build_portfolio_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment, quote_rows=_quotes(
-            ("600519", 180, "VALID"), ("510300", 100, "VALID"), ("512000", 100, "VALID")
+            ("600519", 180, "VALID"), ("510300", 310, "VALID"), ("512000", 310, "VALID")
         ))
         positions = {row["code"]: row for row in state["positions"]}
         assert positions["600519"]["hard_cap"] == pytest.approx(0.20)
@@ -172,6 +179,155 @@ def test_hard_caps_and_unknown_etf_classification_are_deterministic():
         constraints = build_portfolio_constraints(state, {"is_frozen": False, "quality_status": "VALID"})
         stock = next(row for row in constraints["positions"] if row["code"] == "600519")
         assert stock["max_additional_weight"] == pytest.approx(0.02)
+    finally:
+        db.close()
+
+
+def test_historical_risk_never_loads_current_quotes_and_uses_snapshot_valuation():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        historical = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+        _master(db, "600519")
+        _snapshot(
+            db, user, portfolio, snapshot_time=historical, total_assets=100_000, cash=20_000,
+            holdings=[{"code": "600519", "qty": 100, "available_qty": 100, "market_value": 80_000, "name": "Historical"}],
+        )
+
+        def current_quote_loader(_: list[str]):
+            raise AssertionError("historical calculation must not call current quote provider")
+
+        result = calculate_portfolio_risk(
+            db, portfolio_id=portfolio.id, user_id=user.id, as_of=historical + timedelta(minutes=30),
+            quote_loader=current_quote_loader,
+        )
+        state = result["state"]
+        assert state["positions"][0]["market_value"] == 80_000
+        assert state["positions"][0]["current_price"] is None
+        assert "HISTORICAL_SNAPSHOT_VALUATION" in state["risk_flags"]
+        assert state["quality_status"] == "DEGRADED"
+    finally:
+        db.close()
+
+
+def test_live_valuation_uses_current_estimated_total_not_screenshot_total():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        moment = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+        _master(db, "600519")
+        snapshot = _snapshot(
+            db, user, portfolio, snapshot_time=moment - timedelta(minutes=1), total_assets=100_000, cash=20_000,
+            holdings=[{"code": "600519", "qty": 100, "available_qty": 100, "market_value": 80_000, "name": "Live"}],
+        )
+        state = build_portfolio_state(
+            db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment,
+            quote_rows=_quotes(("600519", 960, "VALID")),
+        )
+        assert state["snapshot_total_assets"] == 100_000
+        assert state["current_estimated_total_assets"] == 116_000
+        assert state["positions"][0]["weight"] == pytest.approx(96_000 / 116_000)
+        assert state["cash_ratio"] == pytest.approx(20_000 / 116_000)
+        assert state["gross_exposure"] + state["cash_ratio"] == pytest.approx(1.0)
+        assert "VALUATION_DRIFT" in state["risk_flags"]
+    finally:
+        db.close()
+
+
+def test_keep_score_does_not_turn_execution_availability_into_high_confidence_quality():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        moment = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+        _master(db, "600519")
+        snapshot = _snapshot(
+            db, user, portfolio, snapshot_time=moment, total_assets=100_000, cash=20_000,
+            holdings=[{"code": "600519", "qty": 100, "available_qty": 100, "market_value": 80_000, "name": "New"}],
+        )
+        state = build_portfolio_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment, quote_rows=_quotes(("600519", 800, "VALID")))
+        risk = calculate_risk_metrics(db, state=state, as_of=moment)
+        position = risk["positions"][0]
+        assert position["execution_availability"] == 100.0
+        assert position["keep_score"] is None
+        assert position["keep_score_available_weight"] == 0.0
+        assert position["keep_score_confidence"] == 0.0
+    finally:
+        db.close()
+
+
+def test_classified_broad_etf_without_v1_cap_can_add_up_to_cash_weight():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        moment = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+        _master(db, "510300", security_type="ETF", etf_category="BROAD_ETF")
+        snapshot = _snapshot(
+            db, user, portfolio, snapshot_time=moment, total_assets=100_000, cash=20_000,
+            holdings=[{"code": "510300", "qty": 100, "available_qty": 100, "market_value": 80_000, "name": "Broad"}],
+        )
+        state = build_portfolio_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment, quote_rows=_quotes(("510300", 800, "VALID")))
+        constraints = build_portfolio_constraints(state, {"available": True, "is_frozen": False, "quality_status": "VALID"})
+        position = constraints["positions"][0]
+        assert position["hard_cap"] is None
+        assert position["max_additional_weight"] == pytest.approx(0.20)
+        assert position["add_allowed"] is True
+        result = apply_portfolio_decision_gate(
+            {"final_rating": "add", "holdings": [{"code": "510300", "action": "add", "target_weight": 0.95}], "candidates": []},
+            portfolio_context={
+                "cash_ratio": state["cash_ratio"], "portfolio_quality": "VALID", "market_state_frozen": False,
+                "market_state_available": True, "market_quality_status": "VALID", "position_constraints": constraints["positions"],
+            },
+        )
+        assert result["holdings"][0]["portfolio_gate"] == "PASS"
+    finally:
+        db.close()
+
+
+def test_later_ledger_confirmation_refreshes_snapshot_diff_to_matched():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        moment = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+        _master(db, "600519")
+        before = _snapshot(db, user, portfolio, snapshot_time=moment - timedelta(days=1), holdings=[{"code": "600519", "qty": 100, "available_qty": 100, "market_value": 10_000, "name": "A"}])
+        after = _snapshot(db, user, portfolio, snapshot_time=moment, holdings=[{"code": "600519", "qty": 200, "available_qty": 200, "market_value": 20_000, "name": "A"}])
+        assert upsert_snapshot_diff(db, before=before, after=after).reconciliation_status == "UNEXPLAINED"
+        entry, _ = create_ledger_entry(db, user_id=user.id, portfolio_id=portfolio.id, payload={
+            "entry_type": "TRADE", "security_code": "600519", "side": "BUY", "quantity": 100,
+            "price": 100, "executed_at": moment - timedelta(hours=1), "available_at": moment - timedelta(hours=1),
+        })
+        refresh_affected_snapshot_reconciliations(db, portfolio_id=portfolio.id, available_at_values=[entry.available_at])
+        assert upsert_snapshot_diff(db, before=before, after=after).reconciliation_status == "MATCHED"
+    finally:
+        db.close()
+
+
+def test_market_state_missing_blocks_new_risk_and_pending_ledger_can_be_audited_confirmed():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        moment = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+        _master(db, "600519")
+        snapshot = _snapshot(db, user, portfolio, snapshot_time=moment, total_assets=100_000, cash=20_000)
+        state = build_portfolio_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment, quote_rows=_quotes(("600519", 800, "VALID")))
+        constraints = build_portfolio_constraints(state, {"available": False, "quality_status": "MISSING", "is_frozen": False})
+        assert constraints["can_increase_risk"] is False
+        assert "MARKET_STATE_UNAVAILABLE" in constraints["positions"][0]["blocking_reasons"]
+        result = apply_portfolio_decision_gate(
+            {"final_rating": "add", "holdings": [], "candidates": [{"code": "510300", "action": "new_position", "buyable": True}]},
+            portfolio_context={"cash_ratio": 0.2, "portfolio_quality": "VALID", "market_state_frozen": False, "market_state_available": False, "market_quality_status": "MISSING"},
+        )
+        assert result["final_rating"] == "watch_only"
+        assert result["candidates"][0]["buyable"] is False
+
+        pending, _ = create_ledger_entry(db, user_id=user.id, portfolio_id=portfolio.id, payload={
+            "entry_type": "TRADE", "security_code": "600001", "side": "BUY", "quantity": 1,
+            "price": 10, "executed_at": moment,
+        })
+        assert pending.status == "PENDING_REVIEW"
+        confirm_ledger_entry(db, entry=pending, user_id=user.id, reason="security identity manually confirmed")
+        assert pending.status == "CONFIRMED"
+        assert db.query(TradeLedgerRevision).filter(TradeLedgerRevision.ledger_entry_id == pending.id).count() == 1
     finally:
         db.close()
 

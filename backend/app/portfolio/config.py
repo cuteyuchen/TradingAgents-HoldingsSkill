@@ -14,13 +14,17 @@ KEEP_SCORE_WEIGHTS = {
     "relative_strength": 0.20,
     "risk_quality": 0.20,
     "diversification_contribution": 0.20,
-    "liquidity_tradability": 0.15,
 }
 
-assert abs(sum(KEEP_SCORE_WEIGHTS.values()) - 1.0) < 1e-9
+# T+1 availability describes whether an existing position can be executed
+# today.  It is deliberately not a long-horizon security-quality signal.
+KEEP_SCORE_MIN_AVAILABLE_WEIGHT = 0.60
+
+assert 0 < KEEP_SCORE_MIN_AVAILABLE_WEIGHT <= sum(KEEP_SCORE_WEIGHTS.values()) <= 1.0
 
 __all__ = [
     "KEEP_SCORE_WEIGHTS",
+    "KEEP_SCORE_MIN_AVAILABLE_WEIGHT",
     "PORTFOLIO_DIFF_VERSION",
     "PORTFOLIO_ENGINE_VERSION",
     "PORTFOLIO_GATE_VERSION",

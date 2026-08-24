@@ -30,6 +30,9 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
 
     market_state = market_state or {}
     frozen = bool(market_state.get("is_frozen"))
+    market_quality = str(market_state.get("quality_status") or "MISSING").upper()
+    market_available = bool(market_state.get("available", market_quality in {"VALID", "DEGRADED"}))
+    market_unavailable = not market_available or market_quality in {"MISSING", "INVALID"}
     cash_ratio = state.get("cash_ratio")
     cash_known = cash_ratio is not None and state.get("cash") is not None
     base_quality = str(state.get("quality_status") or "DEGRADED").upper()
@@ -51,6 +54,8 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
         blocking_reasons: list[str] = []
         if frozen:
             blocking_reasons.append("MARKET_STATE_FROZEN")
+        if market_unavailable:
+            blocking_reasons.append("MARKET_STATE_UNAVAILABLE")
         if quote_quality not in {"VALID", "DEGRADED"}:
             blocking_reasons.append(f"QUOTE_{quote_quality}")
         if "ETF_CATEGORY_UNKNOWN" in flags or "SECURITY_CLASSIFICATION_UNKNOWN" in flags:
@@ -60,7 +65,11 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
         if headroom is not None and headroom <= 0:
             blocking_reasons.append("STOCK_HARD_CAP" if str(row.get("security_type") or "").upper() == "STOCK" else "HARD_CAP_REACHED")
         max_additional_weight = None
-        if headroom is not None and cash_ratio is not None:
+        if cap is None and not cap_flags and cash_ratio is not None:
+            # A classified ETF without a V1 hard cap is limited by available
+            # cash, not silently converted into an impossible-to-add position.
+            max_additional_weight = max(0.0, float(cash_ratio))
+        elif headroom is not None and cash_ratio is not None:
             max_additional_weight = max(0.0, min(headroom, float(cash_ratio)))
         elif headroom is not None:
             max_additional_weight = headroom
@@ -81,10 +90,11 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
         positions.append(row)
 
     return {
-        "can_increase_risk": not frozen and cash_known and not data_quality_blocked,
+        "can_increase_risk": not frozen and not market_unavailable and cash_known and not data_quality_blocked,
         "can_reduce_risk": not data_quality_blocked,
         "data_quality_blocked": data_quality_blocked,
         "market_state_frozen": frozen,
+        "market_state_available": market_available,
         "cash_known": cash_known,
         "market_regime": market_state.get("regime"),
         "market_quality_status": market_state.get("quality_status"),
