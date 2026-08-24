@@ -7,6 +7,13 @@ def _bool_env(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
 
 
+def _choice_int_env(name: str, default: int, allowed: set[int]) -> int:
+    value = int(os.getenv(name, str(default)))
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(allowed)}")
+    return value
+
+
 class Settings:
     """Runtime settings for the legacy archive API and the V2 application."""
 
@@ -58,6 +65,23 @@ class Settings:
     SCHEDULER_ENABLED: bool = _bool_env("SCHEDULER_ENABLED", "true")
     SCHEDULER_INTERVAL_SECONDS: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
     PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "http://localhost:8080").rstrip("/")
+
+    # Phase D deterministic realtime monitor and trigger engine.  The monitor
+    # is opt-in so an upgraded deployment does not immediately start remote
+    # quote traffic before local market data is ready.
+    REALTIME_MONITOR_ENABLED: bool = _bool_env("REALTIME_MONITOR_ENABLED", "false")
+    MONITOR_INTERVAL_SECONDS: int = max(60, int(os.getenv("MONITOR_INTERVAL_SECONDS", "60")))
+    MARKET_SCORE_INTERVAL_MINUTES: int = _choice_int_env(
+        "MARKET_SCORE_INTERVAL_MINUTES", 5, {1, 5, 10, 15, 30}
+    )
+    TRIGGER_MARKET_SCORE_WINDOW_MINUTES: int = int(os.getenv("TRIGGER_MARKET_SCORE_WINDOW_MINUTES", "15"))
+    TRIGGER_MARKET_SCORE_DELTA_SOFT: float = float(os.getenv("TRIGGER_MARKET_SCORE_DELTA_SOFT", "8"))
+    TRIGGER_MARKET_SCORE_DELTA_HARD: float = float(os.getenv("TRIGGER_MARKET_SCORE_DELTA_HARD", "15"))
+    TRIGGER_DEFAULT_DEBOUNCE_CYCLES: int = int(os.getenv("TRIGGER_DEFAULT_DEBOUNCE_CYCLES", "2"))
+    TRIGGER_DEFAULT_DEBOUNCE_SECONDS: int = int(os.getenv("TRIGGER_DEFAULT_DEBOUNCE_SECONDS", "180"))
+    TRIGGER_DEFAULT_COOLDOWN_SECONDS: int = int(os.getenv("TRIGGER_DEFAULT_COOLDOWN_SECONDS", "1800"))
+    TRIGGER_DETECTED_EXPIRY_SECONDS: int = int(os.getenv("TRIGGER_DETECTED_EXPIRY_SECONDS", "600"))
+    TRIGGER_AUTO_FAST_ANALYSIS_ENABLED: bool = _bool_env("TRIGGER_AUTO_FAST_ANALYSIS_ENABLED", "true")
 
     # Phase B market-data foundation. Provider order is centralized here so
     # adapters and business services never each invent their own fallback chain.
@@ -128,3 +152,24 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def validate_realtime_monitor_settings(value: Settings = settings) -> bool:
+    if value.MONITOR_INTERVAL_SECONDS < 60:
+        raise ValueError("MONITOR_INTERVAL_SECONDS must be at least 60")
+    if value.MARKET_SCORE_INTERVAL_MINUTES not in {1, 5, 10, 15, 30}:
+        raise ValueError("MARKET_SCORE_INTERVAL_MINUTES is unsupported")
+    if value.TRIGGER_MARKET_SCORE_DELTA_SOFT >= value.TRIGGER_MARKET_SCORE_DELTA_HARD:
+        raise ValueError("TRIGGER_MARKET_SCORE_DELTA_SOFT must be below the hard threshold")
+    if value.TRIGGER_DEFAULT_DEBOUNCE_CYCLES < 1:
+        raise ValueError("TRIGGER_DEFAULT_DEBOUNCE_CYCLES must be at least 1")
+    if value.TRIGGER_DEFAULT_DEBOUNCE_SECONDS < 0:
+        raise ValueError("TRIGGER_DEFAULT_DEBOUNCE_SECONDS cannot be negative")
+    if value.TRIGGER_DEFAULT_COOLDOWN_SECONDS < 0:
+        raise ValueError("TRIGGER_DEFAULT_COOLDOWN_SECONDS cannot be negative")
+    if value.TRIGGER_DETECTED_EXPIRY_SECONDS <= 0:
+        raise ValueError("TRIGGER_DETECTED_EXPIRY_SECONDS must be positive")
+    return True
+
+
+validate_realtime_monitor_settings()

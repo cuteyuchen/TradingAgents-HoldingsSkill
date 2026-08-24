@@ -22,6 +22,7 @@ from .services.market_snapshot_service import (
     sync_runtime_provider_health,
 )
 from .services.scheduler import start_scheduler, stop_scheduler
+from .services.realtime_monitor import start_realtime_monitor, stop_realtime_monitor
 from .services.skill_runtime import runtime_metadata, runtime_prompt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -64,10 +65,12 @@ async def lifespan(app: FastAPI):
 
     start_scheduler()
     start_remote_market_identity_sync()
+    start_realtime_monitor()
     try:
         yield
     finally:
         stop_scheduler()
+        stop_realtime_monitor()
 
 
 app = FastAPI(
@@ -101,6 +104,8 @@ from .routers import (  # noqa: E402
     model_settings_v2,
     portfolios_v2,
     market_engine_v3,
+    monitor_v3,
+    triggers_v3,
 )
 
 app.include_router(auth_v2.router)
@@ -111,6 +116,8 @@ app.include_router(analysis_v2.router)
 app.include_router(automation_v2.router)
 app.include_router(market_v3.router)
 app.include_router(market_engine_v3.router)
+app.include_router(monitor_v3.router)
+app.include_router(triggers_v3.router)
 
 
 @app.get("/healthz")

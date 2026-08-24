@@ -1391,6 +1391,19 @@ def run_analysis_job(job_id: int) -> None:
         db.commit()
         db.refresh(run)
 
+        # Realtime triggers are resolved only after the authoritative AnalysisRun
+        # exists.  Standard/Deep runs may also refresh explicit structured plans;
+        # natural-language conditions remain report-only.
+        try:
+            from ..triggers.resolution import resolve_trigger_event_from_analysis_run
+            from ..triggers.plans import refresh_trigger_plans_from_run
+
+            resolve_trigger_event_from_analysis_run(db, run)
+            refresh_trigger_plans_from_run(db, run, mode=analysis_mode)
+            db.commit()
+        except Exception:
+            logger.exception("Trigger post-processing failed for analysis run %s", run.id)
+
         if job.notify:
             try:
                 from .notifications import send_run_notifications

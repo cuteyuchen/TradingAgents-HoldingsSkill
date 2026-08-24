@@ -37,7 +37,7 @@ Base = declarative_base()
 
 def init_db() -> None:
     """Create legacy and V2 tables. Called once at application startup."""
-    from . import market_engine_models, market_models, market_runtime_models, models, v2_models  # noqa: F401
+    from . import market_engine_models, market_models, market_runtime_models, models, trigger_models, v2_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
@@ -110,6 +110,14 @@ def _apply_lightweight_migrations() -> None:
                 conn.execute(text("ALTER TABLE health_log_new RENAME TO health_log"))
                 conn.execute(text("CREATE INDEX ix_health_log_code ON health_log (code)"))
                 conn.execute(text("CREATE INDEX ix_health_log_checkpoint ON health_log (checkpoint)"))
+
+    # ``create_all`` does not add columns to an existing SQLite table.  Keep
+    # local developer databases compatible with the Phase D Alembic upgrade.
+    if inspector.has_table("analysis_jobs"):
+        analysis_columns = {c["name"] for c in inspector.get_columns("analysis_jobs")}
+        if "context_json" not in analysis_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE analysis_jobs ADD COLUMN context_json JSON"))
 
 
 def _repair_historical_pnl_values() -> None:
