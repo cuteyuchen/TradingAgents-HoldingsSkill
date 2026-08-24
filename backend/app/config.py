@@ -75,6 +75,9 @@ class Settings:
         "MARKET_SCORE_INTERVAL_MINUTES", 5, {1, 5, 10, 15, 30}
     )
     TRIGGER_MARKET_SCORE_WINDOW_MINUTES: int = int(os.getenv("TRIGGER_MARKET_SCORE_WINDOW_MINUTES", "15"))
+    TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES: int = int(
+        os.getenv("TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES", "5")
+    )
     TRIGGER_MARKET_SCORE_DELTA_SOFT: float = float(os.getenv("TRIGGER_MARKET_SCORE_DELTA_SOFT", "8"))
     TRIGGER_MARKET_SCORE_DELTA_HARD: float = float(os.getenv("TRIGGER_MARKET_SCORE_DELTA_HARD", "15"))
     TRIGGER_DEFAULT_DEBOUNCE_CYCLES: int = int(os.getenv("TRIGGER_DEFAULT_DEBOUNCE_CYCLES", "2"))
@@ -169,6 +172,10 @@ def validate_realtime_monitor_settings(value: Settings = settings) -> bool:
         raise ValueError("TRIGGER_DEFAULT_COOLDOWN_SECONDS cannot be negative")
     if value.TRIGGER_DETECTED_EXPIRY_SECONDS <= 0:
         raise ValueError("TRIGGER_DETECTED_EXPIRY_SECONDS must be positive")
+    if value.TRIGGER_MARKET_SCORE_WINDOW_MINUTES <= 0:
+        raise ValueError("TRIGGER_MARKET_SCORE_WINDOW_MINUTES must be positive")
+    if not 0 <= value.TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES < value.TRIGGER_MARKET_SCORE_WINDOW_MINUTES:
+        raise ValueError("TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES must be below the window")
     return True
 
 

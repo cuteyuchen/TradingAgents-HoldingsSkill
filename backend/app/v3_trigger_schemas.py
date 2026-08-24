@@ -17,6 +17,7 @@ class TriggerPlanCreate(BaseModel):
     debounce_cycles: int = Field(default=2, ge=1, le=20)
     debounce_seconds: int = Field(default=180, ge=0, le=86400)
     cooldown_seconds: int = Field(default=1800, ge=0, le=604800)
+    valid_from: datetime | None = None
     expires_at: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -28,6 +29,7 @@ class TriggerPlanUpdate(BaseModel):
     debounce_cycles: int | None = Field(default=None, ge=1, le=20)
     debounce_seconds: int | None = Field(default=None, ge=0, le=86400)
     cooldown_seconds: int | None = Field(default=None, ge=0, le=604800)
+    valid_from: datetime | None = None
     expires_at: datetime | None = None
 
 

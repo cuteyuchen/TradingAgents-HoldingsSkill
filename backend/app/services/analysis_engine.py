@@ -68,6 +68,12 @@ FINAL_SCHEMA = {
             "action": "add/hold/reduce/sell/watch",
             "reason": "证据与原因",
             "trigger": "条件或价格",
+            "trigger_plan": {
+                "condition": "price_below/price_above/pct_change_below/pct_change_above",
+                "threshold": 0.0,
+                "priority": "P0/P1/P2/P3",
+                "action_context": "触发后复核的动作语义",
+            },
             "quantity": "数量或比例；卖出不得超过 available_qty",
             "max_sellable_qty": 0,
             "stop_loss": "止损/失效条件",
@@ -514,6 +520,31 @@ def _numeric_score(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return score if score == score and score not in {float("inf"), float("-inf")} else None
+
+
+def _trigger_context(job: AnalysisJob) -> dict[str, Any] | None:
+    """Return server-owned Trigger context as analysis context, never an order."""
+
+    context = job.context_json if isinstance(job.context_json, dict) else {}
+    event_ids = list(context.get("trigger_event_ids") or [])
+    if not event_ids and context.get("trigger_event_id") is not None:
+        event_ids = [context["trigger_event_id"]]
+    if not event_ids:
+        return None
+    contexts = [item for item in context.get("trigger_contexts") or [] if isinstance(item, dict)]
+    if not contexts:
+        contexts = [{
+            "trigger_event_id": event_ids[-1],
+            "trigger_reason": context.get("trigger_reason"),
+            "trigger_evidence": context.get("trigger_evidence") or {},
+        }]
+    return {
+        "trigger_event_ids": event_ids,
+        "reason": context.get("trigger_reason"),
+        "evidence": context.get("trigger_evidence") or {},
+        "events": contexts,
+        "interpretation": "这是本次重新分析的原因与已观测证据，不是交易指令；必须独立核验后才能提出任何动作。",
+    }
 
 
 def _normalize_final(
@@ -1051,9 +1082,15 @@ def run_analysis_job(job_id: int) -> None:
         codes = [item["code"] for item in snapshot["holdings"] if item.get("code")]
         _job_stage(db, job, "market_collecting", 20)
         market = collect_market_snapshot(codes)
+        # A realtime Trigger may have attached context after this job began.
+        # Refresh before model prompts so a reused active job sees that reason.
+        db.refresh(job)
         phase_errors: list[str] = []
         evidence: dict[str, Any] = {}
         workflow: dict[str, Any] = {"phase_errors": phase_errors}
+        trigger_context = _trigger_context(job)
+        if trigger_context is not None:
+            workflow["trigger_context"] = trigger_context
         final_profile = deep_profile or quick_profile
         system_prompt = CORE_RULES + "\n\n" + runtime_prompt()
         quality_gate = _quality_gate(snapshot, market)
@@ -1088,6 +1125,7 @@ def run_analysis_job(job_id: int) -> None:
                 "recent_history": history,
                 "checkpoint": job.checkpoint,
                 "analysis_mode": analysis_mode,
+                "trigger_context": trigger_context,
             }
 
             _job_stage(db, job, "analysts_running", 30)
@@ -1295,7 +1333,8 @@ def run_analysis_job(job_id: int) -> None:
                     },
                     "Phase 5 组合经理最终决策：基于最终刷新行情综合全部阶段，严格按 required_schema 返回 JSON。"
                     "每个当前持仓都必须出现，today_actions 与 holdings 一致，buy_candidates 与 candidates 一致，"
-                    "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。",
+                    "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。trigger 保留报告用自然语言；"
+                    "trigger_plan 仅在存在明确机器可读阈值时输出对象，否则必须为 null。",
                     "portfolio_synthesis",
                 )
                 if not final:

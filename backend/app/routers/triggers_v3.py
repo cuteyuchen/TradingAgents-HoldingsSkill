@@ -58,7 +58,7 @@ def create_plan(payload: TriggerPlanCreate, db: Session = Depends(get_db), curre
                       metric=payload.metric, operator=payload.operator, threshold=payload.threshold,
                       secondary_threshold=payload.secondary_threshold, priority=payload.priority,
                       debounce_cycles=payload.debounce_cycles, debounce_seconds=payload.debounce_seconds,
-                      cooldown_seconds=payload.cooldown_seconds, expires_at=payload.expires_at,
+                      cooldown_seconds=payload.cooldown_seconds, valid_from=payload.valid_from, expires_at=payload.expires_at,
                       metadata_json=payload.metadata, source_type="MANUAL", enabled=True)
     db.add(row); db.commit(); db.refresh(row)
     return _plan_payload(row)

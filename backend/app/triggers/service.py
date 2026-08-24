@@ -93,18 +93,43 @@ def apply_detection(db: Session, detection: TriggerDetection, *, now: datetime |
     return event, newly_confirmed
 
 
+def detection_would_confirm(db: Session, detection: TriggerDetection, *, now: datetime | None = None) -> bool:
+    """Return whether the next matching observation would confirm this rule."""
+
+    moment = _aware(now) or datetime.now(UTC)
+    event = (
+        db.query(TriggerEvent)
+        .filter(TriggerEvent.dedupe_key == detection.dedupe_key, TriggerEvent.status == "DETECTED")
+        .order_by(TriggerEvent.detected_at.desc())
+        .first()
+    )
+    if event is not None and event.expires_at and (_aware(event.expires_at) or moment) <= moment:
+        event = None
+    hits = (event.consecutive_hits if event is not None else 0) + 1
+    first = _aware(event.first_detected_at) if event is not None else moment
+    cycle_ready = hits >= max(1, detection.debounce_cycles)
+    time_ready = detection.debounce_seconds > 0 and (moment - (first or moment)).total_seconds() >= detection.debounce_seconds
+    return cycle_ready or time_ready
+
+
 def expire_unmatched_detections(
     db: Session,
     *,
     matched_keys: Iterable[str],
     now: datetime | None = None,
     trigger_types: Iterable[str] | None = None,
+    user_id: int | None = None,
+    portfolio_id: int | None = None,
 ) -> int:
     moment = _aware(now) or datetime.now(UTC)
     matched = set(matched_keys)
     query = db.query(TriggerEvent).filter(TriggerEvent.status == "DETECTED")
     if trigger_types is not None:
         query = query.filter(TriggerEvent.trigger_type.in_(list(trigger_types)))
+    if user_id is not None:
+        query = query.filter(TriggerEvent.user_id == user_id)
+    if portfolio_id is not None:
+        query = query.filter(TriggerEvent.portfolio_id == portfolio_id)
     count = 0
     for event in query.all():
         expired = event.dedupe_key not in matched or (event.expires_at and (_aware(event.expires_at) or moment) <= moment)

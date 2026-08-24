@@ -5,6 +5,7 @@ import logging
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Any, Callable
 
 from sqlalchemy import select
@@ -12,11 +13,14 @@ from sqlalchemy import select
 from ..config import settings
 from ..database import SessionLocal
 from ..market_engine_models import MarketScoreSnapshot
+from ..market.models import DataQualityStatus
 from ..market.providers.base import NormalizedQuote
+from ..market.providers.factory import create_quote_provider
+from ..market.quality import compare_quotes
 from ..trigger_models import TriggerPlan
-from ..triggers.engine import evaluate_holding_plan, evaluate_market_scores
+from ..triggers.engine import TriggerDetection, evaluate_holding_plan, evaluate_market_scores
 from ..triggers.resolution import create_trigger_analysis_job
-from ..triggers.service import apply_detection, expire_unmatched_detections
+from ..triggers.service import apply_detection, detection_would_confirm, expire_unmatched_detections
 from ..v2_models import PortfolioSnapshot
 from .market_engine import MarketEngine
 from .market_snapshot_service import collect_snapshot_quotes
@@ -98,7 +102,16 @@ class RealtimeMonitor:
         now = now.astimezone(CHINA_TZ)
         self._set_state(last_tick_at=now.isoformat(), tick_count=self.status()["tick_count"] + 1)
         db = self.session_factory()
-        summary: dict[str, Any] = {"status": "ok", "session": None, "events": [], "confirmed_events": 0, "analysis_jobs": 0, "market_score_calculated": False, "_analysis_job_ids": []}
+        summary: dict[str, Any] = {
+            "status": "ok",
+            "session": None,
+            "events": [],
+            "confirmed_events": 0,
+            "analysis_jobs": 0,
+            "reused_analysis_jobs": 0,
+            "market_score_calculated": False,
+        }
+        analysis_job_ids: set[int] = set()
         try:
             calendar = TradingCalendarService(db)
             session = calendar.current_session(now)
@@ -127,46 +140,88 @@ class RealtimeMonitor:
                 plans = plans.filter(TriggerPlan.portfolio_id == portfolio_id)
             if user_id is not None:
                 plans = plans.filter(TriggerPlan.user_id == user_id)
-            plans = plans.all()
-            codes = list(dict.fromkeys(row.target_key for row in plans))
+            active_plans: list[TriggerPlan] = []
+            expired_plans: list[TriggerPlan] = []
+            for plan in plans.all():
+                if self._plan_expired(plan, now):
+                    expired_plans.append(plan)
+                elif self._plan_not_yet_valid(plan, now):
+                    continue
+                else:
+                    active_plans.append(plan)
+            holding_codes_by_portfolio = {
+                key: {str(row.code) for row in snapshot.holdings if row.code}
+                for key, snapshot in holdings_by_portfolio.items()
+            }
+            codes = list(dict.fromkeys(row.target_key for row in active_plans))
             quotes = self._holding_quotes(codes) if codes else {}
             matched_keys: set[str] = set()
-            for plan in plans:
+            evaluated_plans: list[TriggerPlan] = []
+            pending_holding: list[tuple[TriggerPlan, TriggerDetection]] = []
+            pending_observations: list[tuple[TriggerPlan, float]] = []
+            for plan in active_plans:
                 snapshot = holdings_by_portfolio.get(plan.portfolio_id)
-                if snapshot is None or plan.target_key not in {row.code for row in snapshot.holdings}:
+                if snapshot is None or plan.target_key not in holding_codes_by_portfolio.get(plan.portfolio_id, set()):
                     continue
+                evaluated_plans.append(plan)
                 quote = quotes.get(plan.target_key)
                 if quote is None:
-                    continue
-                plan.last_evaluated_at = now
-                detection = evaluate_holding_plan(plan, quote, portfolio_snapshot_id=snapshot.id)
+                    quote = NormalizedQuote(
+                        code=plan.target_key,
+                        provider="critical",
+                        quality_status=DataQualityStatus.MISSING,
+                        errors=["critical_quote_not_returned"],
+                    )
+                previous_value = self._last_observed_value(plan)
+                detection = evaluate_holding_plan(
+                    plan,
+                    quote,
+                    previous_value=previous_value,
+                    portfolio_snapshot_id=snapshot.id,
+                )
+                observed_value = self._holding_metric_value(plan, quote)
+                if observed_value is not None and quote.quality_status in {DataQualityStatus.VALID, DataQualityStatus.DEGRADED}:
+                    pending_observations.append((plan, observed_value))
                 if detection is None:
                     continue
+                if (
+                    detection.trigger_type == "HOLDING"
+                    and detection.priority in {"P0", "P1"}
+                    and detection_would_confirm(db, detection, now=now)
+                ):
+                    verified_quote, verification = self._verify_holding_quote(plan.target_key)
+                    detection = evaluate_holding_plan(
+                        plan,
+                        verified_quote,
+                        previous_value=previous_value,
+                        portfolio_snapshot_id=snapshot.id,
+                    )
+                    if detection is None:
+                        continue
+                    detection = replace(
+                        detection,
+                        evidence={**detection.evidence, "dual_source_verification": verification},
+                    )
                 matched_keys.add(detection.dedupe_key)
-                summary_event, confirmed = (None, False) if dry_run else apply_detection(db, detection, now=now)
-                if summary_event is not None:
-                    if confirmed:
-                        plan.last_triggered_at = now
-                    summary["events"].append(summary_event.id)
-                    if confirmed:
-                        summary["confirmed_events"] += 1
-                        if detection.priority in {"P0", "P1"} and detection.trigger_type != "DATA_QUALITY" and settings.TRIGGER_AUTO_FAST_ANALYSIS_ENABLED:
-                            job = create_trigger_analysis_job(db, summary_event)
-                            if job is not None:
-                                summary["analysis_jobs"] += 1
-                                if job.id not in summary["_analysis_job_ids"]:
-                                    summary["_analysis_job_ids"].append(job.id)
+                pending_holding.append((plan, detection))
 
-            if not dry_run:
-                expire_unmatched_detections(db, matched_keys=matched_keys, now=now, trigger_types=["HOLDING"])
+            # No TriggerEvent write has occurred before this point.  The full
+            # market calculation therefore owns an isolated DB session instead
+            # of keeping a Monitor write transaction open while it fetches data.
             if self._should_calculate_market_score(now):
-                result = MarketEngine(db).calculate(captured_at=now, persist=not dry_run)
+                market_db = self.session_factory()
+                try:
+                    MarketEngine(market_db).calculate(captured_at=now, persist=not dry_run)
+                finally:
+                    market_db.close()
                 summary["market_score_calculated"] = True
                 self._last_market_score_at = now
                 self._set_state(last_market_score_at=now.isoformat())
-            current, previous = self._market_score_pair(db, now)
+                db.expire_all()
+            current, previous, quality_previous = self._market_score_pair(db, now)
+            pending_market: list[TriggerDetection] = []
             if current is not None:
-                detections = evaluate_market_scores(current, previous)
+                detections = evaluate_market_scores(current, previous, quality_previous=quality_previous)
                 market_targets = list(holdings_by_portfolio.values()) or [None]
                 for detection in detections:
                     for target_snapshot in market_targets:
@@ -180,19 +235,43 @@ class RealtimeMonitor:
                                 if target_snapshot is not None else detection.dedupe_key
                             ),
                         )
-                        summary_event, confirmed = (None, False) if dry_run else apply_detection(db, scoped_detection, now=now)
-                        if summary_event is not None:
-                            summary["events"].append(summary_event.id)
-                            if confirmed:
-                                summary["confirmed_events"] += 1
-                                if scoped_detection.priority in {"P0", "P1"} and scoped_detection.trigger_type != "DATA_QUALITY" and settings.TRIGGER_AUTO_FAST_ANALYSIS_ENABLED:
-                                    job = create_trigger_analysis_job(db, summary_event)
-                                    if job is not None:
-                                        summary["analysis_jobs"] += 1
-                                        if job.id not in summary["_analysis_job_ids"]:
-                                            summary["_analysis_job_ids"].append(job.id)
-            db.commit()
-            for job_id in summary.pop("_analysis_job_ids", []):
+                        matched_keys.add(scoped_detection.dedupe_key)
+                        pending_market.append(scoped_detection)
+
+            if not dry_run:
+                for plan in expired_plans:
+                    plan.enabled = False
+                for plan in evaluated_plans:
+                    plan.last_evaluated_at = now
+                for plan, value in pending_observations:
+                    self._record_observation(plan, value, now)
+                for plan, detection in pending_holding:
+                    self._persist_detection(
+                        db,
+                        detection,
+                        now=now,
+                        summary=summary,
+                        analysis_job_ids=analysis_job_ids,
+                        plan=plan,
+                    )
+                for detection in pending_market:
+                    self._persist_detection(
+                        db,
+                        detection,
+                        now=now,
+                        summary=summary,
+                        analysis_job_ids=analysis_job_ids,
+                    )
+                expire_unmatched_detections(
+                    db,
+                    matched_keys=matched_keys,
+                    now=now,
+                    trigger_types=["HOLDING", "MARKET", "DATA_QUALITY"],
+                    user_id=user_id,
+                    portfolio_id=portfolio_id,
+                )
+                db.commit()
+            for job_id in analysis_job_ids:
                 threading.Thread(target=self._run_analysis_job, args=(job_id,), name=f"trigger-analysis-{job_id}", daemon=True).start()
             self._set_state(status="running", last_success_at=now.isoformat(), last_error=None, consecutive_errors=0, recent_confirmed_events=summary["confirmed_events"])
             return summary
@@ -219,6 +298,139 @@ class RealtimeMonitor:
             return {}
 
     @staticmethod
+    def _as_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    def _plan_expired(self, plan: TriggerPlan, now: datetime) -> bool:
+        expires_at = self._as_utc(plan.expires_at)
+        return expires_at is not None and expires_at <= self._as_utc(now)
+
+    def _plan_not_yet_valid(self, plan: TriggerPlan, now: datetime) -> bool:
+        valid_from = self._as_utc(plan.valid_from)
+        return valid_from is not None and valid_from > self._as_utc(now)
+
+    @staticmethod
+    def _holding_metric_value(plan: TriggerPlan, quote: NormalizedQuote) -> float | None:
+        metric = str(plan.metric or "").lower()
+        if metric == "price":
+            value = quote.price
+        elif metric in {"pct_change", "change_pct"}:
+            value = quote.pct_change
+        else:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if isfinite(number) else None
+
+    def _last_observed_value(self, plan: TriggerPlan) -> float | None:
+        metadata = dict(plan.metadata_json or {})
+        observation = metadata.get("last_observation")
+        if not isinstance(observation, dict) or observation.get("metric") != str(plan.metric or "").lower():
+            return None
+        try:
+            value = float(observation.get("value"))
+        except (TypeError, ValueError):
+            return None
+        return value if isfinite(value) else None
+
+    @staticmethod
+    def _record_observation(plan: TriggerPlan, value: float, now: datetime) -> None:
+        metadata = dict(plan.metadata_json or {})
+        metadata["last_observation"] = {
+            "metric": str(plan.metric or "").lower(),
+            "value": value,
+            "observed_at": now.isoformat(),
+        }
+        plan.metadata_json = metadata
+
+    def _verify_holding_quote(self, code: str) -> tuple[NormalizedQuote, dict[str, Any]]:
+        """Fetch two direct critical sources only before P0/P1 confirmation."""
+
+        provider_names = list(dict.fromkeys((
+            settings.MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER,
+            *settings.MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS,
+        )))[:2]
+        quotes: list[NormalizedQuote] = []
+        evidence: dict[str, Any] = {"providers": [], "comparison": None}
+        for provider_name in provider_names:
+            try:
+                quote = create_quote_provider(provider_name).get_quote(code)
+            except Exception as exc:  # noqa: BLE001
+                evidence["providers"].append({"provider": provider_name, "error": str(exc)[:300]})
+                continue
+            if quote is None:
+                evidence["providers"].append({"provider": provider_name, "error": "quote_not_returned"})
+                continue
+            quotes.append(quote)
+            evidence["providers"].append({
+                "provider": provider_name,
+                "price": quote.price,
+                "quality_status": quote.quality_status.value,
+                "source_timestamp": quote.source_timestamp.isoformat() if quote.source_timestamp else None,
+            })
+        if len(quotes) < 2:
+            return NormalizedQuote(
+                code=code,
+                provider="dual_source",
+                quality_status=DataQualityStatus.MISSING,
+                errors=["dual_source_verification_unavailable"],
+            ), evidence
+        comparison = compare_quotes(
+            quotes[0],
+            quotes[1],
+            price_conflict_threshold_pct=settings.MARKET_QUOTE_CONFLICT_THRESHOLD_PCT,
+        )
+        evidence["comparison"] = {
+            "quality_status": comparison.quality_status.value,
+            "price_diff_pct": comparison.price_diff_pct,
+            "prev_close_diff_pct": comparison.prev_close_diff_pct,
+            "errors": list(comparison.errors),
+        }
+        verified = replace(quotes[0])
+        verified.provider = "dual_source"
+        verified.quality_status = comparison.quality_status
+        verified.errors = list(dict.fromkeys([*verified.errors, *comparison.errors]))
+        return verified, evidence
+
+    def _persist_detection(
+        self,
+        db: Any,
+        detection: TriggerDetection,
+        *,
+        now: datetime,
+        summary: dict[str, Any],
+        analysis_job_ids: set[int],
+        plan: TriggerPlan | None = None,
+    ) -> None:
+        event, confirmed = apply_detection(db, detection, now=now)
+        if event is None:
+            return
+        summary["events"].append(event.id)
+        if not confirmed:
+            return
+        summary["confirmed_events"] += 1
+        if plan is not None:
+            plan.last_triggered_at = now
+        if (
+            detection.priority not in {"P0", "P1"}
+            or detection.trigger_type == "DATA_QUALITY"
+            or not settings.TRIGGER_AUTO_FAST_ANALYSIS_ENABLED
+        ):
+            return
+        admission = create_trigger_analysis_job(db, event)
+        if admission is None:
+            return
+        if admission.should_start:
+            summary["analysis_jobs"] += 1
+            analysis_job_ids.add(admission.job.id)
+        else:
+            summary["reused_analysis_jobs"] += 1
+
+    @staticmethod
     def _run_analysis_job(job_id: int) -> None:
         from .analysis_engine import run_analysis_job
 
@@ -230,15 +442,33 @@ class RealtimeMonitor:
             return True
         return (now - last).total_seconds() >= settings.MARKET_SCORE_INTERVAL_MINUTES * 60
 
-    def _market_score_pair(self, db: Any, now: datetime) -> tuple[Any | None, Any | None]:
+    def _market_score_pair(self, db: Any, now: datetime) -> tuple[Any | None, Any | None, Any | None]:
+        trade_date = now.astimezone(CHINA_TZ).date()
         current = db.execute(select(MarketScoreSnapshot).where(
-            MarketScoreSnapshot.market == "CN", MarketScoreSnapshot.captured_at <= now
+            MarketScoreSnapshot.market == "CN",
+            MarketScoreSnapshot.trade_date == trade_date,
+            MarketScoreSnapshot.captured_at <= now,
         ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc()).limit(1)).scalar_one_or_none()
         if current is None:
-            return None, None
-        cutoff = current.captured_at - timedelta(minutes=settings.TRIGGER_MARKET_SCORE_WINDOW_MINUTES)
-        previous = db.execute(select(MarketScoreSnapshot).where(MarketScoreSnapshot.market == "CN", MarketScoreSnapshot.captured_at <= cutoff).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc()).limit(1)).scalar_one_or_none()
-        return current, previous
+            return None, None, None
+        tolerance = settings.TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES
+        window = settings.TRIGGER_MARKET_SCORE_WINDOW_MINUTES
+        baseline_min = current.captured_at - timedelta(minutes=window + tolerance)
+        baseline_max = current.captured_at - timedelta(minutes=max(1, window - tolerance))
+        previous = db.execute(select(MarketScoreSnapshot).where(
+            MarketScoreSnapshot.market == "CN",
+            MarketScoreSnapshot.trade_date == current.trade_date,
+            MarketScoreSnapshot.captured_at >= baseline_min,
+            MarketScoreSnapshot.captured_at <= baseline_max,
+            MarketScoreSnapshot.is_frozen.is_(False),
+            MarketScoreSnapshot.display_score.is_not(None),
+        ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc()).limit(1)).scalar_one_or_none()
+        quality_previous = db.execute(select(MarketScoreSnapshot).where(
+            MarketScoreSnapshot.market == "CN",
+            MarketScoreSnapshot.trade_date == current.trade_date,
+            MarketScoreSnapshot.captured_at < current.captured_at,
+        ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc()).limit(1)).scalar_one_or_none()
+        return current, previous, quality_previous
 
 
 _monitor = RealtimeMonitor()

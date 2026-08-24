@@ -13,6 +13,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..decision_contract import canonicalize_analysis_mode
 from ..v2_models import AnalysisJob, PortfolioSnapshot, Schedule
+from .analysis_admission import AnalysisJobAdmission, active_portfolio_analysis
 from .analysis_engine import run_analysis_job
 from .trading_calendar import CHINA_TZ, TradingCalendarService, next_open_date
 
@@ -104,12 +105,29 @@ def run_scheduled_job(job_id: int, schedule_id: int) -> None:
         db.close()
 
 
-def create_scheduled_job(db, schedule: Schedule, *, force: bool = False) -> AnalysisJob:
+def create_scheduled_job(
+    db,
+    schedule: Schedule,
+    *,
+    force: bool = False,
+    with_admission: bool = False,
+) -> AnalysisJob | AnalysisJobAdmission:
+    """Create a scheduled job or reuse the portfolio's active full analysis."""
+
     local_now = datetime.now(CHINA_TZ)
     key = f"schedule:{schedule.id}:{local_now.date().isoformat()}:{schedule.checkpoint}"
     existing = db.query(AnalysisJob).filter(AnalysisJob.idempotency_key == key).first()
     if existing and not force:
-        return existing
+        admission = AnalysisJobAdmission(existing, should_start=False, source="idempotency")
+        return admission if with_admission else admission.job
+    active = active_portfolio_analysis(
+        db,
+        user_id=schedule.user_id,
+        portfolio_id=schedule.portfolio_id,
+    )
+    if active is not None:
+        admission = AnalysisJobAdmission(active, should_start=False, source="active_portfolio")
+        return admission if with_admission else admission.job
     snapshot = _latest_snapshot(db, schedule)
     if snapshot is None:
         raise RuntimeError("no_confirmed_snapshot")
@@ -134,7 +152,8 @@ def create_scheduled_job(db, schedule: Schedule, *, force: bool = False) -> Anal
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job
+    admission = AnalysisJobAdmission(job, should_start=True, source="created")
+    return admission if with_admission else admission.job
 
 
 def tick_schedules() -> None:
@@ -171,11 +190,20 @@ def tick_schedules() -> None:
                     continue
                 if schedule.last_run_at and schedule.last_run_at.replace(tzinfo=UTC).astimezone(CHINA_TZ).date() == local.date():
                     continue
-                job = create_scheduled_job(db, schedule)
+                admission = create_scheduled_job(db, schedule, with_admission=True)
+                if isinstance(admission, AnalysisJobAdmission):
+                    job = admission.job
+                    should_start = admission.should_start
+                else:
+                    # Compatibility for tests and third-party callers that
+                    # still replace ``create_scheduled_job`` with a Job.
+                    job = admission
+                    should_start = True
                 schedule.last_run_at = now_utc
                 schedule.next_run_at = next_run(schedule, now_utc, db=db)
                 db.commit()
-                threading.Thread(target=run_scheduled_job, args=(job.id, schedule.id), daemon=True).start()
+                if should_start:
+                    threading.Thread(target=run_scheduled_job, args=(job.id, schedule.id), daemon=True).start()
             except Exception as exc:
                 logger.exception("Schedule %s failed to enqueue", schedule.id)
                 schedule.consecutive_failures += 1

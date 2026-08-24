@@ -131,7 +131,7 @@ def evaluate_holding_plan(
         user_id=plan.user_id,
         portfolio_id=plan.portfolio_id,
         portfolio_snapshot_id=portfolio_snapshot_id,
-        debounce_cycles=plan.debounce_cycles,
+        debounce_cycles=1 if str(plan.operator or "").upper() in {"CROSS_ABOVE", "CROSS_BELOW"} else plan.debounce_cycles,
         debounce_seconds=plan.debounce_seconds,
         cooldown_seconds=plan.cooldown_seconds,
     )
@@ -144,13 +144,19 @@ def _regime_distance(previous: str | None, current: str | None) -> int:
         return 0
 
 
-def evaluate_market_scores(current: Any, previous: Any | None) -> list[TriggerDetection]:
+def evaluate_market_scores(
+    current: Any,
+    previous: Any | None,
+    *,
+    quality_previous: Any | None = None,
+) -> list[TriggerDetection]:
     if current is None:
         return []
     current_quality = str(current.quality_status or "").upper()
-    previous_quality = str(previous.quality_status or "").upper() if previous is not None else None
+    quality_reference = quality_previous if quality_previous is not None else previous
+    previous_quality = str(quality_reference.quality_status or "").upper() if quality_reference is not None else None
     if bool(current.is_frozen) or current_quality == "FROZEN":
-        if previous is None or not bool(previous.is_frozen):
+        if quality_reference is None or not bool(quality_reference.is_frozen):
             return [TriggerDetection(
                 trigger_type="DATA_QUALITY",
                 target_type="DATA_QUALITY",

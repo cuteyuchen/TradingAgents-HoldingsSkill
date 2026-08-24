@@ -161,7 +161,7 @@ def test_upgrade_bootstrap_restores_existing_schedule(monkeypatch):
     created = []
     started = []
 
-    def fake_create(_db, schedule):
+    def fake_create(_db, schedule, **_kwargs):
         created.append(schedule.id)
         return SimpleNamespace(id=101)
 
@@ -205,7 +205,7 @@ def test_tick_schedules_enqueues_only_on_persisted_open_day(monkeypatch):
     created = []
     started = []
 
-    def fake_create(_db, schedule):
+    def fake_create(_db, schedule, **_kwargs):
         created.append(schedule.id)
         return SimpleNamespace(id=99)
 
@@ -248,7 +248,7 @@ def test_tick_schedules_catches_up_when_tick_arrives_after_checkpoint(monkeypatc
     created = []
     started = []
 
-    def fake_create(_db, schedule):
+    def fake_create(_db, schedule, **_kwargs):
         created.append(schedule.id)
         return SimpleNamespace(id=100)
 

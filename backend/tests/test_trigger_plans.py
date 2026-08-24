@@ -20,7 +20,7 @@ def test_extracts_only_explicit_structured_condition():
         id=7,
         user_id=1,
         portfolio_snapshot_id=None,
-        structured_result_json={"result": {"holdings": [{"code": "600519", "trigger": {"condition": "price_below", "threshold": 100}}]}},
+        structured_result_json={"result": {"holdings": [{"code": "600519", "trigger": "跌破100元重新评估", "trigger_plan": {"condition": "price_below", "threshold": 100}}]}},
         job=SimpleNamespace(portfolio_id=2),
     )
     plans = extract_trigger_plans_from_analysis_run(db_session, run)
