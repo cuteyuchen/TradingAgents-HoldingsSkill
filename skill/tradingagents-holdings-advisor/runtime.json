@@ -1,7 +1,7 @@
 {
   "name": "tradingagents-holdings-advisor",
-  "version": "2.1.0",
-  "prompt_version": "2026-08-23",
+  "version": "2.2.0",
+  "prompt_version": "2026-08-24",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
     "confirmed_portfolio_snapshot",
@@ -35,10 +35,11 @@
     "Remove every candidate whose code is already present in current holdings; preserve any supported add or conditional-add verdict in the holding action plan.",
     "Final quote-sensitive fields must be refreshed immediately before the final portfolio decision.",
     "The system provides research assistance only, never promises returns, and never executes brokerage orders.",
-    "Total portfolio exposure is a risk input, not a universal fixed hard gate; until Dynamic Risk Budget exists, do not force a trade or cash raise solely because exposure crosses one fixed percentage."
+    "Total portfolio exposure is a risk input, not a universal fixed hard gate; until Dynamic Risk Budget exists, do not force a trade or cash raise solely because exposure crosses one fixed percentage.",
+    "Portfolio Engine constraints are deterministic facts: stock 20% and classified sector/theme ETF 30% caps constrain new risk, available_qty constrains sellable quantity, and a FROZEN market state blocks actionable risk increases without forcing a sell."
   ],
   "decision_contract": {
-    "version": "2.1.0",
+    "version": "2.2.0",
     "default_portfolio_action": "no_action",
     "candidates": {
       "min": 0,
@@ -49,7 +50,7 @@
     "hard_caps": {
       "stock": 0.20,
       "sector_theme_etf": 0.30,
-      "deterministic_enforcement": false
+      "deterministic_enforcement": true
     },
     "horizons": {
       "short": {

@@ -17,6 +17,8 @@ from ..decision_contract import (
     canonicalize_analysis_mode,
     should_normalize_no_action,
 )
+from ..portfolio.decision_gate import apply_portfolio_decision_gate
+from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
 from .model_client import call_model, parse_json_result
@@ -38,6 +40,7 @@ CORE_RULES = """
 - 证据充分、所有持仓为 hold/watch 且没有通过门控的新 Candidate 时，组合级结果必须为 no_action；质量门控 blocked 时必须保留 watch_only。
 - 事实、推断、风险和失效条件必须区分。
 - 这是研究辅助，不承诺收益，不执行交易。
+- portfolio_context 是后端提供的确定性组合风险事实和动作上限，不是交易指令；不得覆盖 hard_cap、max_additional_weight 或 max_sellable_qty。
 """.strip()
 
 # Keep the model-facing schema explicit.  The frontend can render the report even
@@ -75,7 +78,13 @@ FINAL_SCHEMA = {
                 "action_context": "触发后复核的动作语义",
             },
             "quantity": "数量或比例；卖出不得超过 available_qty",
+            "current_weight": 0.0,
+            "target_weight": 0.0,
+            "adjustment_weight": 0.0,
             "max_sellable_qty": 0,
+            "hard_cap": 0.0,
+            "max_additional_weight": 0.0,
+            "portfolio_gate": "PASS/ADJUSTED/BLOCKED/REVIEW_ONLY",
             "stop_loss": "止损/失效条件",
             "take_profit": "止盈/观察条件",
             "risk": "主要风险",
@@ -848,6 +857,7 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
     revision = result.get("risk_revision") or {}
     risk_debate = result.get("risk_debate_state") or {}
     portfolio_final = result.get("portfolio_manager_final") or {}
+    decision_gate = result.get("decision_gate") or {}
     lines = [
         f"# {job.checkpoint or '即时'} 持仓分析",
         "",
@@ -959,6 +969,28 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
         f"- 风控裁决：`{portfolio_final.get('risk_decision', revision.get('decision', 'pass'))}`",
         f"- 硬性约束：{_md(portfolio_final.get('hard_constraints') or revision.get('hard_constraints'))}",
         f"- 去风险触发器：{_md(portfolio_final.get('de_risk_triggers') or revision.get('de_risk_triggers'))}",
+        "",
+        "## 组合约束门",
+        "",
+        f"- Gate 状态：`{_md(decision_gate.get('status'))}`；组合动作：`{_md(decision_gate.get('portfolio_action'))}`",
+        f"- 阻断原因：{_md(decision_gate.get('blocking_reasons') or '无')}",
+        f"- 调整提示：{_md(decision_gate.get('warnings') or '无')}",
+        "",
+        "| 标的 | Gate | 请求目标/数量 | 允许目标/数量 | Reason Code |",
+        "|---|---|---|---|---|",
+    ])
+    for gate_row in decision_gate.get("action_results") or []:
+        lines.append(
+            f"| {_md(gate_row.get('code'))} | {_md(gate_row.get('status'))} | "
+            f"{_md(gate_row.get('requested_target_weight') if gate_row.get('requested_target_weight') is not None else gate_row.get('requested_qty'))} | "
+            f"{_md(gate_row.get('allowed_target_weight') if gate_row.get('allowed_target_weight') is not None else gate_row.get('allowed_qty'))} | "
+            f"{_md(gate_row.get('reason_codes'))} |"
+        )
+    if not decision_gate.get("action_results"):
+        lines.append("| - | PASS | - | - | - |")
+
+    lines.extend([
+        "",
         "",
         "## 今日持仓操作",
         "",
@@ -1093,6 +1125,20 @@ def run_analysis_job(job_id: int) -> None:
             workflow["trigger_context"] = trigger_context
         final_profile = deep_profile or quick_profile
         system_prompt = CORE_RULES + "\n\n" + runtime_prompt()
+        try:
+            portfolio_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Portfolio Engine context failed for analysis job %s", job.id)
+            portfolio_context = {
+                "interpretation": "Portfolio Engine context unavailable; do not produce executable risk-increase actions.",
+                "portfolio_quality": "BLOCKED",
+                "portfolio_confidence": 0.0,
+                "position_constraints": [],
+                "market_state_frozen": False,
+                "portfolio_engine_error": str(exc)[:300],
+            }
+            workflow["phase_errors"].append("portfolio_engine_context_unavailable")
+        workflow["portfolio_context"] = portfolio_context
         quality_gate = _quality_gate(snapshot, market)
         analysis_mode = canonicalize_analysis_mode(job.mode)
 
@@ -1126,6 +1172,7 @@ def run_analysis_job(job_id: int) -> None:
                 "checkpoint": job.checkpoint,
                 "analysis_mode": analysis_mode,
                 "trigger_context": trigger_context,
+                "portfolio_context": portfolio_context,
             }
 
             _job_stage(db, job, "analysts_running", 30)
@@ -1355,6 +1402,28 @@ def run_analysis_job(job_id: int) -> None:
             final = _normalize_final(final, snapshot["holdings"], quality_gate.get("grade", market.get("quality_grade", "C")), workflow)
         else:
             final = _normalize_final(final, snapshot["holdings"], final.get("data_quality_grade", "F"), workflow)
+        try:
+            # Rebuild from the final quote refresh so the Gate sees the same
+            # server-owned price facts as the persisted visible decision.
+            portfolio_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
+            workflow["portfolio_context"] = portfolio_context
+            final = apply_portfolio_decision_gate(final, portfolio_context=portfolio_context)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Portfolio Decision Gate failed for analysis job %s", job.id)
+            workflow["phase_errors"].append("portfolio_decision_gate_unavailable")
+            final["portfolio_engine"] = {"status": "unavailable", "error": str(exc)[:300]}
+            final["decision_gate"] = {
+                "status": "REVIEW_ONLY",
+                "portfolio_action": "WATCH_ONLY",
+                "blocking_reasons": ["PORTFOLIO_ENGINE_UNAVAILABLE"],
+                "calculation_version": "portfolio-decision-gate-v1",
+            }
+            if any(str(row.get("action") or "").lower() in {"add", "conditional_add", "reduce", "sell"} for row in final.get("holdings") or []):
+                final["final_rating"] = "watch_only"
+        final["portfolio_engine"] = {
+            "portfolio_context": workflow.get("portfolio_context"),
+            "calculation_version": "portfolio-engine-v1",
+        }
         for key in (
             "evidence_pack",
             "quality_gate",
@@ -1369,6 +1438,9 @@ def run_analysis_job(job_id: int) -> None:
             "hot_sectors",
             "rebalance_plan",
             "checkpoint_plan",
+            "portfolio_context",
+            "decision_gate",
+            "portfolio_engine",
         ):
             workflow[key] = final.get(key)
 

@@ -37,7 +37,15 @@ Base = declarative_base()
 
 def init_db() -> None:
     """Create legacy and V2 tables. Called once at application startup."""
-    from . import market_engine_models, market_models, market_runtime_models, models, trigger_models, v2_models  # noqa: F401
+    from . import (  # noqa: F401
+        market_engine_models,
+        market_models,
+        market_runtime_models,
+        models,
+        portfolio_models,
+        trigger_models,
+        v2_models,
+    )
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()

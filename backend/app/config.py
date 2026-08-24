@@ -134,6 +134,31 @@ class Settings:
     MARKET_IDENTITY_SYNC_TOKEN: str = os.getenv("MARKET_IDENTITY_SYNC_TOKEN", "").strip()
     DAILY_BAR_SYNC_ENABLED: bool = _bool_env("DAILY_BAR_SYNC_ENABLED", "false")
 
+    # Phase E Portfolio Operating System.  Hard caps remain defined by the
+    # decision contract; these settings only control market-history and cost
+    # calculation inputs shared by the portfolio services.
+    PORTFOLIO_CORRELATION_LOOKBACK_DAYS: int = int(os.getenv("PORTFOLIO_CORRELATION_LOOKBACK_DAYS", "60"))
+    PORTFOLIO_CORRELATION_MIN_SAMPLES: int = int(os.getenv("PORTFOLIO_CORRELATION_MIN_SAMPLES", "40"))
+    PORTFOLIO_HIGH_CORRELATION_THRESHOLD: float = float(
+        os.getenv("PORTFOLIO_HIGH_CORRELATION_THRESHOLD", "0.80")
+    )
+    PORTFOLIO_TRADING_DAYS_PER_YEAR: int = int(os.getenv("PORTFOLIO_TRADING_DAYS_PER_YEAR", "242"))
+    PORTFOLIO_BROKER_COMMISSION_BPS: float | None = (
+        float(os.environ["PORTFOLIO_BROKER_COMMISSION_BPS"])
+        if os.getenv("PORTFOLIO_BROKER_COMMISSION_BPS") not in {None, ""}
+        else None
+    )
+    PORTFOLIO_MINIMUM_COMMISSION: float | None = (
+        float(os.environ["PORTFOLIO_MINIMUM_COMMISSION"])
+        if os.getenv("PORTFOLIO_MINIMUM_COMMISSION") not in {None, ""}
+        else None
+    )
+    PORTFOLIO_SELL_TAX_BPS: float | None = (
+        float(os.environ["PORTFOLIO_SELL_TAX_BPS"])
+        if os.getenv("PORTFOLIO_SELL_TAX_BPS") not in {None, ""}
+        else None
+    )
+
     # Server.
     HOST: str = os.getenv("ADVISOR_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("ADVISOR_PORT", "8000"))
@@ -176,6 +201,14 @@ def validate_realtime_monitor_settings(value: Settings = settings) -> bool:
         raise ValueError("TRIGGER_MARKET_SCORE_WINDOW_MINUTES must be positive")
     if not 0 <= value.TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES < value.TRIGGER_MARKET_SCORE_WINDOW_MINUTES:
         raise ValueError("TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES must be below the window")
+    if value.PORTFOLIO_CORRELATION_LOOKBACK_DAYS <= 0:
+        raise ValueError("PORTFOLIO_CORRELATION_LOOKBACK_DAYS must be positive")
+    if value.PORTFOLIO_CORRELATION_MIN_SAMPLES < 2:
+        raise ValueError("PORTFOLIO_CORRELATION_MIN_SAMPLES must be at least 2")
+    if not 0 < value.PORTFOLIO_HIGH_CORRELATION_THRESHOLD <= 1:
+        raise ValueError("PORTFOLIO_HIGH_CORRELATION_THRESHOLD must be in (0, 1]")
+    if value.PORTFOLIO_TRADING_DAYS_PER_YEAR <= 0:
+        raise ValueError("PORTFOLIO_TRADING_DAYS_PER_YEAR must be positive")
     return True
 
 

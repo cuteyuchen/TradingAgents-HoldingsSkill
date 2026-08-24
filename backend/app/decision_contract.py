@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-CONTRACT_VERSION = "2.1.0"
+CONTRACT_VERSION = "2.2.0"
 DEFAULT_PORTFOLIO_ACTION = "no_action"
 CANDIDATE_MIN_COUNT = 0
 CANDIDATE_MAX_COUNT = 3
@@ -54,7 +54,7 @@ def decision_contract_payload() -> dict[str, Any]:
         "hard_caps": {
             "stock": STOCK_HARD_CAP_RATIO,
             "sector_theme_etf": SECTOR_THEME_ETF_HARD_CAP_RATIO,
-            "deterministic_enforcement": False,
+            "deterministic_enforcement": True,
         },
         "horizons": HORIZONS,
         "analysis_modes": {
