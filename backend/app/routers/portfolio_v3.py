@@ -183,7 +183,7 @@ def create_ledger(
             db, user_id=current_user.id, portfolio_id=portfolio_id, payload=payload.model_dump()
         )
         refresh_affected_snapshot_reconciliations(
-            db, portfolio_id=portfolio_id, available_at_values=[row.available_at]
+            db, portfolio_id=portfolio_id, executed_at_values=[row.executed_at]
         )
         db.commit()
         db.refresh(row)
@@ -204,10 +204,10 @@ def revise_ledger(
     _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
     row = _entry(db, user_id=current_user.id, portfolio_id=portfolio_id, entry_id=entry_id)
     try:
-        previous_available_at = row.available_at
+        previous_executed_at = row.executed_at
         revise_ledger_entry(db, entry=row, user_id=current_user.id, changes=payload.changes, reason=payload.reason)
         refresh_affected_snapshot_reconciliations(
-            db, portfolio_id=portfolio_id, available_at_values=[previous_available_at, row.available_at]
+            db, portfolio_id=portfolio_id, executed_at_values=[previous_executed_at, row.executed_at]
         )
         db.commit()
         db.refresh(row)
@@ -230,7 +230,7 @@ def void_ledger(
     try:
         void_ledger_entry(db, entry=row, user_id=current_user.id, reason=payload.reason)
         refresh_affected_snapshot_reconciliations(
-            db, portfolio_id=portfolio_id, available_at_values=[row.available_at]
+            db, portfolio_id=portfolio_id, executed_at_values=[row.executed_at]
         )
         db.commit()
         db.refresh(row)
@@ -253,7 +253,7 @@ def confirm_ledger(
     try:
         confirm_ledger_entry(db, entry=row, user_id=current_user.id, reason=payload.reason)
         refresh_affected_snapshot_reconciliations(
-            db, portfolio_id=portfolio_id, available_at_values=[row.available_at]
+            db, portfolio_id=portfolio_id, executed_at_values=[row.executed_at]
         )
         db.commit()
         db.refresh(row)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -22,18 +23,38 @@ MATERIALIZED_FIELDS = frozenset({
     "gross_amount", "fees", "taxes", "net_amount", "currency", "executed_at",
     "trade_date", "available_at", "source", "source_ref", "broker_order_id", "notes",
 })
+DEFAULT_LEDGER_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _as_datetime(value: Any) -> datetime:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            value = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("ledger datetime is invalid") from exc
     if isinstance(value, datetime):
-        return value.replace(tzinfo=None) if value.tzinfo else value
-    raise ValueError("executed_at is required")
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=DEFAULT_LEDGER_TIMEZONE)
+        return aware.astimezone(UTC).replace(tzinfo=None)
+    raise ValueError("ledger datetime is required")
 
 
 def _as_date(value: Any, fallback: datetime) -> date:
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
-    return fallback.date()
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip()[:10])
+        except ValueError as exc:
+            raise ValueError("ledger date is invalid") from exc
+    # ``fallback`` is stored as UTC-naive; derive the A-share trade date in
+    # Shanghai time so a local-time transaction around midnight does not move
+    # to the previous UTC calendar date.
+    return fallback.replace(tzinfo=UTC).astimezone(DEFAULT_LEDGER_TIMEZONE).date()
 
 
 def _positive(value: Any, field: str) -> float:
@@ -73,7 +94,12 @@ def _security_exists(db: Session, code: str) -> bool:
     ).scalar_one_or_none() is not None
 
 
-def _entry_values(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
+def _entry_values(
+    db: Session,
+    payload: dict[str, Any],
+    *,
+    ingested_at: datetime | None = None,
+) -> dict[str, Any]:
     entry_type = str(payload.get("entry_type") or "").upper()
     if entry_type not in ENTRY_TYPES:
         raise ValueError("unsupported entry_type")
@@ -83,7 +109,7 @@ def _entry_values(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     executed_at = _as_datetime(payload.get("executed_at"))
     trade_date = _as_date(payload.get("trade_date"), executed_at)
     available_at = payload.get("available_at")
-    available_at = _as_datetime(available_at) if available_at is not None else executed_at
+    available_at = _as_datetime(available_at) if available_at is not None else _as_datetime(ingested_at or datetime.now(UTC))
     code = normalize_security_code(payload.get("security_code")) or None
     side = str(payload.get("side") or "").upper() or None
     quantity = _optional_number(payload.get("quantity"))
@@ -150,7 +176,7 @@ def create_ledger_entry(
         ).scalar_one_or_none()
         if existing is not None:
             return existing, False
-    values = _entry_values(db, payload)
+    values = _entry_values(db, payload, ingested_at=datetime.now(UTC))
     entry = TradeLedgerEntry(
         user_id=user_id,
         portfolio_id=portfolio_id,
@@ -256,12 +282,29 @@ def transaction_cost_estimate(*, side: str | None, gross_amount: float | None, c
     return commission + sell_tax
 
 
+def confirmed_ledger_entries_available_at(
+    db: Session,
+    *,
+    portfolio_id: int,
+    as_of: datetime,
+) -> list[TradeLedgerEntry]:
+    """Return only facts known to the system by ``as_of`` for no-lookahead use."""
+
+    cutoff = _as_datetime(as_of)
+    return db.execute(select(TradeLedgerEntry).where(
+        TradeLedgerEntry.portfolio_id == portfolio_id,
+        TradeLedgerEntry.status == "CONFIRMED",
+        TradeLedgerEntry.available_at <= cutoff,
+    ).order_by(TradeLedgerEntry.available_at.asc(), TradeLedgerEntry.executed_at.asc(), TradeLedgerEntry.id.asc())).scalars().all()
+
+
 __all__ = [
     "ENTRY_TYPES",
     "LEDGER_SOURCES",
     "LEDGER_STATUSES",
     "create_ledger_entry",
     "confirm_ledger_entry",
+    "confirmed_ledger_entries_available_at",
     "revise_ledger_entry",
     "transaction_cost_estimate",
     "void_ledger_entry",

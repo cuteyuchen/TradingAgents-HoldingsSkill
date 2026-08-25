@@ -11,7 +11,12 @@ from app.market_engine_models import DailyBarCache, MarketScoreSnapshot
 from app.market_models import SecurityMaster
 from app.portfolio.constraints import build_portfolio_constraints
 from app.portfolio.decision_gate import apply_portfolio_decision_gate
-from app.portfolio.ledger import confirm_ledger_entry, create_ledger_entry, revise_ledger_entry
+from app.portfolio.ledger import (
+    confirmed_ledger_entries_available_at,
+    confirm_ledger_entry,
+    create_ledger_entry,
+    revise_ledger_entry,
+)
 from app.portfolio.risk import build_portfolio_state, calculate_risk_metrics, latest_confirmed_snapshot
 from app.portfolio.service import calculate_portfolio_risk
 from app.portfolio.snapshot_diff import (
@@ -50,6 +55,7 @@ def _snapshot(
     status: str = "confirmed",
     total_assets: float = 100_000,
     cash: float | None = 20_000,
+    repo_or_standard_bond_value: float | None = None,
     holdings: list[dict] | None = None,
 ) -> PortfolioSnapshot:
     row = PortfolioSnapshot(
@@ -60,6 +66,7 @@ def _snapshot(
         total_assets=total_assets,
         total_market_value=total_assets - (cash or 0),
         broker_available_cash=cash,
+        repo_or_standard_bond_value=repo_or_standard_bond_value,
     )
     db.add(row)
     db.flush()
@@ -140,6 +147,103 @@ def test_ledger_is_idempotent_revisioned_and_does_not_override_current_snapshot(
         assert state["positions"][0]["qty"] == 100
         assert db.query(TradeLedgerEntry).count() == 1
         assert snapshot.id == state["snapshot_id"]
+    finally:
+        db.close()
+
+
+def test_ledger_aware_datetime_is_normalized_to_utc_naive():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        entry, _ = create_ledger_entry(db, user_id=user.id, portfolio_id=portfolio.id, payload={
+            "entry_type": "CASH_IN",
+            "gross_amount": 1000,
+            "executed_at": "2026-08-25T10:00:00+08:00",
+            "available_at": "2026-08-25T10:00:00+08:00",
+        })
+        assert entry.executed_at == datetime(2026, 8, 25, 2, 0)
+        assert entry.available_at == datetime(2026, 8, 25, 2, 0)
+    finally:
+        db.close()
+
+
+def test_reconciliation_uses_executed_at_while_available_facts_respect_no_lookahead():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        _master(db, "600519")
+        before_time = datetime(2026, 8, 20, 0, 0)
+        after_time = datetime(2026, 8, 21, 0, 0)
+        before = _snapshot(db, user, portfolio, snapshot_time=before_time, holdings=[
+            {"code": "600519", "qty": 100, "available_qty": 100, "market_value": 10_000, "name": "A"},
+        ])
+        after = _snapshot(db, user, portfolio, snapshot_time=after_time, holdings=[
+            {"code": "600519", "qty": 200, "available_qty": 200, "market_value": 20_000, "name": "A"},
+        ])
+        entry, _ = create_ledger_entry(db, user_id=user.id, portfolio_id=portfolio.id, payload={
+            "entry_type": "TRADE", "security_code": "600519", "side": "BUY", "quantity": 100,
+            "price": 100, "executed_at": "2026-08-20T10:00:00+00:00",
+            "available_at": "2026-08-25T10:00:00+08:00",
+        })
+        assert reconcile_snapshot_diff_with_ledger(db, before=before, after=after)["status"] == "MATCHED"
+        assert confirmed_ledger_entries_available_at(
+            db, portfolio_id=portfolio.id, as_of=datetime(2026, 8, 21, 0, 0)
+        ) == []
+        assert confirmed_ledger_entries_available_at(
+            db, portfolio_id=portfolio.id, as_of=datetime(2026, 8, 25, 3, 0, tzinfo=UTC)
+        ) == [entry]
+    finally:
+        db.close()
+
+
+def test_ledger_revision_parses_iso_datetime_and_date_values():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        _master(db, "600519")
+        entry, _ = create_ledger_entry(db, user_id=user.id, portfolio_id=portfolio.id, payload={
+            "entry_type": "TRADE", "security_code": "600519", "side": "BUY", "quantity": 1,
+            "price": 100, "executed_at": "2026-08-20T10:00:00+08:00",
+            "available_at": "2026-08-20T11:00:00+08:00",
+        })
+        revise_ledger_entry(
+            db,
+            entry=entry,
+            user_id=user.id,
+            changes={
+                "executed_at": "2026-08-21T10:00:00+08:00",
+                "available_at": "2026-08-25T10:00:00+08:00",
+                "trade_date": "2026-08-21",
+            },
+            reason="correct broker timestamps",
+        )
+        assert entry.executed_at == datetime(2026, 8, 21, 2, 0)
+        assert entry.available_at == datetime(2026, 8, 25, 2, 0)
+        assert entry.trade_date == date(2026, 8, 21)
+    finally:
+        db.close()
+
+
+def test_live_estimated_total_assets_includes_repo_without_double_counting_corrected_cash():
+    db = _db()
+    try:
+        user, portfolio = _portfolio(db)
+        moment = datetime(2026, 8, 25, 2, 0, tzinfo=UTC)
+        _master(db, "600519")
+        snapshot = _snapshot(
+            db, user, portfolio, snapshot_time=moment, total_assets=1_000_000, cash=200_000,
+            repo_or_standard_bond_value=300_000,
+            holdings=[{"code": "600519", "qty": 100, "available_qty": 100, "market_value": 500_000, "name": "Stock"}],
+        )
+        state = build_portfolio_state(
+            db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment,
+            quote_rows=_quotes(("600519", 5_000, "VALID")),
+        )
+        assert state["reserve_assets"] == 500_000
+        assert state["current_estimated_total_assets"] == 1_000_000
+        assert state["positions"][0]["weight"] == pytest.approx(0.50)
+        assert state["cash_ratio"] == pytest.approx(0.50)
+        assert state["cash_only_ratio"] == pytest.approx(0.20)
     finally:
         db.close()
 

@@ -19,7 +19,7 @@ from ..services.market_snapshot_service import collect_snapshot_quotes
 from ..v2_models import HoldingItem, PortfolioSnapshot
 from .config import KEEP_SCORE_MIN_AVAILABLE_WEIGHT, KEEP_SCORE_WEIGHTS
 from .constraints import hard_cap_for_security
-from .snapshot_diff import snapshot_cash
+from .snapshot_diff import snapshot_cash, snapshot_reserve_assets
 
 QuoteLoader = Callable[[list[str]], Any]
 
@@ -169,11 +169,13 @@ def build_portfolio_state(
             "flags": flags,
         })
     cash = snapshot_cash(snapshot)
+    repo_or_standard_bond_value = snapshot.repo_or_standard_bond_value
+    reserve_assets = snapshot_reserve_assets(snapshot)
     valued_positions = [float(row["market_value"]) for row in positions if row.get("market_value") is not None]
     complete_valuation = len(valued_positions) == len(positions)
     market_value = sum(valued_positions) if complete_valuation else None
     snapshot_total_assets = snapshot.total_assets
-    current_estimated_total_assets = market_value + cash if market_value is not None and cash is not None else None
+    current_estimated_total_assets = market_value + reserve_assets if market_value is not None and reserve_assets is not None else None
     total_assets = snapshot_total_assets if historical_snapshot_valuation else current_estimated_total_assets
     if total_assets is None and historical_snapshot_valuation:
         total_assets = current_estimated_total_assets
@@ -194,7 +196,8 @@ def build_portfolio_state(
         if row["hard_cap"] is not None and row["weight"] is not None and row["weight"] > row["hard_cap"] + 1e-9:
             row["flags"].append("HARD_CAP_BREACH")
             flags.append(f"HARD_CAP_BREACH:{row['code']}")
-    cash_ratio = cash / total_assets if cash is not None and total_assets and total_assets > 0 else None
+    cash_ratio = reserve_assets / total_assets if reserve_assets is not None and total_assets and total_assets > 0 else None
+    cash_only_ratio = cash / total_assets if cash is not None and total_assets and total_assets > 0 else None
     gross_exposure = sum(float(row["weight"] or 0.0) for row in positions if row.get("weight") is not None) if total_assets else None
     missing_quotes = len(codes) - accepted_quotes
     if codes and accepted_quotes == 0 and not historical_snapshot_valuation:
@@ -213,7 +216,10 @@ def build_portfolio_state(
         "current_estimated_total_assets": current_estimated_total_assets,
         "total_market_value": market_value,
         "cash": cash,
+        "repo_or_standard_bond_value": repo_or_standard_bond_value,
+        "reserve_assets": reserve_assets,
         "cash_ratio": cash_ratio,
+        "cash_only_ratio": cash_only_ratio,
         "gross_exposure": gross_exposure,
         "position_count": len(positions),
         "stock_count": sum(1 for row in positions if row.get("security_type") == "STOCK"),

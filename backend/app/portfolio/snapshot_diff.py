@@ -17,6 +17,16 @@ def snapshot_cash(snapshot: PortfolioSnapshot) -> float | None:
     return snapshot.broker_available_cash if snapshot.broker_available_cash is not None else snapshot.corrected_unused_funds
 
 
+def snapshot_reserve_assets(snapshot: PortfolioSnapshot) -> float | None:
+    """Return liquid non-equity reserve without double-counting corrected funds."""
+
+    if snapshot.broker_available_cash is not None:
+        return snapshot.broker_available_cash + (snapshot.repo_or_standard_bond_value or 0.0)
+    if snapshot.corrected_unused_funds is not None:
+        return snapshot.corrected_unused_funds
+    return snapshot.repo_or_standard_bond_value
+
+
 def _holding_key(item: Any) -> str:
     return str(item.code or "").strip() or f"name:{str(item.name or '').strip()}"
 
@@ -88,8 +98,8 @@ def reconcile_snapshot_diff_with_ledger(
     rows = db.execute(select(TradeLedgerEntry).where(
         TradeLedgerEntry.portfolio_id == after.portfolio_id,
         TradeLedgerEntry.status == "CONFIRMED",
-        TradeLedgerEntry.available_at > before.snapshot_time,
-        TradeLedgerEntry.available_at <= after.snapshot_time,
+        TradeLedgerEntry.executed_at > before.snapshot_time,
+        TradeLedgerEntry.executed_at <= after.snapshot_time,
     )).scalars().all()
     ledger_delta: dict[str, float] = defaultdict(float)
     non_trade_codes: set[str] = set()
@@ -169,11 +179,16 @@ def refresh_affected_snapshot_reconciliations(
     db: Session,
     *,
     portfolio_id: int,
-    available_at_values: list[datetime | None],
+    executed_at_values: list[datetime | None] | None = None,
+    available_at_values: list[datetime | None] | None = None,
 ) -> list[PortfolioSnapshotDiff]:
-    """Refresh only adjacent confirmed snapshot pairs touched by ledger timing."""
+    """Refresh adjacent snapshot pairs touched by actual execution timing.
 
-    moments = [value for value in available_at_values if value is not None]
+    ``available_at_values`` remains a compatibility alias for callers from the
+    previous contract; new callers must pass ``executed_at_values``.
+    """
+
+    moments = [value for value in (executed_at_values or available_at_values or []) if value is not None]
     if not moments:
         return []
     snapshots = db.execute(select(PortfolioSnapshot).where(
@@ -191,6 +206,7 @@ __all__ = [
     "calculate_snapshot_diff",
     "reconcile_snapshot_diff_with_ledger",
     "snapshot_cash",
+    "snapshot_reserve_assets",
     "refresh_affected_snapshot_reconciliations",
     "upsert_snapshot_diff",
 ]
