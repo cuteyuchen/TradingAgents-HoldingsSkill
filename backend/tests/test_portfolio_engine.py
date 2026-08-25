@@ -190,7 +190,7 @@ def test_reconciliation_uses_executed_at_while_available_facts_respect_no_lookah
             db, portfolio_id=portfolio.id, as_of=datetime(2026, 8, 21, 0, 0)
         ) == []
         assert confirmed_ledger_entries_available_at(
-            db, portfolio_id=portfolio.id, as_of=datetime(2026, 8, 25, 3, 0, tzinfo=UTC)
+            db, portfolio_id=portfolio.id, as_of=datetime(2026, 8, 25, 2, 30)
         ) == [entry]
     finally:
         db.close()
@@ -220,6 +220,15 @@ def test_ledger_revision_parses_iso_datetime_and_date_values():
         assert entry.executed_at == datetime(2026, 8, 21, 2, 0)
         assert entry.available_at == datetime(2026, 8, 25, 2, 0)
         assert entry.trade_date == date(2026, 8, 21)
+        with pytest.raises(ValueError, match="available_at_cannot_move_backwards"):
+            revise_ledger_entry(
+                db,
+                entry=entry,
+                user_id=user.id,
+                changes={"available_at": "2026-08-20T10:00:00+08:00"},
+                reason="invalid backdated availability",
+            )
+        assert entry.available_at == datetime(2026, 8, 25, 2, 0)
     finally:
         db.close()
 
@@ -229,21 +238,23 @@ def test_live_estimated_total_assets_includes_repo_without_double_counting_corre
     try:
         user, portfolio = _portfolio(db)
         moment = datetime(2026, 8, 25, 2, 0, tzinfo=UTC)
-        _master(db, "600519")
+        _master(db, "510300", security_type="ETF", etf_category="BROAD_ETF")
         snapshot = _snapshot(
             db, user, portfolio, snapshot_time=moment, total_assets=1_000_000, cash=200_000,
             repo_or_standard_bond_value=300_000,
-            holdings=[{"code": "600519", "qty": 100, "available_qty": 100, "market_value": 500_000, "name": "Stock"}],
+            holdings=[{"code": "510300", "qty": 100, "available_qty": 100, "market_value": 500_000, "name": "Broad ETF"}],
         )
         state = build_portfolio_state(
             db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment,
-            quote_rows=_quotes(("600519", 5_000, "VALID")),
+            quote_rows=_quotes(("510300", 5_000, "VALID")),
         )
         assert state["reserve_assets"] == 500_000
         assert state["current_estimated_total_assets"] == 1_000_000
         assert state["positions"][0]["weight"] == pytest.approx(0.50)
-        assert state["cash_ratio"] == pytest.approx(0.50)
-        assert state["cash_only_ratio"] == pytest.approx(0.20)
+        assert state["cash_ratio"] == pytest.approx(0.20)
+        assert state["reserve_ratio"] == pytest.approx(0.50)
+        constraints = build_portfolio_constraints(state, {"available": True, "quality_status": "VALID", "is_frozen": False})
+        assert constraints["positions"][0]["max_additional_weight"] == pytest.approx(0.20)
     finally:
         db.close()
 

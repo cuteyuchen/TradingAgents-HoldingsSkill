@@ -41,6 +41,24 @@ def _as_datetime(value: Any) -> datetime:
     raise ValueError("ledger datetime is required")
 
 
+def _normalize_internal_utc_datetime(value: Any) -> datetime:
+    """Normalize an internal cutoff whose naive values are already UTC."""
+
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            value = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("internal datetime is invalid") from exc
+    if not isinstance(value, datetime):
+        raise ValueError("internal datetime is required")
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def _as_date(value: Any, fallback: datetime) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -207,9 +225,18 @@ def revise_ledger_entry(
     if unknown:
         raise ValueError(f"unsupported revision fields: {sorted(unknown)}")
     merged = {field: getattr(entry, field) for field in MATERIALIZED_FIELDS}
+    # Materialized ledger datetimes are UTC-naive in the database. Mark the
+    # unchanged values as UTC-aware before feeding them through the external
+    # input parser, so a revision does not shift them to Shanghai twice.
+    for field in ("executed_at", "available_at"):
+        value = merged.get(field)
+        if isinstance(value, datetime) and value.tzinfo is None:
+            merged[field] = value.replace(tzinfo=UTC)
     merged.update(changes)
     values = _entry_values(db, merged)
     values.pop("idempotency_key", None)
+    if entry.available_at is not None and values["available_at"] < entry.available_at:
+        raise ValueError("available_at_cannot_move_backwards")
     before = {field: getattr(entry, field) for field in MATERIALIZED_FIELDS}
     revision_no = (db.scalar(
         select(func.max(TradeLedgerRevision.revision_no)).where(TradeLedgerRevision.ledger_entry_id == entry.id)
@@ -290,7 +317,7 @@ def confirmed_ledger_entries_available_at(
 ) -> list[TradeLedgerEntry]:
     """Return only facts known to the system by ``as_of`` for no-lookahead use."""
 
-    cutoff = _as_datetime(as_of)
+    cutoff = _normalize_internal_utc_datetime(as_of)
     return db.execute(select(TradeLedgerEntry).where(
         TradeLedgerEntry.portfolio_id == portfolio_id,
         TradeLedgerEntry.status == "CONFIRMED",

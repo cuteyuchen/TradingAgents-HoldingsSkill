@@ -34,7 +34,8 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
     market_available = bool(market_state.get("available", market_quality in {"VALID", "DEGRADED"}))
     market_unavailable = not market_available or market_quality in {"MISSING", "INVALID"}
     cash_ratio = state.get("cash_ratio")
-    cash_known = cash_ratio is not None and state.get("cash") is not None
+    spendable_cash = state.get("spendable_cash", state.get("cash"))
+    cash_known = cash_ratio is not None and spendable_cash is not None
     base_quality = str(state.get("quality_status") or "DEGRADED").upper()
     data_quality_blocked = base_quality in {"BLOCKED", "FROZEN"}
     positions: list[dict[str, Any]] = []
@@ -96,6 +97,9 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
         "market_state_frozen": frozen,
         "market_state_available": market_available,
         "cash_known": cash_known,
+        "spendable_cash": spendable_cash,
+        "cash_ratio": cash_ratio,
+        "reserve_ratio": state.get("reserve_ratio"),
         "market_regime": market_state.get("regime"),
         "market_quality_status": market_state.get("quality_status"),
         "positions": positions,
