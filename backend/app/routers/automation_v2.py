@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -163,7 +163,7 @@ def update_schedule(
     return _schedule_response(row)
 
 
-@router.delete("/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/schedules/{schedule_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_schedule(
     schedule_id: int,
     db: Session = Depends(get_db),
@@ -271,7 +271,7 @@ def update_notification(
     return _channel_response(row)
 
 
-@router.delete("/notifications/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/notifications/{channel_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_notification(
     channel_id: int,
     db: Session = Depends(get_db),

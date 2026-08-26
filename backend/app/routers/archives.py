@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -401,7 +401,7 @@ def get_archive(
     }
 
 
-@router.delete("/{archive_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{archive_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_archive(
     archive_id: int,
     db: Session = Depends(get_db),

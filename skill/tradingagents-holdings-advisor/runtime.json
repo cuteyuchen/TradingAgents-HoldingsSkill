@@ -37,6 +37,10 @@
     "The system provides research assistance only, never promises returns, and never executes brokerage orders.",
     "Total portfolio exposure is a risk input, not a universal fixed hard gate; until Dynamic Risk Budget exists, do not force a trade or cash raise solely because exposure crosses one fixed percentage.",
     "Portfolio Engine constraints are deterministic facts: stock 20% and classified sector/theme ETF 30% caps constrain new risk, available_qty constrains sellable quantity, and a FROZEN market state blocks actionable risk increases without forcing a sell."
+    ,"Phase F deterministic Candidate Engine is authoritative for new-position candidates: it owns universe eligibility, scores, Entry, risk/reward, Portfolio Fit, Decision Edge, ranking, and WATCHLIST/READY/ACTION stages."
+    ,"Analysis modes must use the Candidate Engine context: fast reads only a recent reliable CandidateRun; standard/deep may run the local-cache scan; candidate scanning must not fan out per-security network requests."
+    ,"The model may explain or veto a deterministic ACTION candidate, but it may not invent a code, promote READY/WATCHLIST, alter deterministic scores, or turn a held security into a new-position candidate."
+    ,"Market FROZEN, MISSING, or INVALID, insufficient factor coverage, low Entry, low risk/reward, weak Portfolio Fit, or insufficient Decision Edge means no new-risk ACTION; ACTION=0 is normal."
   ],
   "decision_contract": {
     "version": "2.2.0",

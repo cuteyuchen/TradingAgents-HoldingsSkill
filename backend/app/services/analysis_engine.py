@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..candidates.service import latest_candidate_context, scan_candidates
 from ..config import settings
 from ..database import SessionLocal
 from ..decision_contract import (
@@ -37,6 +38,8 @@ CORE_RULES = """
 - 同日或近期建议发生方向反转，必须指出发生了什么实质变化。
 - 缺少关键行情时，不得编造触发价和具体数量。
 - 新 Candidate 只表示当前未持有的新机会，允许 0-3 个；当前持仓加仓/条件加仓只能出现在 Holding Action。
+- Phase F deterministic Candidate Engine 是新 Candidate 的唯一来源：模型只能解释或否决后端 ACTION，不能发明代码、提升 READY/WATCHLIST、修改分数或绕过 Decision Edge。
+- Fast 只读取同一持仓快照下的近期可靠 CandidateRun；Standard/Deep 才能运行本地缓存扫描，候选扫描不得逐票联网。
 - 证据充分、所有持仓为 hold/watch 且没有通过门控的新 Candidate 时，组合级结果必须为 no_action；质量门控 blocked 时必须保留 watch_only。
 - 事实、推断、风险和失效条件必须区分。
 - 这是研究辅助，不承诺收益，不执行交易。
@@ -556,11 +559,56 @@ def _trigger_context(job: AnalysisJob) -> dict[str, Any] | None:
     }
 
 
+def _candidate_context_for_analysis(
+    db: Session,
+    *,
+    job: AnalysisJob,
+    analysis_mode: str,
+    quote_rows: Any = None,
+) -> dict[str, Any]:
+    """Load deterministic candidates without allowing analysis to invent them."""
+
+    try:
+        if analysis_mode == "fast":
+            return latest_candidate_context(
+                db,
+                user_id=job.user_id,
+                portfolio_id=job.portfolio_id,
+                snapshot_id=job.snapshot_id,
+                max_age_seconds=30 * 60,
+                require_reliable=True,
+            )
+        return scan_candidates(
+            db,
+            user_id=job.user_id,
+            portfolio_id=job.portfolio_id,
+            snapshot_id=job.snapshot_id,
+            mode=analysis_mode,
+            persist=True,
+            quote_rows=quote_rows,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Candidate Engine unavailable for analysis job %s", job.id)
+        return {
+            "status": "unavailable",
+            "quality_status": "MISSING",
+            "confidence": 0.0,
+            "run_id": None,
+            "watchlist": [],
+            "ready": [],
+            "action": [],
+            "candidates": [],
+            "reason": "CANDIDATE_ENGINE_UNAVAILABLE",
+            "error": str(exc)[:300],
+        }
+
+
 def _normalize_final(
     result: dict[str, Any],
     holdings: list[dict[str, Any]],
     quality_grade: str,
     workflow: dict[str, Any] | None = None,
+    candidate_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     defaults = {
         "data_quality_grade": quality_grade,
@@ -571,6 +619,7 @@ def _normalize_final(
         "confidence": "low",
         "holdings": [],
         "candidates": [],
+        "candidate_engine": {},
         "history_consistency": "",
         "bull_case": [],
         "bear_case": [],
@@ -589,6 +638,7 @@ def _normalize_final(
             result[key] = [result[key]] if result.get(key) not in (None, "") else []
 
     workflow = workflow or {}
+    candidate_context = candidate_context if candidate_context is not None else workflow.get("candidate_context")
     for key in (
         "evidence_pack",
         "quality_gate",
@@ -607,6 +657,19 @@ def _normalize_final(
         result["candidate_status"] = workflow["candidate_status"]
     if workflow.get("candidate_blocked_reason"):
         result["candidate_blocked_reason"] = workflow["candidate_blocked_reason"]
+    if candidate_context is not None:
+        result["candidate_engine"] = {
+            "run_id": candidate_context.get("run_id") or (candidate_context.get("run") or {}).get("id"),
+            "status": candidate_context.get("status", "unavailable"),
+            "quality_status": candidate_context.get("quality_status", "MISSING"),
+            "confidence": candidate_context.get("confidence", 0.0),
+            "market_regime": (candidate_context.get("candidate_engine") or {}).get("market_regime"),
+            "watchlist_count": len(candidate_context.get("watchlist") or []),
+            "ready_count": len(candidate_context.get("ready") or []),
+            "action_count": len(candidate_context.get("action") or []),
+            "calculation_version": (candidate_context.get("candidate_engine") or {}).get("calculation_version"),
+            "reason": candidate_context.get("reason"),
+        }
     phase_errors = workflow.get("phase_errors") or []
     if phase_errors:
         result["phase_errors"] = phase_errors
@@ -684,6 +747,13 @@ def _normalize_final(
 
     holding_codes = {row["code"] for row in output_rows}
     filtered_candidates: list[dict[str, Any]] = []
+    deterministic_allowed: dict[str, dict[str, Any]] | None = None
+    if candidate_context is not None:
+        deterministic_allowed = {
+            normalize_code(str(item.get("code") or "")): dict(item)
+            for item in candidate_context.get("action") or []
+            if isinstance(item, dict) and normalize_code(str(item.get("code") or ""))
+        }
     # An explicitly empty workflow list is authoritative: the candidate scan
     # may have blocked new opportunities even when a later model response still
     # echoes stale candidates in its final payload.
@@ -691,6 +761,16 @@ def _normalize_final(
         raw_candidates = workflow.get("candidates") or []
     else:
         raw_candidates = result.get("buy_candidates") or result.get("candidates") or []
+    final_model_rating = str(
+        result.get("final_rating")
+        or (result.get("portfolio_manager_final") or {}).get("portfolio_rating")
+        or ""
+    ).lower()
+    if candidate_context is not None and final_model_rating in {"no_action", "watch_only"}:
+        # The deterministic ACTION set is the only source of candidates, but
+        # the final model is still allowed to veto the entire set.
+        raw_candidates = []
+        result.setdefault("candidate_blocked_reason", "最终组合经理否决新增风险，保持 NO_ACTION。")
     gate = result.get("quality_gate") or workflow.get("quality_gate") or {}
     gate_grade = str(gate.get("grade") or quality_grade).upper()
     gate_status = str(gate.get("status") or "pass").lower()
@@ -708,6 +788,48 @@ def _normalize_final(
             if code in holding_codes:
                 result["risk_warnings"].append(f"候选 {code} 已在当前持仓中，已从新增机会列表移除。")
             continue
+        if deterministic_allowed is not None:
+            deterministic_row = deterministic_allowed.get(code)
+            if deterministic_row is None:
+                # READY/WATCHLIST rows and model-invented codes can never enter
+                # the Phase A new-position contract.
+                continue
+            if row.get("accepted") is False or row.get("veto") is True or row.get("actionable") is False:
+                continue
+            model_row = row
+            row = {**deterministic_row, **model_row}
+            # LLM output may explain or demote, but may not alter the facts that
+            # determine stage, score, edge, coverage, or risk.
+            for field in (
+                "name",
+                "security_type",
+                "etf_category",
+                "stage",
+                "candidate_engine_stage",
+                "score",
+                "opportunity_score",
+                "entry_score",
+                "portfolio_fit_score",
+                "action_score",
+                "decision_edge",
+                "edge_vs_no_action",
+                "edge_vs_current_holdings",
+                "risk_reward_ratio",
+                "data_coverage",
+                "confidence",
+                "funding_mode",
+                "probe_weight",
+                "positive_drivers",
+                "negative_drivers",
+                "blocking_reasons",
+                "risk_flags",
+                "components",
+                "entry",
+                "portfolio_fit",
+                "comparison",
+            ):
+                if field in deterministic_row:
+                    row[field] = deterministic_row[field]
         row["code"] = code
         candidate_type = str(row.get("candidate_type") or row.get("type") or row.get("action") or "rotation_watch").lower()
         candidate_type = {
@@ -740,6 +862,7 @@ def _normalize_final(
         if score is None or score < 7:
             continue
         row["buyable"] = True
+        row["actionable"] = True
         row["gate_status"] = "buyable"
         filtered_candidates.append(row)
 
@@ -1187,6 +1310,13 @@ def run_analysis_job(job_id: int) -> None:
         workflow["portfolio_context"] = portfolio_context
         quality_gate = _quality_gate(snapshot, market)
         analysis_mode = canonicalize_analysis_mode(job.mode)
+        candidate_context = _candidate_context_for_analysis(
+            db,
+            job=job,
+            analysis_mode=analysis_mode,
+            quote_rows=market.get("quotes") if isinstance(market, dict) else None,
+        )
+        workflow["candidate_context"] = candidate_context
 
         if quality_gate["status"] == "blocked":
             final = _blocked_result(snapshot, market)
@@ -1219,6 +1349,7 @@ def run_analysis_job(job_id: int) -> None:
                 "analysis_mode": analysis_mode,
                 "trigger_context": trigger_context,
                 "portfolio_context": portfolio_context,
+                "candidate_context": candidate_context,
             }
 
             _job_stage(db, job, "analysts_running", 30)
@@ -1369,43 +1500,98 @@ def run_analysis_job(job_id: int) -> None:
                 input_payload["market"] = market
 
                 _job_stage(db, job, "candidate_screening", 87)
-                candidate_raw = _required_call_json(
-                    analyst_profile,
-                    system_prompt,
-                    {
-                        "input": input_payload,
-                        "quality_gate": quality_gate,
-                        "trader_proposal": trader,
-                        "risk_revision": risk_revision,
-                    },
-                    "执行今日新增机会三层扫描：大盘环境、热门板块、候选盘口。输出 0-3 个可行动的非当前持仓候选；candidates=[] 是正常结果，不得为了数量生成。"
-                    "每个候选必须包含 code、name、candidate_type(new_position)，score>=7，且不得属于当前持仓；"
-                    "reason_detail(catalyst/capital_flow/sector_position)、entry_trigger、initial_size、take_profit_1、"
-                    "take_profit_2、stop_loss、invalidating_condition、score(0-10)、score_breakdown。"
-                    "同时输出 hot_sectors、market_buy_mode、cancel_all_buys_when、candidate_blocked_reason。",
-                    "candidate_screening",
-                )
-                candidates = candidate_raw.get("candidates") or candidate_raw.get("buy_candidates") or []
-                candidate_evidence_gaps: list[str] = []
-                if not market.get("sector_heat"):
-                    candidate_evidence_gaps.append("market.sector_heat")
-                if not ((market.get("candidate_pool") or {}).get("etf_leaders")):
-                    candidate_evidence_gaps.append("market.candidate_pool.etf_leaders")
-                if not market.get("news"):
-                    candidate_evidence_gaps.append("market.news")
-                if candidate_evidence_gaps:
+                deterministic_candidates = [
+                    dict(item)
+                    for item in candidate_context.get("action") or []
+                    if isinstance(item, dict) and str(item.get("stage") or "").upper() == "ACTION"
+                ]
+                candidate_raw: dict[str, Any] = {
+                    "deterministic_candidates": deterministic_candidates,
+                    "candidates": deterministic_candidates,
+                    "accepted_codes": [item.get("code") for item in deterministic_candidates],
+                    "review_status": "not_needed" if not deterministic_candidates else "pending",
+                }
+                if deterministic_candidates:
+                    try:
+                        review_raw = _call_json(
+                            analyst_profile,
+                            system_prompt,
+                            {
+                                "input": input_payload,
+                                "candidate_context": candidate_context,
+                                "deterministic_action_candidates": deterministic_candidates,
+                                "quality_gate": quality_gate,
+                                "trader_proposal": trader,
+                                "risk_revision": risk_revision,
+                            },
+                            "只审查后端 deterministic_action_candidates。你可以解释、补充风险，或明确否决某个候选；"
+                            "不得新增代码、不得把 READY/WATCHLIST 提升为 ACTION、不得修改任何分数、coverage、confidence、"
+                            "decision_edge、risk_reward_ratio 或 stage。若没有需要否决的候选，原样返回 accepted_codes。"
+                            "输出 JSON：{accepted_codes:[], veto_codes:[], explanations:{code:{reason_detail:{},risk:[]}}, "
+                            "hot_sectors:[], candidate_blocked_reason:\"\"}。",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        review_raw = {
+                            "review_status": "unavailable",
+                            "review_error": str(exc)[:300],
+                        }
+                        phase_errors.append("candidate_llm_review_unavailable")
+                    candidate_raw.update(review_raw if isinstance(review_raw, dict) else {})
+                    all_codes = {
+                        normalize_code(str(item.get("code") or ""))
+                        for item in deterministic_candidates
+                    }
+                    if "accepted_codes" in candidate_raw:
+                        accepted_codes = {
+                            normalize_code(str(code))
+                            for code in candidate_raw.get("accepted_codes") or []
+                        }
+                    elif "candidates" in candidate_raw or "buy_candidates" in candidate_raw:
+                        returned = candidate_raw.get("candidates")
+                        if returned is None:
+                            returned = candidate_raw.get("buy_candidates")
+                        accepted_codes = {
+                            normalize_code(str(item.get("code") or ""))
+                            for item in returned or []
+                            if isinstance(item, dict)
+                        }
+                    else:
+                        accepted_codes = all_codes
+                    veto_codes = {
+                        normalize_code(str(code))
+                        for code in candidate_raw.get("veto_codes") or candidate_raw.get("rejected_codes") or []
+                    }
+                    accepted_codes -= veto_codes
+                    explanations = candidate_raw.get("explanations") if isinstance(candidate_raw.get("explanations"), dict) else {}
                     candidates = []
+                    for item in deterministic_candidates:
+                        code = normalize_code(str(item.get("code") or ""))
+                        if code not in accepted_codes or code in veto_codes:
+                            continue
+                        explanation = explanations.get(code) if isinstance(explanations.get(code), dict) else {}
+                        candidates.append({**item, **explanation})
+                    candidate_raw["accepted_codes"] = [item.get("code") for item in candidates]
+                    candidate_raw["review_status"] = candidate_raw.get("review_status") or "completed"
+                else:
+                    candidates = []
+                diagnostics = candidate_context.get("diagnostics") if isinstance(candidate_context.get("diagnostics"), dict) else {}
+                action_zero_reasons = diagnostics.get("action_zero_reasons") or {}
+                deterministic_blocked_reason = candidate_context.get("reason")
+                if not deterministic_blocked_reason and action_zero_reasons:
+                    deterministic_blocked_reason = "确定性候选未通过门控：" + "、".join(
+                        f"{key}={value}" for key, value in sorted(action_zero_reasons.items())
+                    )
                 workflow["candidates"] = candidates
+                workflow["candidate_review"] = candidate_raw
                 workflow["hot_sectors"] = candidate_raw.get("hot_sectors") or market.get("sector_heat") or []
                 workflow["candidate_status"] = (
-                    "blocked_missing_evidence"
-                    if candidate_evidence_gaps
-                    else candidate_raw.get("market_buy_mode") or ("ready" if candidates else "none")
+                    candidate_raw.get("market_buy_mode")
+                    or ("ready" if candidates else "llm_veto" if deterministic_candidates else candidate_context.get("status") or "none")
                 )
                 workflow["candidate_blocked_reason"] = (
-                    "候选数据不完整，暂不给出可执行买入：" + "、".join(candidate_evidence_gaps)
-                    if candidate_evidence_gaps
-                    else candidate_raw.get("candidate_blocked_reason")
+                    candidate_raw.get("candidate_blocked_reason")
+                    or deterministic_blocked_reason
+                    or ("LLM 否决了全部 deterministic ACTION 候选。" if deterministic_candidates and not candidates else None)
                 )
 
                 _job_stage(db, job, "portfolio_synthesis", 92)

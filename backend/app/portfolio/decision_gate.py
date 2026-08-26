@@ -166,9 +166,11 @@ def apply_portfolio_decision_gate(
         if not isinstance(raw, dict):
             continue
         candidate = dict(raw)
-        candidate["candidate_portfolio_fit_status"] = "NOT_EVALUATED_V3"
+        is_phase_f_action = str(candidate.get("candidate_engine_stage") or candidate.get("stage") or "").upper() == "ACTION"
+        candidate["candidate_portfolio_fit_status"] = "RECHECKED_V3" if is_phase_f_action else "NOT_EVALUATED_V3"
         if market_frozen or market_unavailable or quality in {"BLOCKED", "FROZEN"} or portfolio_context.get("cash_ratio") is None:
             candidate["buyable"] = False
+            candidate["actionable"] = False
             candidate["gate_status"] = "blocked"
             candidate["portfolio_gate"] = "BLOCKED"
             candidate["portfolio_gate_reasons"] = [
@@ -176,6 +178,27 @@ def apply_portfolio_decision_gate(
             ]
             blocked_reasons.extend(candidate["portfolio_gate_reasons"])
             statuses.append("BLOCKED")
+        elif is_phase_f_action:
+            fit = candidate.get("portfolio_fit") if isinstance(candidate.get("portfolio_fit"), dict) else {}
+            reasons: list[str] = []
+            if fit.get("hard_cap_violation"):
+                reasons.append("HARD_CAP_CONSTRAINT")
+            if candidate.get("funding_mode") != "CASH_FUNDED":
+                reasons.append("REPLACEMENT_REVIEW_REQUIRED" if candidate.get("funding_mode") == "REPLACEMENT_REVIEW" else "UNFUNDED")
+            if reasons:
+                candidate["buyable"] = False
+                candidate["actionable"] = False
+                candidate["gate_status"] = "blocked"
+                candidate["portfolio_gate"] = "BLOCKED"
+                candidate["portfolio_gate_reasons"] = reasons
+                blocked_reasons.extend(reasons)
+                statuses.append("BLOCKED")
+            else:
+                candidate["buyable"] = True
+                candidate["actionable"] = True
+                candidate["portfolio_gate"] = "PASS"
+                candidate["gate_status"] = "buyable"
+                statuses.append("PASS")
         else:
             # Legacy Phase A candidates remain compatible. Phase E marks that
             # Portfolio Fit V3 is not implemented without silently deleting it.

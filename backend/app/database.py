@@ -42,6 +42,7 @@ def init_db() -> None:
         market_models,
         market_runtime_models,
         models,
+        candidates,
         portfolio_models,
         trigger_models,
         v2_models,

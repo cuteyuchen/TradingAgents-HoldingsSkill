@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -198,7 +198,7 @@ def update_portfolio(
     return _portfolio_response(db, row)
 
 
-@router.delete("/portfolios/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/portfolios/{portfolio_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_portfolio(
     portfolio_id: int,
     db: Session = Depends(get_db),

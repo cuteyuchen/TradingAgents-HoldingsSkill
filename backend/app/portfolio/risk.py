@@ -123,6 +123,7 @@ def build_portfolio_state(
                 "available_qty": item.available_qty,
                 "market_value": None,
                 "weight": None,
+                "hard_cap": None,
                 "quote_quality": "MISSING",
                 "flags": ["SECURITY_CODE_MISSING"],
             })
