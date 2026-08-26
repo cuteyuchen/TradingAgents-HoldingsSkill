@@ -112,11 +112,15 @@ def ensure_operational_run(db: Session, *, user_id: int, portfolio_id: int, trad
         notification_state_json={},
         review_state_json={},
     )
-    db.add(row)
     try:
-        db.flush()
+        # Keep a uniqueness collision local to this insert.  A concurrent
+        # worker must not roll back unrelated scheduler state in the caller's
+        # transaction.
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+        return row
     except IntegrityError:
-        db.rollback()
         row = db.execute(select(DailyOperationalRun).where(
             DailyOperationalRun.user_id == user_id,
             DailyOperationalRun.portfolio_id == portfolio_id,
@@ -594,11 +598,18 @@ def refresh_review_state(db: Session, *, user_id: int, portfolio_id: int, trade_
         )
         if stale_reasons:
             review.review_stale = True
+            stale_event = {
+                "source": "review_staleness_detector",
+                "reasons": stale_reasons,
+                "detected_at": datetime.now(UTC).isoformat(),
+            }
+            stale_events = [*list(metadata.get("stale_events") or []), stale_event][-20:]
             metadata.update({
                 "review_stale": True,
                 "stale_reason": stale_reasons[0],
                 "stale_reasons": stale_reasons,
                 "stale_at": datetime.now(UTC).isoformat(),
+                "stale_events": stale_events,
             })
             op_run.review_state_json = metadata
             db.flush()
@@ -638,7 +649,15 @@ def refresh_review_state(db: Session, *, user_id: int, portfolio_id: int, trade_
 def mark_review_stale(db: Session, *, user_id: int, portfolio_id: int, trade_date: date, reason: str) -> dict[str, Any]:
     op_run = ensure_operational_run(db, user_id=user_id, portfolio_id=portfolio_id, trade_date=trade_date)
     metadata = dict(op_run.review_state_json or {})
-    metadata.update({"review_stale": True, "stale_reason": reason, "stale_at": datetime.now(UTC).isoformat()})
+    marked_at = datetime.now(UTC).isoformat()
+    stale_events = [*list(metadata.get("stale_events") or []), {"source": "explicit_marker", "reason": reason, "marked_at": marked_at}][-20:]
+    metadata.update({
+        "review_stale": True,
+        "stale_reason": reason,
+        "stale_reasons": list(dict.fromkeys([*list(metadata.get("stale_reasons") or []), reason])),
+        "stale_at": marked_at,
+        "stale_events": stale_events,
+    })
     review = db.execute(select(DailyReviewRun).where(
         DailyReviewRun.user_id == user_id,
         DailyReviewRun.portfolio_id == portfolio_id,

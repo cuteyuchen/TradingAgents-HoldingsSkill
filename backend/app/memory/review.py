@@ -9,7 +9,7 @@ from statistics import mean, median
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..market_engine_models import MarketScoreSnapshot
@@ -365,7 +365,10 @@ def _apply_review(row: DailyReviewRun, payload: dict[str, Any], *, refreshed: bo
     row.quality_status = payload["quality_status"]
     row.confidence = payload["confidence"]
     row.review_stale = False
-    row.refresh_count = int(row.refresh_count or 0) + (1 if refreshed else 0)
+    # The counter is incremented with a SQL expression in run_daily_review so
+    # two concurrent refreshers cannot overwrite one another's count.
+    if not refreshed:
+        row.refresh_count = int(row.refresh_count or 0)
     row.review_version = DAILY_REVIEW_VERSION
     row.completed_at = _now()
     row.last_refreshed_at = row.completed_at
@@ -426,7 +429,17 @@ def run_daily_review(
             trade_date=trade_date,
             as_of=as_of,
         )
-        _apply_review(existing, payload, refreshed=force and existing.completed_at is not None)
+        refreshed = force and existing.completed_at is not None
+        _apply_review(existing, payload, refreshed=refreshed)
+        if refreshed:
+            db.execute(
+                update(DailyReviewRun)
+                .where(DailyReviewRun.id == existing.id)
+                .values(
+                    refresh_count=func.coalesce(DailyReviewRun.refresh_count, 0) + 1,
+                    last_refreshed_at=existing.completed_at,
+                )
+            )
         db.commit()
         db.refresh(existing)
         return existing

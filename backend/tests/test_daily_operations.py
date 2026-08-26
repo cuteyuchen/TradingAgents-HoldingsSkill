@@ -16,7 +16,7 @@ from app.memory.models import DailyReviewRun, DecisionMemory
 from app.memory.review import run_daily_review
 from app.operations import workflow
 from app.operations.dashboard import build_daily_dashboard
-from app.operations.models import DailyOperationalRun
+from app.operations.models import DailyOperationalCheckpoint, DailyOperationalRun, OperatingNotification
 from app.operations.notifications import (
     OperatingNotificationEvent,
     dispatch_material_events,
@@ -26,7 +26,7 @@ from app.operations.notifications import (
 )
 from app.routers.operations_v3 import _portfolio
 from app.services.trading_calendar import CHINA_TZ
-from app.v2_models import AnalysisJob, AnalysisRun, Portfolio, PortfolioSnapshot, User
+from app.v2_models import AnalysisJob, AnalysisRun, NotificationChannel, Portfolio, PortfolioSnapshot, User
 
 
 def _db() -> Session:
@@ -174,6 +174,101 @@ def test_checkpoint_reuses_the_active_portfolio_analysis_without_second_job(monk
         db.close()
 
 
+def test_checkpoint_database_claim_is_unique_across_workers():
+    db = _db()
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        first, first_owner = workflow.claim_checkpoint(
+            db,
+            portfolio=portfolio,
+            trade_date=date(2026, 8, 20),
+            checkpoint_name="09:35",
+        )
+        db.commit()
+        second, second_owner = workflow.claim_checkpoint(
+            db,
+            portfolio=portfolio,
+            trade_date=date(2026, 8, 20),
+            checkpoint_name="09:35",
+        )
+
+        assert first_owner is True
+        assert second_owner is False
+        assert second.id == first.id
+        assert db.query(DailyOperationalCheckpoint).count() == 1
+    finally:
+        db.close()
+
+
+def test_operational_run_unique_claim_keeps_outer_transaction_state():
+    db = _db()
+    try:
+        user, portfolio, _snapshot = _portfolio_fixture(db)
+        first = workflow.ensure_operational_run(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            trade_date=date(2026, 8, 20),
+        )
+        first.status = "RUNNING"
+        db.flush()
+        second = workflow.ensure_operational_run(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            trade_date=date(2026, 8, 20),
+        )
+        assert second.id == first.id
+        assert db.get(DailyOperationalRun, first.id).status == "RUNNING"
+    finally:
+        db.close()
+
+
+def test_checkpoint_boundaries_are_deterministic_and_success_never_becomes_missed():
+    checkpoint = workflow.CHECKPOINT_BY_KEY["09:35"]
+    base = _local(date(2026, 8, 20), 9, 35)
+    cases = [
+        (base, "DUE"),
+        (base + timedelta(minutes=14, seconds=59), "DUE"),
+        (base + timedelta(minutes=15), "DUE"),
+        (base + timedelta(minutes=15, seconds=1), "MISSED"),
+    ]
+    for moment, expected in cases:
+        status, actionable = workflow._checkpoint_status(checkpoint=checkpoint, local=moment, state={})
+        assert status == expected
+        assert actionable is True
+
+    completed, actionable = workflow._checkpoint_status(
+        checkpoint=checkpoint,
+        local=base + timedelta(minutes=30),
+        state={"09:35": {"status": "SUCCESS"}},
+    )
+    assert completed == "SUCCESS"
+    assert actionable is False
+
+
+def test_checkpoint_claim_survives_restart_without_duplicate_job(monkeypatch):
+    db = _db()
+    bind = db.bind
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        _FakeThread.starts = []
+        monkeypatch.setattr(workflow.threading, "Thread", _FakeThread)
+        first = workflow.run_due_checkpoints(db, portfolio=portfolio, now=_local(date(2026, 8, 20), 9, 40))
+        assert first["started_jobs"]
+        portfolio_id = portfolio.id
+    finally:
+        db.close()
+    restarted = Session(bind=bind)
+    try:
+        portfolio = restarted.get(Portfolio, portfolio_id)
+        second = workflow.run_due_checkpoints(restarted, portfolio=portfolio, now=_local(date(2026, 8, 20), 9, 49))
+        assert second["started_jobs"] == []
+        assert restarted.query(AnalysisJob).filter(AnalysisJob.checkpoint == "09:35").count() == 1
+    finally:
+        restarted.close()
+
+
 def test_monitor_lifecycle_recovers_then_pauses_for_lunch_and_stops_at_close(monkeypatch):
     class Monitor:
         def __init__(self):
@@ -275,6 +370,120 @@ def test_review_refresh_keeps_same_row_and_increments_count():
         assert db.query(DailyReviewRun).count() == 1
     finally:
         db.close()
+
+
+def test_dashboard_get_is_read_only_even_when_facts_are_missing(monkeypatch):
+    db = _db()
+    try:
+        user, portfolio, _snapshot = _portfolio_fixture(db)
+        calls: list[str] = []
+
+        def fail(name: str):
+            def _inner(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(name)
+            return _inner
+
+        from app.candidates import service as candidate_service
+        from app.memory import review as memory_review
+        from app.operations import dashboard as dashboard_module
+        from app.operations import notifications as notification_module
+        from app.services import analysis_engine, market_engine
+
+        monkeypatch.setattr(analysis_engine, "run_analysis_job", fail("analysis"))
+        monkeypatch.setattr(candidate_service, "scan_candidates", fail("candidate"))
+        monkeypatch.setattr(market_engine.MarketEngine, "calculate", fail("market"))
+        monkeypatch.setattr(memory_review, "run_daily_review", fail("review"))
+        monkeypatch.setattr(notification_module, "dispatch_material_events", fail("notification"))
+
+        result = build_daily_dashboard(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            as_of=_local(date(2026, 8, 20), 10, 0),
+        )
+        assert result["portfolio"]["snapshot_id"] is not None
+        assert calls == []
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("section_name, symbol", [
+    ("market", "_market_section"),
+    ("candidates", "_candidate_section"),
+    ("analysis", "_analysis_section"),
+    ("notifications", "list_operating_notifications"),
+])
+def test_dashboard_sections_fail_independently(monkeypatch, section_name, symbol):
+    db = _db()
+    try:
+        user, portfolio, _snapshot = _portfolio_fixture(db)
+        from app.operations import dashboard as dashboard_module
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError(f"{section_name}_boom")
+
+        monkeypatch.setattr(dashboard_module, symbol, fail)
+        result = build_daily_dashboard(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            as_of=_local(date(2026, 8, 20), 10, 0),
+        )
+        assert result[section_name]["status"] == "ERROR"
+        healthy_sections = ["market", "portfolio", "candidates", "triggers", "analysis", "decisions", "executions", "memory", "timeline", "notifications"]
+        assert any(result[name].get("status") != "ERROR" for name in healthy_sections if name != section_name)
+    finally:
+        db.close()
+
+
+def test_notification_is_durable_across_restart_and_retries_after_cooldown(monkeypatch):
+    db = _db()
+    bind = db.bind
+    try:
+        user, portfolio, _snapshot = _portfolio_fixture(db)
+        db.add(NotificationChannel(
+            user_id=user.id,
+            type="dingtalk",
+            name="phase-h-channel",
+            encrypted_webhook="https://example.invalid/webhook",
+            enabled=True,
+        ))
+        db.commit()
+        event = OperatingNotificationEvent(
+            title="触发复核",
+            summary="测试重试。",
+            severity="IMPORTANT",
+            portfolio_id=portfolio.id,
+            user_id=user.id,
+            event_type="trigger_confirmed",
+            entity_type="trigger",
+            entity_id="t-1",
+            occurred_at=_local(date(2026, 8, 20), 10, 0),
+            deep_link=f"/dashboard?portfolio={portfolio.id}#triggers",
+            dedupe_key=f"trigger_confirmed:{portfolio.id}:t-1",
+        )
+        monkeypatch.setattr("app.operations.notifications._post_channel", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("timeout")))
+        first = dispatch_operating_event(db, event, now=_local(date(2026, 8, 20), 10, 0))
+        assert first["status"] == "FAILED"
+        assert db.query(OperatingNotification).one().attempt_count == 1
+        db.close()
+
+        restarted = Session(bind=bind)
+        try:
+            cooldown = dispatch_operating_event(restarted, event, now=_local(date(2026, 8, 20), 10, 1))
+            assert cooldown["status"] == "COOLDOWN"
+            monkeypatch.setattr("app.operations.notifications._post_channel", lambda *_args, **_kwargs: (200, "ok"))
+            retried = dispatch_operating_event(restarted, event, now=_local(date(2026, 8, 20), 11, 1))
+            assert retried["status"] == "SENT"
+            row = restarted.query(OperatingNotification).one()
+            assert row.attempt_count == 2
+            assert row.status == "SENT"
+        finally:
+            restarted.close()
+    finally:
+        if db.is_active:
+            db.close()
 
 
 def test_notification_is_deduped_without_webhook_delivery():

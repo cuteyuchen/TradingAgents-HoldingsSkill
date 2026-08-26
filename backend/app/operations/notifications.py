@@ -253,7 +253,7 @@ def dispatch_operating_event(db: Session, event: OperatingNotificationEvent, *, 
         portfolio_id=event.portfolio_id,
         dedupe_key=event.dedupe_key,
     )
-    if legacy is not None:
+    if legacy is not None and claim_status == "CLAIMED":
         durable.status = str(legacy.get("status") or "DASHBOARD_ONLY").upper()
         durable.sent_at = _naive_utc(_parse_time(legacy.get("sent_at")))
         durable.payload_json = dict(legacy)

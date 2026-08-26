@@ -83,7 +83,7 @@ function percentText(value: unknown) {
 function statusType(status?: string | null) {
   const value = String(status || '').toUpperCase()
   if (['OK', 'FRESH', 'SUCCESS', 'VALID', 'COMPLETED', 'HEALTHY'].includes(value)) return 'success'
-  if (['BLOCKED', 'FAILED', 'MISSING', 'UNAVAILABLE'].includes(value)) return 'error'
+  if (['BLOCKED', 'ERROR', 'FAILED', 'MISSING', 'UNAVAILABLE'].includes(value)) return 'error'
   if (['INFO', 'REUSED', 'SKIPPED', 'DASHBOARD_ONLY'].includes(value)) return 'info'
   return 'warning'
 }

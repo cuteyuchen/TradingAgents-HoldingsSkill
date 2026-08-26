@@ -65,8 +65,8 @@ def _section(builder: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         payload.setdefault("status", "AVAILABLE")
         return payload
     except Exception as exc:  # dashboard sections fail independently
-        logger.warning("dashboard section unavailable", exc_info=True)
-        return {"status": "UNAVAILABLE", "error": str(exc)[:300]}
+        logger.warning("dashboard section failed", exc_info=True)
+        return {"status": "ERROR", "error": str(exc)[:300]}
 
 
 def _freshness(captured_at: datetime | None, *, cutoff: datetime, limit_seconds: float) -> str:
@@ -905,7 +905,7 @@ def build_dashboard_diagnostics(
             payload = builder()
             sections[name] = {"status": payload.get("status", "AVAILABLE")} if isinstance(payload, dict) else {"status": "OK"}
         except Exception as exc:  # diagnostics must expose partial failures
-            sections[name] = {"status": "UNAVAILABLE", "error": str(exc)[:300]}
+            sections[name] = {"status": "ERROR", "error": str(exc)[:300]}
     health = build_dashboard_health(db, user_id=user_id, portfolio_id=portfolio_id, as_of=cutoff)
     issues = [
         {"component": item.get("name"), "status": item.get("status"), "detail": item.get("detail")}
