@@ -3,18 +3,22 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal
 from ..decision_contract import canonicalize_analysis_mode
 from ..v2_models import AnalysisJob, PortfolioSnapshot, Schedule
+from ..v2_models import Portfolio
 from .analysis_admission import AnalysisJobAdmission, active_portfolio_analysis
 from .analysis_engine import run_analysis_job
+from ..memory.models import DailyReviewRun
+from ..memory.review import run_daily_review, serialize_daily_review
 from .trading_calendar import CHINA_TZ, TradingCalendarService, next_open_date
 
 logger = logging.getLogger(__name__)
@@ -105,6 +109,76 @@ def run_scheduled_job(job_id: int, schedule_id: int) -> None:
         db.close()
 
 
+def run_scheduled_daily_review(*, user_id: int, portfolio_id: int, trade_date: date) -> None:
+    """Run memory maintenance in its own Session; never creates an AnalysisJob."""
+
+    db = SessionLocal()
+    try:
+        row = run_daily_review(
+            db,
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+            trade_date=trade_date,
+        )
+        if row is not None:
+            logger.info(
+                "daily_review portfolio=%s trade_date=%s decisions=%s matured_outcomes=%s quality=%s",
+                portfolio_id,
+                trade_date.isoformat(),
+                row.decision_count,
+                row.outcomes_matured_count,
+                row.quality_status,
+            )
+    except Exception:
+        logger.exception("Daily Review maintenance failed for portfolio %s", portfolio_id)
+    finally:
+        db.close()
+
+
+def _enqueue_memory_reviews(db: Session, *, trade_date: date, now_utc: datetime) -> None:
+    """Claim one review per portfolio after the 15:30 checkpoint, including catch-up."""
+
+    local = now_utc.astimezone(CHINA_TZ)
+    if local.time() < time(15, 30):
+        return
+    for portfolio in db.query(Portfolio).order_by(Portfolio.id.asc()).all():
+        existing = db.query(DailyReviewRun).filter(
+            DailyReviewRun.user_id == portfolio.user_id,
+            DailyReviewRun.portfolio_id == portfolio.id,
+            DailyReviewRun.trade_date == trade_date,
+            DailyReviewRun.review_version == "daily-review-v1",
+        ).first()
+        if existing is not None and existing.status in {"RUNNING", "COMPLETED"}:
+            continue
+        if existing is None:
+            existing = DailyReviewRun(
+                user_id=portfolio.user_id,
+                portfolio_id=portfolio.id,
+                trade_date=trade_date,
+                status="RUNNING",
+                review_version="daily-review-v1",
+            )
+            db.add(existing)
+        else:
+            existing.status = "RUNNING"
+        try:
+            db.commit()
+        except IntegrityError:
+            # Another scheduler process may have claimed the same unique day.
+            # The database constraint is the cross-process single-flight guard.
+            db.rollback()
+            continue
+        threading.Thread(
+            target=run_scheduled_daily_review,
+            kwargs={
+                "user_id": portfolio.user_id,
+                "portfolio_id": portfolio.id,
+                "trade_date": trade_date,
+            },
+            daemon=True,
+        ).start()
+
+
 def create_scheduled_job(
     db,
     schedule: Schedule,
@@ -160,8 +234,6 @@ def tick_schedules() -> None:
     db = SessionLocal()
     try:
         rows = db.query(Schedule).filter(Schedule.enabled.is_(True)).all()
-        if not rows:
-            return
         now_utc = datetime.now(UTC)
         local = now_utc.astimezone(CHINA_TZ)
         calendar = TradingCalendarService(db)
@@ -211,6 +283,7 @@ def tick_schedules() -> None:
                 if schedule.consecutive_failures >= schedule.max_consecutive_failures:
                     schedule.enabled = False
                 db.commit()
+        _enqueue_memory_reviews(db, trade_date=local.date(), now_utc=now_utc)
     finally:
         db.close()
 

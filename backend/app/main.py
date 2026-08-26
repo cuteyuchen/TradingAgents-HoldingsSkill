@@ -105,6 +105,7 @@ from .routers import (  # noqa: E402
     model_settings_v2,
     portfolios_v2,
     market_engine_v3,
+    memory_v3,
     monitor_v3,
     portfolio_v3,
     triggers_v3,
@@ -119,6 +120,7 @@ app.include_router(automation_v2.router)
 app.include_router(candidates_v3.router)
 app.include_router(market_v3.router)
 app.include_router(market_engine_v3.router)
+app.include_router(memory_v3.router)
 app.include_router(monitor_v3.router)
 app.include_router(triggers_v3.router)
 app.include_router(portfolio_v3.router)

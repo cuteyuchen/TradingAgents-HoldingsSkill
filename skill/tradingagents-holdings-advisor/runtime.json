@@ -1,6 +1,6 @@
 {
   "name": "tradingagents-holdings-advisor",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "prompt_version": "2026-08-26",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
@@ -19,6 +19,7 @@
     "risk_revision",
     "final_quote_refresh",
     "portfolio_manager_final",
+    "memory_context",
     "persistence_and_notification"
   ],
   "rules": [
@@ -43,9 +44,11 @@
     ,"A daily_bar_cache_close_proxy is observation/diagnostic evidence only. It preserves quote provenance and can never produce an intraday ACTION candidate."
     ,"The model may explain or veto a deterministic ACTION candidate, but it may not invent a code, promote READY/WATCHLIST, alter deterministic scores, or turn a held security into a new-position candidate."
     ,"Market FROZEN, MISSING, or INVALID, insufficient factor coverage, low Entry, low risk/reward, weak Portfolio Fit, or insufficient Decision Edge means no new-risk ACTION; ACTION=0 is normal."
+    ,"Historical Memory is advisory evidence only: current deterministic Market, Portfolio, Candidate, Data Quality, and Decision Gates always take precedence. Do not copy a historical action because it was profitable, and do not reverse a valid current action merely because a historical case lost."
+    ,"Decision Memory preserves immutable decision snapshots, confirmed user execution facts, deterministic trading-day Outcomes, and descriptive Daily Reviews. It never changes Candidate, Portfolio, Market, Hard Cap, Risk Gate, or prompt weights."
   ],
   "decision_contract": {
-    "version": "2.3.0",
+    "version": "2.4.0",
     "default_portfolio_action": "no_action",
     "candidates": {
       "min": 0,

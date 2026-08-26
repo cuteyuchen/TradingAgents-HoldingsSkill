@@ -18,6 +18,7 @@ from ..decision_contract import (
     canonicalize_analysis_mode,
     should_normalize_no_action,
 )
+from ..memory.service import current_memory_features, memory_context_for_analysis
 from ..portfolio.decision_gate import apply_portfolio_decision_gate
 from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
@@ -44,6 +45,8 @@ CORE_RULES = """
 - 事实、推断、风险和失效条件必须区分。
 - 这是研究辅助，不承诺收益，不执行交易。
 - portfolio_context 是后端提供的确定性组合风险事实和动作上限，不是交易指令；不得覆盖 hard_cap、max_additional_weight 或 max_sellable_qty。
+- Historical Memory 仅是可审计的辅助证据。当前 Market、Portfolio、Candidate、Data Quality 和 Decision Gate 永远优先；历史案例不得发明候选、升级候选阶段或覆盖风险门控。
+- 不得因为历史案例盈利就复制动作，也不得因为历史案例亏损就机械反向交易。Memory context 不能改变任何因子权重、Hard Cap 或 Risk Gate。
 """.strip()
 
 # Keep the model-facing schema explicit.  The frontend can render the report even
@@ -121,6 +124,7 @@ FINAL_SCHEMA = {
     "hot_sectors": [],
     "rebalance_plan": {},
     "checkpoint_plan": "",
+    "memory_context": {},
 }
 
 
@@ -1328,6 +1332,7 @@ def run_analysis_job(job_id: int) -> None:
         workflow["portfolio_context"] = portfolio_context
         quality_gate = _quality_gate(snapshot, market)
         analysis_mode = canonicalize_analysis_mode(job.mode)
+        workflow["analysis_mode"] = analysis_mode
         candidate_context = _candidate_context_for_analysis(
             db,
             job=job,
@@ -1335,6 +1340,17 @@ def run_analysis_job(job_id: int) -> None:
             quote_rows=market.get("quotes") if isinstance(market, dict) else None,
         )
         workflow["candidate_context"] = candidate_context
+        memory_context = memory_context_for_analysis(
+            db,
+            user_id=job.user_id,
+            portfolio_id=job.portfolio_id,
+            as_of=job.started_at or datetime.now(UTC),
+            current_features=current_memory_features(
+                portfolio_context=portfolio_context,
+                candidate_context=candidate_context,
+            ),
+        )
+        workflow["memory_context"] = memory_context
 
         if quality_gate["status"] == "blocked":
             final = _blocked_result(snapshot, market)
@@ -1368,6 +1384,7 @@ def run_analysis_job(job_id: int) -> None:
                 "trigger_context": trigger_context,
                 "portfolio_context": portfolio_context,
                 "candidate_context": candidate_context,
+                "memory_context": memory_context,
             }
 
             _job_stage(db, job, "analysts_running", 30)
@@ -1686,6 +1703,8 @@ def run_analysis_job(job_id: int) -> None:
             "portfolio_engine",
         ):
             workflow[key] = final.get(key)
+        workflow["memory_context"] = memory_context
+        final["memory_context"] = memory_context
 
         _job_stage(db, job, "report_rendering", 96)
         markdown = render_markdown(final, market, snapshot, job)
@@ -1744,6 +1763,37 @@ def run_analysis_job(job_id: int) -> None:
         job.finished_at = datetime.now(UTC)
         db.commit()
         db.refresh(run)
+
+        # Memory is a derived maintenance fact. Capture it after the successful
+        # AnalysisRun commit so a capture failure cannot roll back the report.
+        memory_db = SessionLocal()
+        try:
+            from ..memory.decision import capture_decision_memory
+
+            persisted_run = memory_db.query(AnalysisRun).filter(AnalysisRun.id == run.id).first()
+            captured_memory = (
+                capture_decision_memory(
+                    memory_db,
+                    persisted_run,
+                    available_at=datetime.now(UTC),
+                    commit=True,
+                )
+                if persisted_run is not None
+                else None
+            )
+            if captured_memory is not None:
+                logger.info(
+                    "memory_capture portfolio=%s analysis_run=%s decision_type=%s targets=%s quality=%s",
+                    job.portfolio_id,
+                    run.id,
+                    captured_memory.decision_type,
+                    len(captured_memory.holding_decisions_json or []) + len(captured_memory.candidate_decisions_json or []),
+                    captured_memory.quality_status,
+                )
+        except Exception:
+            logger.exception("Decision Memory capture failed for analysis run %s", run.id)
+        finally:
+            memory_db.close()
 
         # Realtime triggers are resolved only after the authoritative AnalysisRun
         # exists.  Standard/Deep runs may also refresh explicit structured plans;

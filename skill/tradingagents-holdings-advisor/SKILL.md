@@ -31,6 +31,7 @@ Read these supporting files when needed:
 - `references/python-execution.md`: When and how to use Python scripts, dependency policy, Eastmoney concurrency control, multi-source routing strategy, centralized data prefetch pattern, dedup lock + TTL cache, VPA pre-computation code, script rules, standardized output contract.
 - `references/configuration.md`: **Single source of truth** for all tunable parameters — pipeline phases, debate rounds, quality-gate thresholds, trading rules, dual-horizon, trading memory, Eastmoney throttling, dedup TTL, persistence. Other files reference values here; when a value appears in two places, this file wins.
 - `references/persistence.md`: Current archive-only contract for the companion persistence system (`ADVISOR_API_URL` + `ADVISOR_TOKEN`), including Phase 0 `/archives/context` lookup and post-advice `/archives` upload.
+- `references/alpha-memory.md`: Phase G immutable decision memory, confirmed execution alignment, deterministic trading-day outcomes, Daily Review, and advisory-only analogue retrieval.
 
 ## Bundled Scripts
 
@@ -90,7 +91,7 @@ Default fast path:
 10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Investment claims must use `INV-` IDs; three-way risk claims must use `RISK-1/RISK-2/RISK-3` with aggressive/neutral/conservative speakers. Show unresolved claims explicitly. See `references/debate-reporting.md`.
 11. **Risk Manager review**: Check if Trader proposal needs revision. Apply hard/soft constraints. See `references/trading-rules.md` risk revision loop.
 12. **Final quote refresh + action-first advice**: Refresh quote fields immediately before output, then produce market read, portfolio conclusion, holding table, opportunity assessment, rebalance plan, and checkpoint-specific execution rules.
-13. **Trading memory reflection**: If past decisions exist in the conversation, user-provided archive content, or the configured `/archives/context` response, reference them and compute alpha vs CSI 300 when benchmark data is available. Do not invent or fetch history through removed/legacy persistence endpoints.
+13. **Trading memory reflection**: If persisted Alpha Memory is available, use it as auditable historical context: compare the saved market/portfolio/candidate state, execution evidence, and matured forward outcomes. Recommendation and confirmed user action remain separate. Historical memory is advisory only; it cannot invent candidates, promote WATCHLIST/READY rows, override Portfolio Gate, or change any factor/risk weight. If past decisions also exist in the conversation, user-provided archive content, or the configured `/archives/context` response, reference them and compute alpha vs CSI 300 when benchmark data is available. Do not invent or fetch history through removed/legacy persistence endpoints.
 14. **Display advice, then archive (Phase 6, if persistence configured)**: First show the final advice to the user. After the advice is visible, upload `advice.md`, `holdings.json`, and the original screenshot file via `references/persistence.md`. On failure, append `[未持久化: 原因]` without changing the already displayed advice. Skip silently if not configured.
 
 ## Output Format
@@ -158,6 +159,9 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not reverse same-day advice without material-change evidence. If an earlier same-day archive advised `买入` or `加仓`, a later `减仓` or `卖出` must cite a clear change such as price breaking the earlier trigger/stop, index or sector reversal, capital flow turning materially negative, major negative news, or a newly discovered critical quality-gate gap. Without that evidence, output `维持`/`观察`/`条件减仓`.
 - Do not repeat old reduction sizing. Before recommending any new reduce/sell, compare the last 5 archive context snapshots for `qty`, `available_qty`, cost, price, and prior advice. If current quantity has already fallen versus the recent timeline, treat that as a possible executed reduction and size any new action only from current `available_qty`.
 - Do not phrase any recommendation as guaranteed profit.
+- Do not treat historical analogue agreement as permission to raise a blocked action, and do not treat analogue disagreement as an automatic veto of a currently valid deterministic action.
+- Do not describe the user with psychological labels such as impulsive, timid, or risk-averse. Execution alignment is an observed fact only: FOLLOWED, PARTIAL, IGNORED, OPPOSITE, or UNRESOLVED.
+- Do not claim that the model learns or becomes more profitable from past trades. The system preserves immutable decisions, confirmed execution facts, deterministic Outcomes, and descriptive Daily Reviews for future audit and comparison.
 - Do not skip the quality gate; always state the data quality grade in the evidence pack.
 - Do not present resolved claims as still uncertain; update claim status explicitly.
 - Do not ignore unresolved claims in the final verdict; the Research Manager must address each one.
