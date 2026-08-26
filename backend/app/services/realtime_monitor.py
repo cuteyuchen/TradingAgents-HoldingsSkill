@@ -271,6 +271,24 @@ class RealtimeMonitor:
                     portfolio_id=portfolio_id,
                 )
                 db.commit()
+                try:
+                    from ..operations.notifications import dispatch_material_events
+
+                    notification_targets = {
+                        (snapshot.user_id, snapshot.portfolio_id)
+                        for snapshot in holdings_by_portfolio.values()
+                    }
+                    for target_user_id, target_portfolio_id in notification_targets:
+                        dispatch_material_events(
+                            db,
+                            user_id=target_user_id,
+                            portfolio_id=target_portfolio_id,
+                            as_of=now,
+                        )
+                except Exception:
+                    # Notification delivery is advisory; persisted Monitor and
+                    # Trigger facts remain authoritative when it fails.
+                    logger.exception("Operating notification dispatch failed after monitor tick")
             for job_id in analysis_job_ids:
                 threading.Thread(target=self._run_analysis_job, args=(job_id,), name=f"trigger-analysis-{job_id}", daemon=True).start()
             self._set_state(status="running", last_success_at=now.isoformat(), last_error=None, consecutive_errors=0, recent_confirmed_events=summary["confirmed_events"])

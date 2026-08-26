@@ -3,10 +3,15 @@ import type {
   AnalysisMode,
   AnalysisRunDetail,
   AnalysisRunSummary,
+  DailyDashboard,
+  DashboardDiagnostics,
+  DashboardHealth,
+  DashboardTimeline,
   HoldingUpload,
   ModelProfile,
   ModelProvider,
   NotificationChannel,
+  OperatingNotificationList,
   ParsedHoldings,
   Portfolio,
   PortfolioSnapshot,
@@ -138,6 +143,17 @@ export const api = {
   updateNotification: (id: number, payload: Record<string, unknown>) => request<NotificationChannel>(`/api/v2/notifications/${id}`, { method: 'PATCH', body: payload }),
   deleteNotification: (id: number) => request<void>(`/api/v2/notifications/${id}`, { method: 'DELETE' }),
   testNotification: (id: number) => request<{ status: string; message: string }>(`/api/v2/notifications/${id}/test`, { method: 'POST' }),
+
+  getDashboardToday: (portfolioId: number) => request<DailyDashboard>(`/api/v3/portfolios/${portfolioId}/dashboard/today`),
+  getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
+  getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
+  getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
+  reconcileToday: (portfolioId: number) => request<Record<string, unknown>>(`/api/v3/portfolios/${portfolioId}/operations/reconcile-today`, { method: 'POST' }),
+  listOperatingNotifications: (portfolioId?: number, unreadOnly = false) => request<OperatingNotificationList>(`/api/v3/notifications${portfolioId || unreadOnly ? `?${[
+    portfolioId ? `portfolio_id=${portfolioId}` : '',
+    unreadOnly ? 'unread_only=true' : '',
+  ].filter(Boolean).join('&')}` : ''}`),
+  markOperatingNotificationRead: (notificationId: string, portfolioId?: number) => request<Record<string, unknown>>(`/api/v3/notifications/${encodeURIComponent(notificationId)}/read${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`, { method: 'POST' }),
 }
 
 async function requestBlob(path: string, retryAuth = true): Promise<Blob> {

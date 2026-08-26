@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -114,12 +115,21 @@ def run_scheduled_daily_review(*, user_id: int, portfolio_id: int, trade_date: d
 
     db = SessionLocal()
     try:
-        row = run_daily_review(
+        from ..operations.workflow import refresh_review_state
+
+        metadata = refresh_review_state(
             db,
             user_id=user_id,
             portfolio_id=portfolio_id,
             trade_date=trade_date,
+            force=True,
         )
+        row = db.query(DailyReviewRun).filter(
+            DailyReviewRun.user_id == user_id,
+            DailyReviewRun.portfolio_id == portfolio_id,
+            DailyReviewRun.trade_date == trade_date,
+            DailyReviewRun.review_version == "daily-review-v1",
+        ).first()
         if row is not None:
             logger.info(
                 "daily_review portfolio=%s trade_date=%s decisions=%s matured_outcomes=%s quality=%s",
@@ -129,6 +139,14 @@ def run_scheduled_daily_review(*, user_id: int, portfolio_id: int, trade_date: d
                 row.outcomes_matured_count,
                 row.quality_status,
             )
+            if metadata.get("refresh_count"):
+                logger.info(
+                    "review_refresh portfolio=%s trade_date=%s review=%s refresh_count=%s",
+                    portfolio_id,
+                    trade_date.isoformat(),
+                    row.id,
+                    metadata["refresh_count"],
+                )
     except Exception:
         logger.exception("Daily Review maintenance failed for portfolio %s", portfolio_id)
     finally:
@@ -148,7 +166,26 @@ def _enqueue_memory_reviews(db: Session, *, trade_date: date, now_utc: datetime)
             DailyReviewRun.trade_date == trade_date,
             DailyReviewRun.review_version == "daily-review-v1",
         ).first()
-        if existing is not None and existing.status in {"RUNNING", "COMPLETED"}:
+        if existing is not None and existing.status == "RUNNING":
+            continue
+        if existing is not None and existing.status == "COMPLETED":
+            from ..operations.workflow import review_staleness_reasons
+
+            reasons = review_staleness_reasons(db, review=existing, as_of=now_utc)
+            if not existing.review_stale and not reasons:
+                continue
+            existing.review_stale = True
+            existing.status = "RUNNING"
+            db.commit()
+            threading.Thread(
+                target=run_scheduled_daily_review,
+                kwargs={
+                    "user_id": portfolio.user_id,
+                    "portfolio_id": portfolio.id,
+                    "trade_date": trade_date,
+                },
+                daemon=True,
+            ).start()
             continue
         if existing is None:
             existing = DailyReviewRun(
@@ -177,6 +214,90 @@ def _enqueue_memory_reviews(db: Session, *, trade_date: date, now_utc: datetime)
             },
             daemon=True,
         ).start()
+
+
+def _sync_review_checkpoint(db: Session, *, portfolio: Portfolio, trade_date: date, now_utc: datetime) -> None:
+    """Reflect the existing DailyReviewRun in the lightweight operation state."""
+
+    from ..operations.workflow import ensure_operational_run
+
+    op_run = ensure_operational_run(
+        db,
+        user_id=portfolio.user_id,
+        portfolio_id=portfolio.id,
+        trade_date=trade_date,
+    )
+    state = dict(op_run.checkpoint_state_json or {})
+    review = db.query(DailyReviewRun).filter(
+        DailyReviewRun.user_id == portfolio.user_id,
+        DailyReviewRun.portfolio_id == portfolio.id,
+        DailyReviewRun.trade_date == trade_date,
+        DailyReviewRun.review_version == "daily-review-v1",
+    ).order_by(DailyReviewRun.id.desc()).first()
+    if review is not None:
+        state["daily_review"] = {
+            "status": "SUCCESS" if review.status == "COMPLETED" else review.status,
+            "review_id": review.id,
+            "review_stale": bool(review.review_stale),
+            "updated_at": now_utc.isoformat(),
+        }
+    elif now_utc.astimezone(CHINA_TZ).time() >= time(15, 30):
+        state.setdefault("daily_review", {"status": "PENDING", "updated_at": now_utc.isoformat()})
+    op_run.checkpoint_state_json = state
+    op_run.last_tick_at = now_utc.replace(tzinfo=None)
+    db.flush()
+
+
+def _run_daily_operations(db: Session, *, now_utc: datetime, portfolios: list[Portfolio]) -> None:
+    """Run Phase H orchestration through the existing scheduler tick."""
+
+    if not portfolios:
+        return
+    from ..operations.workflow import run_due_checkpoints
+
+    local = now_utc.astimezone(CHINA_TZ)
+    for portfolio in portfolios:
+        try:
+            run_due_checkpoints(db, portfolio=portfolio, now=local)
+            _sync_review_checkpoint(db, portfolio=portfolio, trade_date=local.date(), now_utc=now_utc)
+        except Exception:
+            logger.exception("daily_workflow portfolio=%s failed", portfolio.id)
+
+
+def _sync_monitor_lifecycle(now_utc: datetime, *, calendar: TradingCalendarService) -> None:
+    """Restart-safe monitor lifecycle driven by the same scheduler clock."""
+
+    from .realtime_monitor import get_realtime_monitor
+
+    local = now_utc.astimezone(CHINA_TZ)
+    monitor = get_realtime_monitor()
+    if not calendar.is_trading_day(local.date()):
+        if monitor.is_running():
+            monitor.stop()
+        return
+    if time(9, 30) <= local.time() < time(11, 30) or time(13, 0) <= local.time() < time(15, 0):
+        if settings.REALTIME_MONITOR_ENABLED:
+            monitor.start()
+    elif time(11, 30) <= local.time() < time(13, 0) or local.time() >= time(15, 0) or local.time() < time(9, 30):
+        if monitor.is_running():
+            monitor.stop()
+
+
+def _fixed_checkpoint_is_missed(schedule: Schedule, *, local: datetime) -> bool:
+    """Keep legacy Schedule jobs within the Phase H catch-up contract."""
+
+    from ..operations.config import CHECKPOINT_BY_KEY
+
+    checkpoint = CHECKPOINT_BY_KEY.get(str(schedule.checkpoint))
+    if checkpoint is None or checkpoint.catch_up_minutes is None:
+        return False
+    scheduled = local.replace(
+        hour=checkpoint.at.hour,
+        minute=checkpoint.at.minute,
+        second=0,
+        microsecond=0,
+    )
+    return local > scheduled + timedelta(minutes=checkpoint.catch_up_minutes)
 
 
 def create_scheduled_job(
@@ -237,6 +358,7 @@ def tick_schedules() -> None:
         now_utc = datetime.now(UTC)
         local = now_utc.astimezone(CHINA_TZ)
         calendar = TradingCalendarService(db)
+        _sync_monitor_lifecycle(now_utc, calendar=calendar)
         calendar_row = calendar.row_for(local.date())
         if calendar_row is None:
             logger.warning(
@@ -262,6 +384,15 @@ def tick_schedules() -> None:
                     continue
                 if schedule.last_run_at and schedule.last_run_at.replace(tzinfo=UTC).astimezone(CHINA_TZ).date() == local.date():
                     continue
+                if _fixed_checkpoint_is_missed(schedule, local=local):
+                    schedule.last_run_at = now_utc
+                    logger.info(
+                        "checkpoint portfolio=%s checkpoint=%s status=MISSED",
+                        schedule.portfolio_id,
+                        schedule.checkpoint,
+                    )
+                    db.commit()
+                    continue
                 admission = create_scheduled_job(db, schedule, with_admission=True)
                 if isinstance(admission, AnalysisJobAdmission):
                     job = admission.job
@@ -284,6 +415,14 @@ def tick_schedules() -> None:
                     schedule.enabled = False
                 db.commit()
         _enqueue_memory_reviews(db, trade_date=local.date(), now_utc=now_utc)
+        try:
+            tables = inspect(db.bind).get_table_names() if db.bind is not None else []
+            if "portfolios" in tables and "daily_operational_runs" in tables:
+                portfolios = db.query(Portfolio).order_by(Portfolio.id.asc()).all()
+                _run_daily_operations(db, now_utc=now_utc, portfolios=portfolios)
+                db.commit()
+        except Exception:
+            logger.exception("daily_workflow tick failed")
     finally:
         db.close()
 
@@ -311,3 +450,7 @@ def stop_scheduler() -> None:
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+
+
+def scheduler_running() -> bool:
+    return bool(_scheduler is not None and _scheduler.running)

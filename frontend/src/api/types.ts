@@ -2,6 +2,66 @@ export type DataGrade = 'A' | 'B' | 'C' | 'D' | 'F'
 export type ModelPurpose = 'vision' | 'analysis' | 'deep_analysis'
 // `quick` remains readable for legacy jobs/schedules; new requests use canonical modes.
 export type AnalysisMode = 'quick' | 'fast' | 'standard' | 'deep'
+export type WorkflowState = 'PRE_MARKET_MAINTENANCE' | 'PRE_MARKET_READY' | 'AUCTION' | 'MORNING_SESSION' | 'LUNCH_BREAK' | 'AFTERNOON_SESSION' | 'LATE_SESSION' | 'MARKET_CLOSED' | 'POST_CLOSE_ANALYSIS' | 'DAILY_REVIEW' | 'DAY_COMPLETE' | 'NON_TRADING_DAY'
+export type HealthSeverity = 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
+export type Freshness = 'FRESH' | 'STALE' | 'FROZEN' | 'MISSING'
+
+export interface DashboardSection { status: string; [key: string]: any }
+export interface DashboardTimelineItem { key: string; time: string; label: string; kind: string; mode?: string | null; status?: string; scheduled_at: string; is_current: boolean; [key: string]: any }
+export interface DashboardTimeline { as_of: string; trade_date: string; workflow_state: WorkflowState; monitor: Record<string, any>; timeline: DashboardTimelineItem[] }
+export interface DashboardHealth { status: HealthSeverity; overall: HealthSeverity; components: Array<{ name: string; status: string; mandatory?: boolean; detail?: any; [key: string]: any }>; severity_values: HealthSeverity[] }
+export interface OperatingNotification {
+  notification_id: string
+  title: string
+  summary: string
+  severity: string
+  portfolio_id: number
+  event_type: string
+  entity_type: string
+  entity_id: string
+  occurred_at: string
+  deep_link: string
+  dedupe_key: string
+  status?: string
+  read?: boolean
+  read_at?: string | null
+  [key: string]: any
+}
+export interface OperatingNotificationList {
+  items: OperatingNotification[]
+  count: number
+  total_count: number
+  unread_count: number
+  critical_count: number
+  latest_at?: string | null
+}
+export interface DashboardDiagnostics {
+  as_of: string
+  trade_date: string
+  workflow_state: WorkflowState
+  read_only: boolean
+  no_lookahead: boolean
+  health: DashboardHealth
+  sections: Record<string, { status: string; error?: string }>
+  issues: Array<{ component: string; status: string; detail?: any }>
+}
+export interface DailyDashboard {
+  as_of: string
+  trade_date: string
+  market_open: boolean
+  workflow_state: WorkflowState
+  market: DashboardSection
+  portfolio: DashboardSection
+  candidates: DashboardSection
+  triggers: DashboardSection
+  analysis: DashboardSection
+  decisions: DashboardSection & { final_action?: string }
+  executions: DashboardSection
+  memory: DashboardSection
+  data_health: DashboardHealth | DashboardSection
+  timeline: DashboardTimeline
+  notifications: OperatingNotificationList & DashboardSection
+}
 
 export interface User {
   id: number

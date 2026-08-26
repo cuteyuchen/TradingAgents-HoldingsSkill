@@ -64,6 +64,10 @@ class Settings:
     ANALYSIS_HISTORY_LIMIT: int = int(os.getenv("ANALYSIS_HISTORY_LIMIT", "5"))
     SCHEDULER_ENABLED: bool = _bool_env("SCHEDULER_ENABLED", "true")
     SCHEDULER_INTERVAL_SECONDS: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
+    CHECKPOINT_CATCHUP_MINUTES: int = max(0, int(os.getenv("CHECKPOINT_CATCHUP_MINUTES", "15")))
+    NOTIFICATION_DEFAULT_COOLDOWN_MINUTES: int = max(
+        0, int(os.getenv("NOTIFICATION_DEFAULT_COOLDOWN_MINUTES", "60"))
+    )
     PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "http://localhost:8080").rstrip("/")
 
     # Phase D deterministic realtime monitor and trigger engine.  The monitor

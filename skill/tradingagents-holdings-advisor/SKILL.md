@@ -57,7 +57,17 @@ Advice quality is the first priority. Time pressure, repeated data failures, or 
 - When the persistence system is configured, record failure context in the visible evidence and archive payload so the dashboard can surface the issue. The active persistence contract remains archive-only.
 - If mandatory quote, holdings, risk, or quality-gate evidence is missing, stop before action advice and output: missing data, why it blocks the recommendation, and how to fetch/confirm it next. Do not replace this with a low-quality trading plan.
 
-A skill does not schedule itself. If automatic daily execution is requested, say an external scheduler/reminder must trigger the agent at those times.
+A skill does not schedule itself. If automatic daily execution is requested, say an external scheduler/reminder must trigger the agent at those times. The backend Daily Investment Workbench may orchestrate the existing deterministic engines at fixed Asia/Shanghai checkpoints, but this remains a read-oriented operating workflow, not auto-trading.
+
+## Daily Operating Workbench (Phase H)
+
+The backend reuses the existing scheduler, realtime monitor, analysis admission, Candidate Engine, Ledger, and Memory services. It derives these server-owned states in `Asia/Shanghai`: `PRE_MARKET_MAINTENANCE`, `PRE_MARKET_READY`, `AUCTION`, `MORNING_SESSION`, `LUNCH_BREAK`, `AFTERNOON_SESSION`, `LATE_SESSION`, `MARKET_CLOSED`, `POST_CLOSE_ANALYSIS`, `DAILY_REVIEW`, `DAY_COMPLETE`, and `NON_TRADING_DAY`.
+
+The frozen operating timeline is 08:45 maintenance, 09:20 pre-market snapshot, 09:25 auction observation, 09:30 monitor start, 09:35 Standard, 10:30 Fast, 11:30 morning snapshot/lunch pause, 13:05 Fast, 14:30 Standard, 14:55 late-session review-only caution, 15:00 monitor stop/close snapshot, 15:10 Deep, 15:30 Memory Maintenance + Daily Review, and an optional 20:30 critical-event hook. Fixed analysis checkpoints are idempotent, reuse an active portfolio analysis when admission says one is already running, and can catch up within the configured 15-minute window; expired checkpoints are visible as `MISSED`. Restart recovery resumes the monitor during an active session, pauses it for lunch, and stops it after 15:00. No checkpoint submits broker orders.
+
+The Dashboard APIs are read-only projections of persisted Market, Portfolio, Candidate, Trigger, Analysis, Decision Memory, Trade Ledger, and Review facts. Candidate Engine stages remain authoritative: `ACTION` is a candidate stage, not a final buy instruction; Trigger means “reanalyze,” not buy/sell. Freshness and partial failures remain visible. On non-trading days, the workbench shows the latest reliable close, portfolio snapshot, and completed Review without starting monitor, candidate scan, or analysis checkpoints.
+
+Daily Review is idempotent. Late mature Outcomes, revised Outcome sources, or Ledger revisions mark the same ReviewRun stale; an in-place refresh clears `review_stale` and increments `refresh_count`. Material notifications use explicit `INFO`/`IMPORTANT`/`CRITICAL` severity, dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and explicit `NO_ACTION` resolutions may notify; unchanged observations do not. A total quote-provider outage blocks adding new risk and does not automatically sell existing holdings.
 
 ## Quality-First Workflow
 

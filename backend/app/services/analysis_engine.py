@@ -1816,6 +1816,19 @@ def run_analysis_job(job_id: int) -> None:
                 db.commit()
             except Exception:
                 logger.exception("Notification failed for analysis run %s", run.id)
+        try:
+            from ..operations.notifications import dispatch_material_events
+
+            dispatch_material_events(
+                db,
+                user_id=run.user_id,
+                portfolio_id=job.portfolio_id,
+                as_of=run.created_at,
+            )
+        except Exception:
+            # Operating notifications are advisory side effects and must never
+            # change the authoritative AnalysisJob/AnalysisRun result.
+            logger.exception("Operating notification dispatch failed for analysis run %s", run.id)
     except Exception as exc:
         logger.exception("Analysis job %s failed", job_id)
         if job is not None:

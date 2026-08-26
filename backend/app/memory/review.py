@@ -218,6 +218,9 @@ def build_daily_review(
             "execution_alignment": alignment,
             "candidate_action_count": len(candidates),
         })
+    # Review today's decisions and today's matured outcomes as two separate
+    # facts.  A decision from an earlier trade date can mature today and must
+    # still be visible in the current review.
     matured_candidates = db.execute(select(DecisionOutcome, DecisionMemory).join(
         DecisionMemory, DecisionOutcome.decision_memory_id == DecisionMemory.id
     ).where(
@@ -341,7 +344,7 @@ def build_daily_review(
     }
 
 
-def _apply_review(row: DailyReviewRun, payload: dict[str, Any]) -> None:
+def _apply_review(row: DailyReviewRun, payload: dict[str, Any], *, refreshed: bool = False) -> None:
     row.status = payload["status"]
     row.decision_count = payload["decision_count"]
     row.no_action_count = payload["no_action_count"]
@@ -361,8 +364,11 @@ def _apply_review(row: DailyReviewRun, payload: dict[str, Any]) -> None:
     row.reason_codes_json = payload["reason_codes"]
     row.quality_status = payload["quality_status"]
     row.confidence = payload["confidence"]
+    row.review_stale = False
+    row.refresh_count = int(row.refresh_count or 0) + (1 if refreshed else 0)
     row.review_version = DAILY_REVIEW_VERSION
     row.completed_at = _now()
+    row.last_refreshed_at = row.completed_at
 
 
 def run_daily_review(
@@ -420,7 +426,7 @@ def run_daily_review(
             trade_date=trade_date,
             as_of=as_of,
         )
-        _apply_review(existing, payload)
+        _apply_review(existing, payload, refreshed=force and existing.completed_at is not None)
         db.commit()
         db.refresh(existing)
         return existing
@@ -473,6 +479,9 @@ def serialize_daily_review(row: DailyReviewRun) -> dict[str, Any]:
         "reason_codes": row.reason_codes_json or [],
         "quality_status": row.quality_status,
         "confidence": row.confidence,
+        "review_stale": row.review_stale,
+        "last_refreshed_at": row.last_refreshed_at,
+        "refresh_count": row.refresh_count,
         "review_version": row.review_version,
         "created_at": row.created_at,
         "completed_at": row.completed_at,

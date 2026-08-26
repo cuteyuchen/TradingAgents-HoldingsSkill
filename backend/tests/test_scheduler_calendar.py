@@ -125,6 +125,20 @@ class _LateFrozenDateTime(datetime):
         return value.astimezone(tz) if tz else value.replace(tzinfo=None)
 
 
+class _CatchupFrozenDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 8, 20, 1, 42, tzinfo=UTC)
+        return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+
+class _WeekendFrozenDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 8, 22, 2, 0, tzinfo=UTC)
+        return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+
 def test_tick_schedules_missing_calendar_is_fail_closed(monkeypatch, caplog):
     factory = _scheduler_db()
     monkeypatch.setattr(scheduler, "SessionLocal", factory)
@@ -244,7 +258,7 @@ def test_tick_schedules_catches_up_when_tick_arrives_after_checkpoint(monkeypatc
         db.commit()
 
     monkeypatch.setattr(scheduler, "SessionLocal", factory)
-    monkeypatch.setattr(scheduler, "datetime", _LateFrozenDateTime)
+    monkeypatch.setattr(scheduler, "datetime", _CatchupFrozenDateTime)
     created = []
     started = []
 
@@ -268,3 +282,83 @@ def test_tick_schedules_catches_up_when_tick_arrives_after_checkpoint(monkeypatc
 
     assert created == [1]
     assert started == [(100, 1)]
+
+
+def test_tick_schedules_marks_fixed_checkpoint_missed_after_catchup_window(monkeypatch):
+    factory = _scheduler_db()
+    with factory() as db:
+        upsert_calendar(
+            db,
+            [
+                {"trade_date": "2026-08-20", "is_open": True},
+                {"trade_date": "2026-08-21", "is_open": True},
+            ],
+        )
+        db.commit()
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(scheduler, "datetime", _LateFrozenDateTime)
+    created = []
+    monkeypatch.setattr(scheduler, "create_scheduled_job", lambda *_args, **_kwargs: created.append(True))
+
+    scheduler.tick_schedules()
+
+    assert created == []
+    with factory() as db:
+        row = db.get(Schedule, 1)
+        assert row.last_run_at == datetime(2026, 8, 20, 2, 5)
+
+
+def test_tick_schedules_preserves_completed_run_before_missed_check(monkeypatch):
+    factory = _scheduler_db()
+    with factory() as db:
+        upsert_calendar(
+            db,
+            [
+                {"trade_date": "2026-08-20", "is_open": True},
+                {"trade_date": "2026-08-21", "is_open": True},
+            ],
+        )
+        row = db.get(Schedule, 1)
+        row.last_run_at = datetime(2026, 8, 20, 1, 35)
+        db.commit()
+
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(scheduler, "datetime", _LateFrozenDateTime)
+    created = []
+    monkeypatch.setattr(scheduler, "create_scheduled_job", lambda *_args, **_kwargs: created.append(True))
+
+    scheduler.tick_schedules()
+
+    assert created == []
+    with factory() as db:
+        row = db.get(Schedule, 1)
+        assert row.last_run_at == datetime(2026, 8, 20, 1, 35)
+
+
+def test_tick_schedules_stops_monitor_on_non_trading_day(monkeypatch):
+    factory = _scheduler_db()
+    with factory() as db:
+        upsert_calendar(db, [{"trade_date": "2026-08-22", "is_open": False}])
+        db.commit()
+
+    class Monitor:
+        running = True
+        stops = 0
+
+        def is_running(self):
+            return self.running
+
+        def stop(self):
+            self.running = False
+            self.stops += 1
+
+    monitor = Monitor()
+    monkeypatch.setattr(scheduler, "SessionLocal", factory)
+    monkeypatch.setattr(scheduler, "datetime", _WeekendFrozenDateTime)
+    monkeypatch.setattr("app.services.realtime_monitor.get_realtime_monitor", lambda: monitor)
+
+    scheduler.tick_schedules()
+
+    assert monitor.running is False
+    assert monitor.stops == 1

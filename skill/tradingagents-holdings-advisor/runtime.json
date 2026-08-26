@@ -46,6 +46,10 @@
     ,"Market FROZEN, MISSING, or INVALID, insufficient factor coverage, low Entry, low risk/reward, weak Portfolio Fit, or insufficient Decision Edge means no new-risk ACTION; ACTION=0 is normal."
     ,"Historical Memory is advisory evidence only: current deterministic Market, Portfolio, Candidate, Data Quality, and Decision Gates always take precedence. Do not copy a historical action because it was profitable, and do not reverse a valid current action merely because a historical case lost."
     ,"Decision Memory preserves immutable decision snapshots, confirmed user execution facts, deterministic trading-day Outcomes, and descriptive Daily Reviews. It never changes Candidate, Portfolio, Market, Hard Cap, Risk Gate, or prompt weights."
+    ,"Daily Workflow is deterministic orchestration over existing Market, Portfolio, Candidate, Trigger, Analysis, Ledger, and Memory facts. It does not create a second scheduler, execute broker orders, or turn Dashboard reads into recomputation."
+    ,"The Daily Investment Workbench is read-only: Candidate ACTION is not a final buy instruction, Trigger is a request for re-analysis, and Portfolio Gate remains the final authority. Data outages pause new risk and do not force automatic sales of existing holdings."
+    ,"Daily Review is idempotent and may be refreshed in place when late Outcomes, revised Outcome sources, or Ledger revisions arrive; refreshes preserve the same ReviewRun identity and increment refresh_count."
+    ,"Material notifications use explicit severity (INFO, IMPORTANT, CRITICAL), event dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and NO_ACTION resolutions are meaningful events; repeated unchanged observations are not."
   ],
   "decision_contract": {
     "version": "2.4.0",
@@ -104,6 +108,48 @@
     "13:05": "Fast review of midday sector rotation and morning-signal validation.",
     "14:30": "Standard late-session overnight-carry and risk control.",
     "15:10": "Deep daily review and final portfolio consistency check."
+  },
+  "daily_workflow": {
+    "timezone": "Asia/Shanghai",
+    "states": [
+      "PRE_MARKET_MAINTENANCE",
+      "PRE_MARKET_READY",
+      "AUCTION",
+      "MORNING_SESSION",
+      "LUNCH_BREAK",
+      "AFTERNOON_SESSION",
+      "LATE_SESSION",
+      "MARKET_CLOSED",
+      "POST_CLOSE_ANALYSIS",
+      "DAILY_REVIEW",
+      "DAY_COMPLETE",
+      "NON_TRADING_DAY"
+    ],
+    "fixed_checkpoints": {
+      "08:45": "Data Maintenance",
+      "09:20": "Pre-market Snapshot",
+      "09:25": "Auction Observation",
+      "09:30": "Realtime Monitor Start",
+      "11:30": "Morning Snapshot and lunch pause",
+      "15:00": "Realtime Monitor stop and close snapshot",
+      "15:30": "Memory Maintenance and Daily Review",
+      "20:30": "Optional critical-event hook only"
+    },
+    "recovery": {
+      "restart_safe": true,
+      "analysis_catch_up_minutes": 15,
+      "review_catch_up": true,
+      "checkpoint_idempotent": true
+    }
+  },
+  "notification_semantics": {
+    "severity": ["INFO", "IMPORTANT", "CRITICAL"],
+    "dedupe": true,
+    "cooldown": true,
+    "candidate_action_is_not_order": true,
+    "trigger_is_not_order": true,
+    "provider_total_outage_blocks_new_risk": true,
+    "no_action_is_successful_result": true
   },
   "upstream_references": [
     "TauricResearch/TradingAgents",

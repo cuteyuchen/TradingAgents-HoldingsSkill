@@ -1,6 +1,7 @@
 """Phase F deterministic Candidate Engine API."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,6 +13,8 @@ from ..candidates.service import get_candidate_run, latest_candidate_context, li
 from ..database import get_db
 from ..v2_dependencies import get_current_user
 from ..v2_models import Portfolio, User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v3", tags=["v3-candidates"])
 
@@ -41,7 +44,7 @@ def scan(
 ) -> dict:
     _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
     try:
-        return scan_candidates(
+        result = scan_candidates(
             db,
             user_id=current_user.id,
             portfolio_id=portfolio_id,
@@ -49,6 +52,20 @@ def scan(
             mode=payload.mode,
             persist=True,
         )
+        try:
+            from ..operations.notifications import dispatch_material_events
+
+            dispatch_material_events(
+                db,
+                user_id=current_user.id,
+                portfolio_id=portfolio_id,
+                as_of=payload.as_of,
+            )
+        except Exception:
+            # Candidate facts are already committed; notification delivery must
+            # not turn a successful deterministic scan into an API failure.
+            logger.exception("Operating notification dispatch failed after candidate scan")
+        return result
     except ValueError as exc:
         db.rollback()
         raise _service_error(exc) from exc

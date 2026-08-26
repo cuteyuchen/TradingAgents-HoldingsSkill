@@ -43,6 +43,7 @@ def init_db() -> None:
         market_runtime_models,
         memory,
         models,
+        operations,
         candidates,
         portfolio_models,
         trigger_models,
@@ -128,6 +129,16 @@ def _apply_lightweight_migrations() -> None:
         if "context_json" not in analysis_columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE analysis_jobs ADD COLUMN context_json JSON"))
+
+    if inspector.has_table("daily_review_runs"):
+        review_columns = {c["name"] for c in inspector.get_columns("daily_review_runs")}
+        with engine.begin() as conn:
+            if "review_stale" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN review_stale BOOLEAN NOT NULL DEFAULT 0"))
+            if "last_refreshed_at" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN last_refreshed_at DATETIME"))
+            if "refresh_count" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN refresh_count INTEGER NOT NULL DEFAULT 0"))
 
 
 def _repair_historical_pnl_values() -> None:

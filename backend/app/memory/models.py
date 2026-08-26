@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -156,6 +157,9 @@ class DailyReviewRun(Base):
     reason_codes_json: Mapped[list | None] = mapped_column(JSON)
     quality_status: Mapped[str] = mapped_column(String(24), default="DEGRADED", index=True)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    review_stale: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    refresh_count: Mapped[int] = mapped_column(Integer, default=0)
     review_version: Mapped[str] = mapped_column(String(64), default=DAILY_REVIEW_VERSION, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
