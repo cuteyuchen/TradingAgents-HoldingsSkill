@@ -11,6 +11,10 @@ from .config import CandidateConfig, DEFAULT_CONFIG
 from .factors import normalize_bars, returns_from_closes
 
 
+CORRELATION_LOOKBACK_DAYS = 60
+CORRELATION_MIN_SAMPLES = 40
+
+
 def _number(value: Any) -> float | None:
     try:
         result = float(value)
@@ -19,15 +23,20 @@ def _number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _returns(bars: Iterable[Any]) -> dict[Any, float]:
+def _returns(bars: Iterable[Any], *, lookback: int = CORRELATION_LOOKBACK_DAYS) -> dict[Any, float]:
     rows = normalize_bars(bars)
+    rows = rows[-(lookback + 1) :]
     closes = [row["close"] for row in rows]
     dates = [row["trade_date"] for row in rows]
     values = returns_from_closes(closes)
     return {day: value for day, value in zip(dates[1:], values)}
 
 
-def _correlation(first: dict[Any, float], second: dict[Any, float], min_samples: int = 20) -> tuple[float | None, int]:
+def _correlation(
+    first: dict[Any, float],
+    second: dict[Any, float],
+    min_samples: int = CORRELATION_MIN_SAMPLES,
+) -> tuple[float | None, int]:
     dates = sorted(set(first) & set(second))
     if len(dates) < min_samples:
         return None, len(dates)
@@ -57,6 +66,47 @@ def _candidate_cap(candidate: Mapping[str, Any]) -> float | None:
     return cap
 
 
+def _replacement_source(
+    held_opportunity_scores: Iterable[Mapping[str, Any]],
+    positions: Iterable[Mapping[str, Any]],
+    *,
+    config: CandidateConfig,
+) -> tuple[str | None, float | None, float | None]:
+    """Choose one weak but auditable held position for simulation only."""
+
+    weights = {
+        str(row.get("code")): max(0.0, _number(row.get("weight")) or 0.0)
+        for row in positions
+        if row.get("code")
+    }
+    candidates: list[tuple[float, float, str, float]] = []
+    for raw in held_opportunity_scores:
+        if not isinstance(raw, Mapping):
+            continue
+        code = str(raw.get("code") or "")
+        weight = weights.get(code, 0.0)
+        if not code or weight <= 0:
+            continue
+        opportunity = _number(raw.get("opportunity_score"))
+        keep = _number(raw.get("keep_score"))
+        if opportunity is None and keep is None:
+            continue
+        confidence = _number(raw.get("confidence"))
+        coverage = _number(raw.get("coverage"))
+        if confidence is not None and confidence < 50.0:
+            continue
+        if coverage is not None and coverage < 0.50:
+            continue
+        weakness = min(value for value in (keep, opportunity) if value is not None)
+        if weakness > config.replacement_keep_score_max:
+            continue
+        candidates.append((weakness, opportunity if opportunity is not None else weakness, code, weight))
+    if not candidates:
+        return None, None, None
+    weakness, opportunity, code, weight = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+    return code, weight, opportunity
+
+
 def calculate_portfolio_fit(
     candidate: Mapping[str, Any],
     portfolio_context: Mapping[str, Any],
@@ -72,7 +122,6 @@ def calculate_portfolio_fit(
     holding_bars = holding_bars or {}
     candidate_code = str(candidate.get("code") or "")
     candidate_returns = _returns(candidate_bars or [])
-    min_samples = 20
     correlations: list[dict[str, Any]] = []
     weighted_sum = weighted_denominator = 0.0
     max_corr: float | None = None
@@ -80,7 +129,7 @@ def calculate_portfolio_fit(
         code = str(position.get("code") or "")
         if not code or code not in holding_bars:
             continue
-        corr, samples = _correlation(candidate_returns, _returns(holding_bars[code]), min_samples)
+        corr, samples = _correlation(candidate_returns, _returns(holding_bars[code]))
         if corr is None:
             continue
         weight = max(0.0, _number(position.get("weight")) or 0.0)
@@ -106,18 +155,37 @@ def calculate_portfolio_fit(
     if cash_probe is not None and cash_probe >= config.min_spendable_cash_ratio:
         probe_weight = cash_probe
         funding_mode = "CASH_FUNDED"
+        probe_source_code = None
+        replacement_opportunity_score = None
     else:
-        probe_weight = config.portfolio_probe_weight
-        reliable_held = [dict(row) for row in held_opportunity_scores if isinstance(row, Mapping) and row.get("opportunity_score") is not None]
-        funding_mode = "REPLACEMENT_REVIEW" if reliable_held else "UNFUNDED"
-        if headroom is not None:
-            probe_weight = min(probe_weight, headroom)
+        probe_source_code, source_weight, replacement_opportunity_score = _replacement_source(
+            held_opportunity_scores,
+            positions,
+            config=config,
+        )
+        if probe_source_code is not None and source_weight is not None:
+            probe_weight = min(config.portfolio_probe_weight, source_weight)
+            if headroom is not None:
+                probe_weight = min(probe_weight, headroom)
+            funding_mode = "REPLACEMENT_REVIEW" if probe_weight >= config.min_spendable_cash_ratio else "UNFUNDED"
+            if funding_mode == "UNFUNDED":
+                probe_weight = 0.0
+                probe_source_code = None
+        else:
+            probe_weight = 0.0
+            funding_mode = "UNFUNDED"
+            replacement_opportunity_score = None
 
     weights = {str(row.get("code")): max(0.0, _number(row.get("weight")) or 0.0) for row in positions if row.get("code")}
     current_hhi = _number(portfolio_context.get("hhi"))
     if current_hhi is None:
         current_hhi = sum(weight * weight for weight in weights.values())
     projected_weights = dict(weights)
+    if funding_mode == "REPLACEMENT_REVIEW" and probe_source_code:
+        projected_weights[probe_source_code] = max(
+            0.0,
+            projected_weights.get(probe_source_code, 0.0) - max(0.0, probe_weight or 0.0),
+        )
     projected_weights[candidate_code] = projected_weights.get(candidate_code, 0.0) + max(0.0, probe_weight or 0.0)
     projected_hhi = sum(weight * weight for weight in projected_weights.values())
     hhi_delta = projected_hhi - current_hhi
@@ -135,7 +203,22 @@ def calculate_portfolio_fit(
     if candidate_volatility is not None:
         correlation_for_risk = weighted_corr if weighted_corr is not None else 0.0
         base = current_volatility or 0.0
-        projected_volatility = math.sqrt(max(0.0, (1.0 - (probe_weight or 0.0)) ** 2 * base ** 2 + (probe_weight or 0.0) ** 2 * candidate_volatility ** 2 + 2.0 * (1.0 - (probe_weight or 0.0)) * (probe_weight or 0.0) * correlation_for_risk * base * candidate_volatility))
+        probe = max(0.0, probe_weight or 0.0)
+        if funding_mode == "CASH_FUNDED":
+            # Cash is not a risk asset.  Existing risk assets remain at their
+            # original weights when the probe is funded from cash.
+            projected_variance = (
+                base**2
+                + probe**2 * candidate_volatility**2
+                + 2.0 * probe * correlation_for_risk * base * candidate_volatility
+            )
+        else:
+            projected_variance = (
+                (1.0 - probe) ** 2 * base**2
+                + probe**2 * candidate_volatility**2
+                + 2.0 * (1.0 - probe) * probe * correlation_for_risk * base * candidate_volatility
+            )
+        projected_volatility = math.sqrt(max(0.0, projected_variance))
         risk_delta = projected_volatility - base
         marginal_risk_score = max(0.0, min(100.0, 70.0 - risk_delta * 250.0))
     elif weighted_corr is not None:
@@ -175,7 +258,14 @@ def calculate_portfolio_fit(
         "components": fit_components,
         "probe_weight": probe_weight,
         "probe_weight_is_simulation": True,
+        "simulation_only": True,
+        "order_generation_allowed": False,
         "funding_mode": funding_mode,
+        "probe_source_code": probe_source_code,
+        "replacement_opportunity_score": replacement_opportunity_score,
+        "replacement_weight_delta": (
+            -probe_weight if funding_mode == "REPLACEMENT_REVIEW" and probe_source_code else 0.0
+        ),
         "cash_ratio": cash_ratio,
         "spendable_cash": spendable_cash,
         "candidate_hard_cap": cap,
@@ -185,9 +275,12 @@ def calculate_portfolio_fit(
         "high_corr_positions": high_corr_positions,
         "correlation_samples": correlations,
         "current_hhi": current_hhi,
+        "projected_weights": projected_weights,
         "projected_hhi": projected_hhi,
         "hhi_delta": hhi_delta,
         "current_portfolio_volatility": current_volatility,
+        "candidate_volatility": candidate_volatility,
+        "correlation_for_risk": weighted_corr if weighted_corr is not None else 0.0,
         "projected_portfolio_volatility": projected_volatility,
         "risk_delta": risk_delta,
         "hard_cap_violation": hard_cap_violation,

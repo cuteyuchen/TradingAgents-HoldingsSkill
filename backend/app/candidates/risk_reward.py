@@ -29,14 +29,27 @@ def calculate_structure_risk_reward(
         }
 
     recent = rows[-lookback:]
-    support_candidates: list[float] = []
+    support_candidates: list[dict[str, Any]] = []
     for value in (features.get("ma20"),):
         if value is not None and 0 < value < current:
-            support_candidates.append(float(value))
-    lows = [float(row["low"]) for row in recent if row.get("low") is not None and 0 < row["low"] < current]
-    if lows:
-        support_candidates.append(max(lows))
-    supports = max(support_candidates) if support_candidates else None
+            support_candidates.append({"value": float(value), "source": "MA20"})
+
+    # A support level needs confirmation on both sides.  Using the nearest raw
+    # low makes an ordinary intraday wick look like a structural floor and can
+    # materially overstate the calculated R/R.
+    swing_window = 2
+    for index in range(swing_window, len(recent) - swing_window):
+        low = recent[index].get("low")
+        if low is None or not 0 < float(low) < current:
+            continue
+        neighbours = [
+            float(recent[offset]["low"])
+            for offset in range(index - swing_window, index + swing_window + 1)
+            if offset != index and recent[offset].get("low") is not None
+        ]
+        if len(neighbours) == swing_window * 2 and float(low) <= min(neighbours):
+            support_candidates.append({"value": float(low), "source": "CONFIRMED_SWING_LOW"})
+    supports = max((item["value"] for item in support_candidates), default=None)
 
     resistance_candidates: list[float] = []
     highs = [float(row["high"]) for row in rows[-120:] if row.get("high") is not None and row["high"] > current]
@@ -67,6 +80,9 @@ def calculate_structure_risk_reward(
             "support_candidates": support_candidates,
             "resistance_candidates": resistance_candidates,
             "lookback": lookback,
+            "support_selection": (
+                "CONFIRMED_SWING_LOW_OR_MA20" if support_candidates else "UNAVAILABLE"
+            ),
         },
     }
 

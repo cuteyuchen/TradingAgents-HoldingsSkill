@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-CONTRACT_VERSION = "2.2.0"
+CONTRACT_VERSION = "2.3.0"
 DEFAULT_PORTFOLIO_ACTION = "no_action"
 CANDIDATE_MIN_COUNT = 0
 CANDIDATE_MAX_COUNT = 3

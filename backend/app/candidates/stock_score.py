@@ -58,9 +58,15 @@ def _context_values(context: Mapping[str, Any], key: str) -> Mapping[str, float 
     return value if isinstance(value, Mapping) else None
 
 
-def _available_section(metadata: Mapping[str, Any], name: str, as_of: date | datetime | str | None) -> dict[str, Any]:
+def _available_section(
+    metadata: Mapping[str, Any],
+    name: str,
+    as_of: date | datetime | str | None,
+    *,
+    live: bool | None = None,
+) -> dict[str, Any]:
     section = metadata_section(metadata, name)
-    return section if section and section_available_at(section, as_of) else {}
+    return section if section and section_available_at(section, as_of, live=live) else {}
 
 
 def _trend_score(features: Mapping[str, Any]) -> tuple[float | None, dict[str, Any]]:
@@ -88,6 +94,7 @@ def score_stock_candidate(
     metadata: Mapping[str, Any] | None = None,
     cross_sectional: Mapping[str, Mapping[str, float | None]] | None = None,
     as_of: date | datetime | str | None = None,
+    live: bool | None = None,
     config: CandidateConfig = DEFAULT_CONFIG,
 ) -> dict[str, Any]:
     quote = dict(quote or {})
@@ -114,7 +121,8 @@ def score_stock_candidate(
         else None
     )
 
-    fundamental = _available_section(metadata, "fundamental", as_of)
+    factor_live = as_of is None if live is None else live
+    fundamental = _available_section(metadata, "fundamental", as_of, live=factor_live)
     roe = metric_value(fundamental, "roe", "roe_ttm")
     revenue_growth = metric_value(fundamental, "revenue_yoy", "revenue_growth")
     profit_growth = metric_value(fundamental, "profit_yoy", "profit_growth")
@@ -131,7 +139,7 @@ def score_stock_candidate(
     usable_fundamental = [(value, weight) for value, weight in zip(fundamental_parts, fundamental_weights) if value is not None]
     fundamental_score = sum(value * weight for value, weight in usable_fundamental) / sum(weight for _, weight in usable_fundamental) if usable_fundamental else None
 
-    valuation = _available_section(metadata, "valuation", as_of)
+    valuation = _available_section(metadata, "valuation", as_of, live=factor_live)
     pe = metric_value(valuation, "pe_ttm", "pe")
     pb = metric_value(valuation, "pb")
     dividend = metric_value(valuation, "dividend_yield", "dividend_yield_ratio")
@@ -145,7 +153,7 @@ def score_stock_candidate(
     turnover = features.get("latest_bar", {}).get("turnover_rate") if features.get("latest_bar") else None
     rel_volume = features.get("relative_volume20")
     price_volume = features.get("price_volume_confirmation")
-    money_flow = metric_value(_available_section(metadata, "flow", as_of), "main_net", "net_money_flow")
+    money_flow = metric_value(_available_section(metadata, "flow", as_of, live=factor_live), "main_net", "net_money_flow")
     flow_parts = [
         (_rank_or_scale(code, amount, _context_values(cross_sectional, "amount20"), low=0.0, high=1e9, config=config), 0.25),
         (_rank_or_scale(code, turnover, _context_values(cross_sectional, "turnover"), low=0.0, high=20.0, config=config), 0.20),
@@ -156,7 +164,7 @@ def score_stock_candidate(
     usable_flow = [(value, weight) for value, weight in flow_parts if value is not None]
     flow_score = sum(value * weight for value, weight in usable_flow) / sum(weight for _, weight in usable_flow) if usable_flow else None
 
-    industry = _available_section(metadata, "industry", as_of)
+    industry = _available_section(metadata, "industry", as_of, live=factor_live)
     industry_rs = metric_value(industry, "relative_strength", "rs20", "industry_rs")
     industry_breadth = metric_value(industry, "breadth", "industry_breadth")
     industry_trend = metric_value(industry, "trend", "industry_trend")

@@ -260,10 +260,30 @@ def metadata_section(metadata: Mapping[str, Any] | None, name: str) -> dict[str,
     return {}
 
 
-def section_available_at(section: Mapping[str, Any], as_of: date | datetime | str | None) -> bool:
+def section_available_at(
+    section: Mapping[str, Any],
+    as_of: date | datetime | str | None,
+    *,
+    live: bool | None = None,
+) -> bool:
+    """Check factor availability without treating undated data as historical fact.
+
+    A factor section without ``available_at``/``published_at`` is usable only
+    for an explicitly live calculation.  Historical replay must fail closed for
+    that section because its publication time cannot be proven.
+    """
+
     available_at = _datetime(section.get("available_at") or section.get("published_at"))
     cutoff = _as_of(as_of)
-    return available_at is None or cutoff is None or available_at <= cutoff
+    if available_at is None:
+        return bool(live) if live is not None else cutoff is None
+    return cutoff is None or available_at <= cutoff
+
+
+def section_point_in_time(section: Mapping[str, Any] | None) -> bool:
+    """Return whether a factor section carries a replay-safe timestamp."""
+
+    return bool(section and _datetime(section.get("available_at") or section.get("published_at")))
 
 
 def metric_value(section: Mapping[str, Any], *names: str) -> float | None:
@@ -321,4 +341,5 @@ __all__ = [
     "return_over_window",
     "returns_from_closes",
     "section_available_at",
+    "section_point_in_time",
 ]

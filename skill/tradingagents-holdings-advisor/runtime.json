@@ -1,7 +1,7 @@
 {
   "name": "tradingagents-holdings-advisor",
-  "version": "2.2.0",
-  "prompt_version": "2026-08-24",
+  "version": "2.3.0",
+  "prompt_version": "2026-08-26",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
     "confirmed_portfolio_snapshot",
@@ -39,11 +39,13 @@
     "Portfolio Engine constraints are deterministic facts: stock 20% and classified sector/theme ETF 30% caps constrain new risk, available_qty constrains sellable quantity, and a FROZEN market state blocks actionable risk increases without forcing a sell."
     ,"Phase F deterministic Candidate Engine is authoritative for new-position candidates: it owns universe eligibility, scores, Entry, risk/reward, Portfolio Fit, Decision Edge, ranking, and WATCHLIST/READY/ACTION stages."
     ,"Analysis modes must use the Candidate Engine context: fast reads only a recent reliable CandidateRun; standard/deep may run the local-cache scan; candidate scanning must not fan out per-security network requests."
+    ,"CandidateRun quality uses the structural candidate denominator before data exclusions: quote/bar coverage >=98% is NORMAL, 95%-<98% is DEGRADED, <95% is BLOCKED_FOR_ACTION; MISSING closes READY and ACTION, and BLOCKED_FOR_ACTION closes ACTION."
+    ,"A daily_bar_cache_close_proxy is observation/diagnostic evidence only. It preserves quote provenance and can never produce an intraday ACTION candidate."
     ,"The model may explain or veto a deterministic ACTION candidate, but it may not invent a code, promote READY/WATCHLIST, alter deterministic scores, or turn a held security into a new-position candidate."
     ,"Market FROZEN, MISSING, or INVALID, insufficient factor coverage, low Entry, low risk/reward, weak Portfolio Fit, or insufficient Decision Edge means no new-risk ACTION; ACTION=0 is normal."
   ],
   "decision_contract": {
-    "version": "2.2.0",
+    "version": "2.3.0",
     "default_portfolio_action": "no_action",
     "candidates": {
       "min": 0,

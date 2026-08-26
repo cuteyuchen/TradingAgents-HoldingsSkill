@@ -585,7 +585,10 @@ def _candidate_context_for_analysis(
             snapshot_id=job.snapshot_id,
             mode=analysis_mode,
             persist=True,
-            quote_rows=quote_rows,
+            # Standard/Deep own one fresh all-market bulk quote snapshot inside
+            # Candidate Engine.  The initial market snapshot only covers held
+            # positions and must not be reused as candidate provenance.
+            quote_rows=None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Candidate Engine unavailable for analysis job %s", job.id)
@@ -748,12 +751,21 @@ def _normalize_final(
     holding_codes = {row["code"] for row in output_rows}
     filtered_candidates: list[dict[str, Any]] = []
     deterministic_allowed: dict[str, dict[str, Any]] | None = None
+    candidate_quality = ""
+    candidate_quality_blocked = False
     if candidate_context is not None:
-        deterministic_allowed = {
-            normalize_code(str(item.get("code") or "")): dict(item)
-            for item in candidate_context.get("action") or []
-            if isinstance(item, dict) and normalize_code(str(item.get("code") or ""))
-        }
+        candidate_quality = str(
+            candidate_context.get("quality_status")
+            or (candidate_context.get("run") or {}).get("quality_status")
+            or ""
+        ).upper()
+        candidate_quality_blocked = candidate_quality in {"MISSING", "BLOCKED", "BLOCKED_FOR_ACTION"}
+        if not candidate_quality_blocked:
+            deterministic_allowed = {
+                normalize_code(str(item.get("code") or "")): dict(item)
+                for item in candidate_context.get("action") or []
+                if isinstance(item, dict) and normalize_code(str(item.get("code") or ""))
+            }
     # An explicitly empty workflow list is authoritative: the candidate scan
     # may have blocked new opportunities even when a later model response still
     # echoes stale candidates in its final payload.
@@ -766,6 +778,12 @@ def _normalize_final(
         or (result.get("portfolio_manager_final") or {}).get("portfolio_rating")
         or ""
     ).lower()
+    if candidate_quality_blocked:
+        raw_candidates = []
+        result.setdefault(
+            "candidate_blocked_reason",
+            f"CandidateRun 全局质量门为 {candidate_quality}，新增风险候选已关闭。",
+        )
     if candidate_context is not None and final_model_rating in {"no_action", "watch_only"}:
         # The deterministic ACTION set is the only source of candidates, but
         # the final model is still allowed to veto the entire set.

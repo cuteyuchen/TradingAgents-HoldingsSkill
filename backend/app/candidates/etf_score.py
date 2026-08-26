@@ -44,6 +44,7 @@ def score_etf_candidate(
     benchmark: Mapping[str, Any] | None = None,
     underlying_bars: Iterable[Any] | None = None,
     as_of: date | datetime | str | None = None,
+    live: bool | None = None,
     config: CandidateConfig = DEFAULT_CONFIG,
 ) -> dict[str, Any]:
     quote = dict(quote or {})
@@ -83,8 +84,9 @@ def score_etf_candidate(
     liquidity_usable = [(value, weight) for value, weight in liquidity_parts if value is not None]
     liquidity = sum(value * weight for value, weight in liquidity_usable) / sum(weight for _, weight in liquidity_usable) if liquidity_usable else None
 
+    factor_live = as_of is None if live is None else live
     valuation = metadata_section(metadata, "valuation")
-    valuation = valuation if section_available_at(valuation, as_of) else {}
+    valuation = valuation if section_available_at(valuation, as_of, live=factor_live) else {}
     pe = metric_value(valuation, "pe_ttm", "pe")
     pb = metric_value(valuation, "pb")
     dividend = metric_value(valuation, "dividend_yield", "dividend_yield_ratio")
@@ -97,7 +99,7 @@ def score_etf_candidate(
     valuation_score = sum(value * weight for value, weight in valuation_usable) / sum(weight for _, weight in valuation_usable) if valuation_usable else None
 
     breadth = metadata_section(metadata, "constituent_breadth") or metadata_section(metadata, "breadth")
-    breadth = breadth if section_available_at(breadth, as_of) else {}
+    breadth = breadth if section_available_at(breadth, as_of, live=factor_live) else {}
     breadth_value = metric_value(breadth, "score", "breadth", "advance_ratio", "positive_ratio")
     if breadth_value is not None and breadth_value <= 1:
         breadth_value *= 100.0

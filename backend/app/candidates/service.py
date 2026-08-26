@@ -11,7 +11,8 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..market_engine_models import AllAMedianIndexDaily, MarketScoreSnapshot
+from ..config import settings
+from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import MarketSnapshot
 from ..portfolio.risk import latest_confirmed_snapshot
@@ -29,6 +30,10 @@ from .risk_reward import calculate_structure_risk_reward
 from .stock_score import score_stock_candidate
 from .universe import build_candidate_universe
 from ..services.daily_bar_cache import load_daily_bars
+from ..services.market_snapshot_service import (
+    get_all_a_share_quote_snapshot,
+    persist_snapshot as persist_market_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,17 +149,15 @@ def _metadata(security: SecurityMaster) -> dict[str, Any]:
     return dict(raw)
 
 
-def _load_market_state(db: Session, *, as_of: datetime) -> dict[str, Any]:
+def _market_score_freshness_limit_seconds() -> int:
+    return max(60, int(settings.MARKET_SCORE_INTERVAL_MINUTES) * 3 * 60)
+
+
+def _load_market_state(db: Session, *, as_of: datetime, live: bool = False) -> dict[str, Any]:
     row = db.execute(
         select(MarketScoreSnapshot)
         .where(MarketScoreSnapshot.market == "CN", MarketScoreSnapshot.captured_at <= as_of)
         .order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    snapshot = db.execute(
-        select(MarketSnapshot)
-        .where(MarketSnapshot.market == "CN", MarketSnapshot.completed_at <= as_of)
-        .order_by(MarketSnapshot.completed_at.desc(), MarketSnapshot.id.desc())
         .limit(1)
     ).scalar_one_or_none()
     if row is None:
@@ -165,20 +168,72 @@ def _load_market_state(db: Session, *, as_of: datetime) -> dict[str, Any]:
             "regime": None,
             "confidence": 0.0,
             "snapshot_id": None,
-            "market_snapshot_id": snapshot.snapshot_id if snapshot else None,
+            "metric_snapshot_id": None,
+            "market_snapshot_id": None,
+            "freshness_seconds": None,
+            "freshness_limit_seconds": _market_score_freshness_limit_seconds(),
+            "freshness_status": "MISSING",
+            "lineage_status": "MISSING",
         }
+    metric = None
+    if row.metric_snapshot_id:
+        metric = db.execute(
+            select(MarketMetricSnapshot)
+            .where(
+                MarketMetricSnapshot.snapshot_id == row.metric_snapshot_id,
+                MarketMetricSnapshot.market == "CN",
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+    source_snapshot = None
+    if metric and metric.market_snapshot_id:
+        source_snapshot = db.execute(
+            select(MarketSnapshot)
+            .where(
+                MarketSnapshot.snapshot_id == metric.market_snapshot_id,
+                MarketSnapshot.market == "CN",
+                MarketSnapshot.completed_at <= as_of,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+    captured_at = _utc_naive(row.captured_at) if row.captured_at else None
+    freshness_seconds = max(0.0, (as_of - captured_at).total_seconds()) if captured_at else None
+    freshness_limit = _market_score_freshness_limit_seconds()
+    lineage_status = "VALID" if metric is not None and source_snapshot is not None else "MISSING"
+    raw_quality = str(row.quality_status or "MISSING").upper()
+    quality_status = raw_quality
+    freshness_status = "FRESH"
+    if lineage_status != "VALID":
+        quality_status = "MISSING"
+        freshness_status = "MISSING"
+    elif row.is_frozen:
+        quality_status = "FROZEN"
+        freshness_status = "FROZEN"
+    elif live and (freshness_seconds is None or freshness_seconds > freshness_limit):
+        quality_status = "STALE"
+        freshness_status = "STALE"
+    elif raw_quality not in {"VALID", "DEGRADED"}:
+        freshness_status = "INVALID"
+    available = quality_status in {"VALID", "DEGRADED"}
     return {
-        "available": True,
+        "available": available,
         "snapshot_id": row.snapshot_id,
-        "market_snapshot_id": row.metric_snapshot_id,
+        "metric_snapshot_id": row.metric_snapshot_id,
+        "market_snapshot_id": source_snapshot.snapshot_id if source_snapshot else None,
         "captured_at": row.captured_at.isoformat() if row.captured_at else None,
         "trade_date": row.trade_date.isoformat() if row.trade_date else None,
         "display_score": row.display_score,
         "regime": row.regime,
         "confidence": row.confidence,
-        "quality_status": row.quality_status,
+        "quality_status": quality_status,
+        "raw_quality_status": raw_quality,
         "is_frozen": row.is_frozen,
         "freeze_reason": row.freeze_reason,
+        "freshness_seconds": freshness_seconds,
+        "freshness_limit_seconds": freshness_limit,
+        "freshness_status": freshness_status,
+        "lineage_status": lineage_status,
+        "source_snapshot_completed_at": source_snapshot.completed_at.isoformat() if source_snapshot and source_snapshot.completed_at else None,
     }
 
 
@@ -225,7 +280,12 @@ def _benchmark(db: Session, *, as_of: datetime) -> dict[str, Any]:
     }
 
 
-def _cross_sectional(rows: Iterable[Mapping[str, Any]], *, as_of: datetime) -> dict[str, dict[str, float | None]]:
+def _cross_sectional(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    as_of: datetime,
+    live: bool = False,
+) -> dict[str, dict[str, float | None]]:
     maps: dict[str, dict[str, float | None]] = defaultdict(dict)
     for row in rows:
         code = str(row.get("code") or "")
@@ -250,7 +310,7 @@ def _cross_sectional(rows: Iterable[Mapping[str, Any]], *, as_of: datetime) -> d
             "industry": {"industry_rs": ("relative_strength", "rs20", "industry_rs"), "industry_breadth": ("breadth", "industry_breadth"), "industry_trend": ("trend", "industry_trend")},
         }.items():
             section = metadata_section(metadata, section_name)
-            if not section_available_at(section, as_of):
+            if not section_available_at(section, as_of, live=live):
                 section = {}
             for map_key, names in metric_names.items():
                 value = next((_number(section.get(name)) for name in names if _number(section.get(name)) is not None), None)
@@ -258,11 +318,11 @@ def _cross_sectional(rows: Iterable[Mapping[str, Any]], *, as_of: datetime) -> d
                     value = None
                 maps[map_key][code] = value
         flow = metadata_section(metadata, "flow")
-        if not section_available_at(flow, as_of):
+        if not section_available_at(flow, as_of, live=live):
             flow = {}
         maps["money_flow"][code] = _number(flow.get("main_net") or flow.get("net_money_flow"))
         etf_breadth = metadata_section(metadata, "constituent_breadth") or metadata_section(metadata, "breadth")
-        if not section_available_at(etf_breadth, as_of):
+        if not section_available_at(etf_breadth, as_of, live=live):
             etf_breadth = {}
         breadth = _number(etf_breadth.get("score") or etf_breadth.get("breadth") or etf_breadth.get("advance_ratio"))
         if breadth is not None and breadth <= 1:
@@ -296,6 +356,7 @@ def _score_row(
     holding_bars: Mapping[str, Iterable[Any]],
     held_scores: list[dict[str, Any]],
     market: Mapping[str, Any],
+    live: bool,
     config: CandidateConfig,
 ) -> dict[str, Any]:
     code = str(row["code"])
@@ -316,6 +377,7 @@ def _score_row(
             benchmark=benchmark,
             underlying_bars=underlying_bars,
             as_of=as_of,
+            live=live,
             config=config,
         )
     else:
@@ -327,6 +389,7 @@ def _score_row(
             metadata=metadata,
             cross_sectional=cross_sectional,
             as_of=as_of,
+            live=live,
             config=config,
         )
     rr = calculate_structure_risk_reward(row.get("bars") or [], price=price)
@@ -367,6 +430,11 @@ def _score_row(
     coverage = float(opportunity.get("coverage") or 0.0)
     quality = str(opportunity.get("quality_status") or "INSUFFICIENT")
     quote_quality = str(quote.get("quality_status") or "MISSING").upper()
+    quote_is_proxy = bool(
+        row.get("quote_is_proxy")
+        or quote.get("quote_is_proxy")
+        or str(quote.get("source") or "").strip().lower() == "daily_bar_cache_close_proxy"
+    )
     reasons: list[str] = []
     risk_flags: list[str] = []
     if row.get("limit_up"):
@@ -398,6 +466,8 @@ def _score_row(
         reasons.append("EDGE_VS_HOLDINGS_LOW")
     if quote_quality not in {"VALID", "DEGRADED"}:
         reasons.append("QUOTE_INVALID")
+    if quote_is_proxy:
+        reasons.append("QUOTE_PROXY_NOT_ACTIONABLE")
 
     stage = "REJECTED"
     watch_ok = (
@@ -408,7 +478,7 @@ def _score_row(
     )
     if watch_ok:
         stage = "WATCHLIST"
-    market_available = bool(market.get("available")) and str(market.get("quality_status") or "MISSING").upper() not in {"MISSING", "INVALID", "FROZEN"}
+    market_available = bool(market.get("available")) and str(market.get("quality_status") or "MISSING").upper() not in {"MISSING", "INVALID", "STALE", "FROZEN"}
     ready_ok = (
         market_available
         and not bool(market.get("is_frozen"))
@@ -445,6 +515,7 @@ def _score_row(
             )
         )
         and fit.get("funding_mode") == "CASH_FUNDED"
+        and not quote_is_proxy
         and not row.get("limit_up")
     )
     if action_ok:
@@ -452,11 +523,13 @@ def _score_row(
     if stage == "ACTION" and fit.get("funding_mode") == "REPLACEMENT_REVIEW":
         stage = "READY"
         reasons.append("REPLACEMENT_REVIEW_REQUIRED")
-    if market.get("is_frozen") or not market.get("available") or str(market.get("quality_status") or "").upper() in {"MISSING", "INVALID"}:
+    if market.get("is_frozen") or not market.get("available") or str(market.get("quality_status") or "").upper() in {"MISSING", "INVALID", "STALE", "FROZEN"}:
         if stage in {"READY", "ACTION"}:
             stage = "WATCHLIST" if watch_ok else "REJECTED"
         if market.get("is_frozen"):
             reasons.append("MARKET_STATE_FROZEN")
+        elif str(market.get("quality_status") or "").upper() == "STALE":
+            reasons.append("MARKET_SCORE_STALE")
         else:
             reasons.append("MARKET_STATE_UNAVAILABLE")
     if stage == "ACTION" and fit.get("funding_mode") != "CASH_FUNDED":
@@ -510,6 +583,7 @@ def _score_row(
         "quality_status": quality,
         "funding_mode": fit.get("funding_mode"),
         "probe_weight": fit.get("probe_weight"),
+        "probe_source_code": fit.get("probe_source_code"),
         "positive_drivers": positive,
         "negative_drivers": negative,
         "blocking_reasons": list(dict.fromkeys(reasons)),
@@ -525,6 +599,8 @@ def _score_row(
             "as_of": as_of.isoformat(),
             "quote_provider": quote.get("provider"),
             "quote_quality": quote_quality,
+            "quote_is_proxy": quote_is_proxy,
+            "quote_provenance": row.get("quote_provenance") or quote.get("source") or quote.get("provider"),
             "daily_bar_provider": (row.get("bars") or [{}])[-1].get("provider") if row.get("bars") else None,
             "factor_version": config.engine_version,
         },
@@ -542,6 +618,7 @@ def _held_score_rows(
     cross_sectional: Mapping[str, Mapping[str, float | None]],
     *,
     as_of: datetime,
+    live: bool,
     benchmark: Mapping[str, Any],
     config: CandidateConfig,
 ) -> list[dict[str, Any]]:
@@ -553,9 +630,9 @@ def _held_score_rows(
         metadata = _metadata(security) if security else {}
         quote = dict(quotes.get(code) or {})
         if security_type == "ETF":
-            score = score_etf_candidate(code, bars_by_code.get(code, []), price=_number(quote.get("price")), quote=quote, metadata=metadata, cross_sectional=cross_sectional, benchmark=benchmark, as_of=as_of, config=config)
+            score = score_etf_candidate(code, bars_by_code.get(code, []), price=_number(quote.get("price")), quote=quote, metadata=metadata, cross_sectional=cross_sectional, benchmark=benchmark, as_of=as_of, live=live, config=config)
         else:
-            score = score_stock_candidate(code, bars_by_code.get(code, []), price=_number(quote.get("price")), quote=quote, metadata=metadata, cross_sectional=cross_sectional, as_of=as_of, config=config)
+            score = score_stock_candidate(code, bars_by_code.get(code, []), price=_number(quote.get("price")), quote=quote, metadata=metadata, cross_sectional=cross_sectional, as_of=as_of, live=live, config=config)
         rows.append({
             "code": code,
             "name": position.get("name") or (security.name if security else None),
@@ -609,6 +686,7 @@ def _serialize_score(row: CandidateScore | Mapping[str, Any]) -> dict[str, Any]:
             "quality_status": row.quality_status,
             "probe_weight": row.probe_weight,
             "funding_mode": row.funding_mode,
+            "probe_source_code": (row.portfolio_fit_json or {}).get("probe_source_code"),
             "components": row.components_json or {},
             "portfolio_fit": row.portfolio_fit_json or {},
             "entry": row.entry_json or {},
@@ -624,8 +702,27 @@ def _serialize_score(row: CandidateScore | Mapping[str, Any]) -> dict[str, Any]:
     return dict(row)
 
 
+def _visible_candidate_pools(
+    score_rows: Iterable[Mapping[str, Any]],
+    quality_status: Any,
+) -> dict[str, list[dict[str, Any]]]:
+    rows = [dict(item) for item in score_rows]
+    pools = {
+        "watchlist": [item for item in rows if str(item.get("stage") or "").upper() == "WATCHLIST"],
+        "ready": [item for item in rows if str(item.get("stage") or "").upper() == "READY"],
+        "action": [item for item in rows if str(item.get("stage") or "").upper() == "ACTION"],
+    }
+    status = str(quality_status or "MISSING").upper()
+    if status in {"MISSING", "BLOCKED_FOR_ACTION", "BLOCKED"}:
+        pools["action"] = []
+    if status == "MISSING":
+        pools["ready"] = []
+    return pools
+
+
 def _run_payload(row: CandidateRun, scores: Iterable[CandidateScore] | None = None) -> dict[str, Any]:
     score_rows = [_serialize_score(item) for item in (list(scores) if scores is not None else row.scores)]
+    pools = _visible_candidate_pools(score_rows, row.quality_status)
     return {
         "status": "ready" if row.status == "COMPLETED" else "unavailable",
         "run": {
@@ -639,9 +736,15 @@ def _run_payload(row: CandidateRun, scores: Iterable[CandidateScore] | None = No
             "portfolio_snapshot_id": row.portfolio_snapshot_id,
             "market_score_snapshot_id": row.market_score_snapshot_id,
             "market_snapshot_id": row.market_snapshot_id,
+            "quote_snapshot_id": row.quote_snapshot_id,
             "status": row.status,
             "mode": row.mode,
             "universe_count": row.universe_count,
+            "structural_candidate_count": row.structural_candidate_count,
+            "quote_ready_count": row.quote_ready_count,
+            "bar_ready_count": row.bar_ready_count,
+            "quote_coverage": row.quote_coverage,
+            "bar_coverage": row.bar_coverage,
             "eligible_count": row.eligible_count,
             "prefilter_count": row.prefilter_count,
             "watchlist_count": row.watchlist_count,
@@ -663,16 +766,16 @@ def _run_payload(row: CandidateRun, scores: Iterable[CandidateScore] | None = No
             "quality_status": row.quality_status,
             "confidence": row.confidence,
             "market_regime": (row.metadata_json or {}).get("market", {}).get("regime"),
-            "watchlist_count": row.watchlist_count,
-            "ready_count": row.ready_count,
-            "action_count": row.action_count,
+            "watchlist_count": len(pools["watchlist"]),
+            "ready_count": len(pools["ready"]),
+            "action_count": len(pools["action"]),
             "calculation_version": row.calculation_version,
         },
         "scores": score_rows,
-        "watchlist": [item for item in score_rows if item.get("stage") == "WATCHLIST"],
-        "ready": [item for item in score_rows if item.get("stage") == "READY"],
-        "action": [item for item in score_rows if item.get("stage") == "ACTION"],
-        "candidates": [item for item in score_rows if item.get("stage") == "ACTION"],
+        "watchlist": pools["watchlist"],
+        "ready": pools["ready"],
+        "action": pools["action"],
+        "candidates": pools["action"],
         "held_opportunity_scores": (row.metadata_json or {}).get("held_opportunity_scores", []),
         "diagnostics": (row.metadata_json or {}).get("diagnostics", {}),
     }
@@ -693,6 +796,7 @@ def scan_candidates(
     """Run one local-cache Candidate scan without provider/network fan-out."""
 
     started = time.perf_counter()
+    live_scan = as_of is None
     moment = _as_of(as_of)
     mode = str(mode or "standard").lower()
     if mode not in {"fast", "standard", "deep"}:
@@ -716,7 +820,7 @@ def scan_candidates(
         raise ValueError("confirmed_snapshot_not_found")
     if snapshot.portfolio_id != portfolio_id or snapshot.status != "confirmed":
         raise ValueError("confirmed_snapshot_not_found")
-    market = _load_market_state(db, as_of=moment)
+    market = _load_market_state(db, as_of=moment, live=live_scan)
     calculation_key = _calculation_key(
         portfolio_id=portfolio_id,
         snapshot_id=snapshot.id,
@@ -747,6 +851,31 @@ def scan_candidates(
     security_by_code = {row.code: row for row in [*all_securities, *held_security_rows]}
     all_codes = list(dict.fromkeys([row.code for row in all_securities] + held_codes))
     bars_by_code = _bars_map(load_daily_bars(db, all_codes, trade_date=moment.date(), available_at=moment, limit=max(130, config.min_history_bars)))
+    quote_snapshot_id = None
+    quote_snapshot_quality = "MISSING"
+    quote_snapshot_error = None
+    bulk_quote_fetched = False
+    if isinstance(quote_rows, Mapping):
+        quote_snapshot_id = str(quote_rows.get("snapshot_id") or "") or None
+        quote_snapshot_quality = str(quote_rows.get("quality_status") or "MISSING").upper()
+    if quote_rows is None and live_scan:
+        try:
+            bulk_snapshot = get_all_a_share_quote_snapshot(
+                db,
+                trade_date=moment.date(),
+                include_etf=True,
+                include_bse=True,
+            )
+            quote_rows = bulk_snapshot
+            bulk_quote_fetched = True
+            quote_snapshot_id = str(bulk_snapshot.get("snapshot_id") or "") or None
+            quote_snapshot_quality = str(bulk_snapshot.get("quality_status") or "MISSING").upper()
+            if persist and quote_snapshot_id:
+                persist_market_snapshot(db, bulk_snapshot, operation="candidate_quote_snapshot")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Candidate bulk quote snapshot unavailable for portfolio %s", portfolio_id)
+            quote_snapshot_error = str(exc)[:300]
+            quote_rows = None
     quotes = _quote_map(quote_rows, as_of=moment)
     for code, rows in bars_by_code.items():
         if code in quotes or not rows:
@@ -763,6 +892,8 @@ def scan_candidates(
             "provider": latest.get("provider") or "daily_bar_cache",
             "available_at": latest.get("available_at"),
             "source": "daily_bar_cache_close_proxy",
+            "quote_is_proxy": True,
+            "provenance": "daily_bar_cache_close_proxy",
         }
     calendar_days = _calendar_days_by_code(db, all_securities, as_of=moment)
     universe = build_candidate_universe(
@@ -790,7 +921,7 @@ def scan_candidates(
             "metadata": _metadata(security),
         })
     scoring_rows = [*eligible, *held_rows]
-    cross_sectional = _cross_sectional(scoring_rows, as_of=moment)
+    cross_sectional = _cross_sectional(scoring_rows, as_of=moment, live=live_scan)
     benchmark = _benchmark(db, as_of=moment)
 
     try:
@@ -832,6 +963,7 @@ def scan_candidates(
         quotes,
         cross_sectional,
         as_of=moment,
+        live=live_scan,
         benchmark=benchmark,
         config=config,
     )
@@ -854,18 +986,11 @@ def scan_candidates(
             holding_bars=bars_by_code,
             held_scores=held_scores,
             market=market,
+            live=live_scan,
             config=config,
         )
         for row in prefiltered
     ]
-    pools = take_stage_limits(scored, watchlist_max=config.watchlist_max, ready_max=config.ready_max, action_max=config.action_max)
-    selected = rank_candidates([*pools["watchlist"], *pools["ready"], *pools["action"]])
-    selected_by_code = {row["code"]: row for row in selected}
-    selected = list(selected_by_code.values())
-    selected.sort(key=lambda row: (0 if row["stage"] == "ACTION" else 1 if row["stage"] == "READY" else 2, -float(row.get("decision_edge") if row.get("decision_edge") is not None else -1e9), -float(row.get("action_score") if row.get("action_score") is not None else -1e9), row["code"]))
-    for rank, row in enumerate(selected, start=1):
-        row["rank"] = rank
-
     quality_inputs = [
         float(universe.get("quote_coverage") or 0.0),
         float(universe.get("bar_coverage") or 0.0),
@@ -873,14 +998,56 @@ def scan_candidates(
         float(portfolio_context.get("portfolio_confidence") or 0.0) / 100.0,
     ]
     run_confidence = round(sum(quality_inputs) / len(quality_inputs) * 100.0, 4)
-    if not eligible:
+    structural_candidate_count = int(universe.get("structural_candidate_count") or 0)
+    quote_coverage = float(universe.get("quote_coverage") or 0.0)
+    bar_coverage = float(universe.get("bar_coverage") or 0.0)
+    global_coverage = min(quote_coverage, bar_coverage)
+    market_quality = str(market.get("quality_status") or "MISSING").upper()
+    portfolio_quality = str(portfolio_context.get("portfolio_quality") or "MISSING").upper()
+    if structural_candidate_count == 0:
         run_quality = "MISSING"
-    elif run_confidence >= 80.0 and str(market.get("quality_status") or "").upper() == "VALID":
-        run_quality = "VALID"
-    elif run_confidence >= 65.0:
+    elif not market.get("available") or market_quality in {"MISSING", "INVALID", "STALE", "FROZEN"} or portfolio_quality in {"MISSING", "BLOCKED", "INVALID"}:
+        run_quality = "BLOCKED_FOR_ACTION"
+    elif global_coverage >= 0.98 and market_quality == "VALID":
+        run_quality = "NORMAL"
+    elif global_coverage >= 0.95:
         run_quality = "DEGRADED"
     else:
         run_quality = "BLOCKED_FOR_ACTION"
+
+    pools = take_stage_limits(scored, watchlist_max=config.watchlist_max, ready_max=config.ready_max, action_max=config.action_max)
+    raw_action_count = len(pools["action"])
+    raw_ready_count = len(pools["ready"])
+    if run_quality in {"BLOCKED_FOR_ACTION", "MISSING"}:
+        pools["action"] = []
+    if run_quality == "MISSING":
+        pools["ready"] = []
+    selected = rank_candidates([*pools["watchlist"], *pools["ready"], *pools["action"]])
+    selected_by_code = {row["code"]: row for row in selected}
+    selected = list(selected_by_code.values())
+    selected.sort(key=lambda row: (0 if row["stage"] == "ACTION" else 1 if row["stage"] == "READY" else 2, -float(row.get("decision_edge") if row.get("decision_edge") is not None else -1e9), -float(row.get("action_score") if row.get("action_score") is not None else -1e9), row["code"]))
+    for rank, row in enumerate(selected, start=1):
+        row["rank"] = rank
+        row.setdefault("lineage", {})["quote_snapshot_id"] = quote_snapshot_id
+        row["lineage"]["market_score_snapshot_id"] = market.get("snapshot_id")
+        row["lineage"]["market_snapshot_id"] = market.get("market_snapshot_id")
+
+    factor_time = {
+        "point_in_time": True,
+        "historical_replay_supported": True,
+        "undated_sections": [],
+        "unavailable_historical_sections": [],
+    }
+    for row in scoring_rows:
+        metadata = row.get("metadata") or {}
+        for section_name in ("fundamental", "valuation", "industry", "flow", "constituent_breadth", "breadth"):
+            section = metadata_section(metadata, section_name)
+            if section and not section.get("available_at") and not section.get("published_at"):
+                factor_time["undated_sections"].append({"code": row.get("code"), "section": section_name})
+                factor_time["point_in_time"] = False
+            if section and not section_available_at(section, moment, live=live_scan):
+                factor_time["unavailable_historical_sections"].append({"code": row.get("code"), "section": section_name})
+    factor_time["historical_replay_supported"] = not bool(factor_time["undated_sections"])
     exclusion_counts = Counter(universe.get("exclusion_counts") or {})
     diagnostics = {
         "universe_total": universe.get("universe_count", 0),
@@ -889,8 +1056,22 @@ def scan_candidates(
         "stock_prefilter_count": len(stocks),
         "etf_prefilter_count": len(etfs),
         "full_scored_count": len(scored),
-        "quote_coverage": universe.get("quote_coverage", 0.0),
-        "bar_coverage": universe.get("bar_coverage", 0.0),
+        "structural_candidate_count": structural_candidate_count,
+        "quote_ready_count": universe.get("quote_ready_count", 0),
+        "bar_ready_count": universe.get("bar_ready_count", 0),
+        "quote_coverage": quote_coverage,
+        "bar_coverage": bar_coverage,
+        "global_coverage": global_coverage,
+        "raw_ready_count": raw_ready_count,
+        "raw_action_count": raw_action_count,
+        "suppressed_ready_count": raw_ready_count - len(pools["ready"]),
+        "suppressed_action_count": raw_action_count - len(pools["action"]),
+        "quote_snapshot_quality": quote_snapshot_quality,
+        "quote_snapshot_error": quote_snapshot_error,
+        "market_score_freshness_seconds": market.get("freshness_seconds"),
+        "market_score_freshness_limit_seconds": market.get("freshness_limit_seconds"),
+        "market_score_lineage_status": market.get("lineage_status"),
+        "factor_time": factor_time,
         "factor_coverage": round(sum(float(row.get("data_coverage") or 0.0) for row in scored) / len(scored), 4) if scored else 0.0,
         "action_zero_reasons": dict(Counter(reason for row in scored if row.get("stage") != "ACTION" for reason in row.get("blocking_reasons") or [])),
         "duration_ms": round((time.perf_counter() - started) * 1000.0, 2),
@@ -903,10 +1084,23 @@ def scan_candidates(
         "baseline": baseline,
         "diagnostics": diagnostics,
         "scan_contract": {
-            "network_fetch": False,
+            "network_fetch": bulk_quote_fetched,
             "server_owned_inputs": True,
-            "no_lookahead": True,
+            "no_lookahead": bool(factor_time["point_in_time"]),
+            "live_scan": live_scan,
+            "historical_replay_supported": factor_time["historical_replay_supported"],
+            "factor_time": factor_time,
             "probe_weight_is_simulation": True,
+        },
+        "quote_snapshot_id": quote_snapshot_id,
+        "quality_gate": {
+            "status": run_quality,
+            "global_coverage": global_coverage,
+            "quote_coverage": quote_coverage,
+            "bar_coverage": bar_coverage,
+            "thresholds": {"normal": 0.98, "degraded": 0.95},
+            "ready_allowed": run_quality != "MISSING",
+            "action_allowed": run_quality not in {"MISSING", "BLOCKED_FOR_ACTION"},
         },
     }
     if not persist:
@@ -923,9 +1117,15 @@ def scan_candidates(
                 "portfolio_snapshot_id": snapshot.id,
                 "market_score_snapshot_id": market.get("snapshot_id"),
                 "market_snapshot_id": market.get("market_snapshot_id"),
+                "quote_snapshot_id": quote_snapshot_id,
                 "status": "COMPLETED",
                 "mode": mode,
                 "universe_count": universe.get("universe_count", 0),
+                "structural_candidate_count": structural_candidate_count,
+                "quote_ready_count": universe.get("quote_ready_count", 0),
+                "bar_ready_count": universe.get("bar_ready_count", 0),
+                "quote_coverage": quote_coverage,
+                "bar_coverage": bar_coverage,
                 "eligible_count": len(eligible),
                 "prefilter_count": len(prefiltered),
                 "watchlist_count": len(pools["watchlist"]),
@@ -972,9 +1172,15 @@ def scan_candidates(
         portfolio_snapshot_id=snapshot.id,
         market_score_snapshot_id=market.get("snapshot_id"),
         market_snapshot_id=market.get("market_snapshot_id"),
+        quote_snapshot_id=quote_snapshot_id,
         status="COMPLETED",
         mode=mode,
         universe_count=universe.get("universe_count", 0),
+        structural_candidate_count=structural_candidate_count,
+        quote_ready_count=universe.get("quote_ready_count", 0),
+        bar_ready_count=universe.get("bar_ready_count", 0),
+        quote_coverage=quote_coverage,
+        bar_coverage=bar_coverage,
         eligible_count=len(eligible),
         prefilter_count=len(prefiltered),
         watchlist_count=len(pools["watchlist"]),
@@ -1032,6 +1238,7 @@ def scan_candidates(
                     "portfolio_snapshot_id": snapshot.id,
                     "market_score_snapshot_id": market.get("snapshot_id"),
                     "market_snapshot_id": market.get("market_snapshot_id"),
+                    "quote_snapshot_id": quote_snapshot_id,
                 },
                 lifecycle="NEW",
             )
@@ -1123,10 +1330,11 @@ def latest_candidate_context(
                 score["actionable"] = False
                 score.setdefault("blocking_reasons", []).append("CANDIDATE_READY_STALE")
     payload["scores"] = scores
-    payload["watchlist"] = [item for item in scores if item.get("stage") == "WATCHLIST"]
-    payload["ready"] = [item for item in scores if item.get("stage") == "READY"]
-    payload["action"] = [item for item in scores if item.get("stage") == "ACTION"]
-    payload["candidates"] = payload["action"]
+    pools = _visible_candidate_pools(scores, row.quality_status)
+    payload["watchlist"] = pools["watchlist"]
+    payload["ready"] = pools["ready"]
+    payload["action"] = pools["action"]
+    payload["candidates"] = pools["action"]
     payload["candidate_engine"].update(
         {
             "watchlist_count": len(payload["watchlist"]),
