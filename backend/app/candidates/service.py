@@ -76,6 +76,12 @@ def _number(value: Any) -> float | None:
     return result if result == result and abs(result) != float("inf") else None
 
 
+def _quote_price_basis(quote: Mapping[str, Any]) -> str:
+    metadata = quote.get("metadata") if isinstance(quote.get("metadata"), Mapping) else {}
+    value = quote.get("price_basis") or quote.get("adjustment") or metadata.get("price_basis") or metadata.get("adjustment")
+    return str(value or "RAW_QUOTE").strip().upper().replace("-", "_").replace(" ", "_")
+
+
 def _date(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
@@ -597,6 +603,8 @@ def _score_row(
         "decision_edge_detail": edge,
         "lineage": {
             "as_of": as_of.isoformat(),
+            "quote_price": price,
+            "quote_price_basis": _quote_price_basis(quote),
             "quote_provider": quote.get("provider"),
             "quote_quality": quote_quality,
             "quote_is_proxy": quote_is_proxy,

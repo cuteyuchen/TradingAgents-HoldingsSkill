@@ -204,7 +204,7 @@ def current_memory_features(
         "hhi": portfolio.get("hhi"),
         "portfolio_volatility": portfolio.get("portfolio_vol_60") or portfolio.get("portfolio_volatility"),
         "security_type": best.get("security_type"),
-        "action_type": best.get("action") or best.get("candidate_type") or result.get("final_rating") or "no_action",
+        "action_type": best.get("action") or best.get("candidate_type") or result.get("action_type"),
         "opportunity_score": best.get("opportunity_score"),
         "entry_score": best.get("entry_score"),
         "portfolio_fit": best.get("portfolio_fit_score") or best.get("portfolio_fit"),

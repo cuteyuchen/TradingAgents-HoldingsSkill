@@ -107,7 +107,7 @@ def _ledger_rows(
     inferred = db.execute(select(TradeLedgerEntry).where(*base).order_by(
         TradeLedgerEntry.executed_at.asc(), TradeLedgerEntry.id.asc()
     )).scalars().all()
-    return inferred, "window_code_inference" if inferred else "none"
+    return inferred, "unlinked_trade_in_window" if inferred else "none"
 
 
 def _snapshot_evidence(
@@ -215,6 +215,27 @@ def evaluate_execution_alignment(
         end=end,
         cutoff=cutoff,
     )
+    if association_mode == "unlinked_trade_in_window":
+        return {
+            "alignment": "UNRESOLVED",
+            "execution_ratio": None,
+            "executed_qty": None,
+            "weighted_avg_execution_price": None,
+            "evidence": {
+                "ledger_entry_ids": [row.id for row in rows],
+                "snapshot_diff_ids": [],
+                "before_snapshot_id": None,
+                "after_snapshot_id": None,
+                "execution_window_start": _json_value(start),
+                "execution_window_end": _json_value(end),
+                "quantity_delta": None,
+                "executed_qty": None,
+                "weighted_avg_execution_price": None,
+                "execution_ratio": None,
+                "alignment_reason_codes": ["UNLINKED_LEDGER_IN_WINDOW"],
+                "association_mode": association_mode,
+            },
+        }
     expected_side = "BUY" if action in LONG_ACTIONS else "SELL" if action in SHORT_ACTIONS else None
     aligned = [row for row in rows if expected_side and row.side == expected_side]
     opposite = [row for row in rows if expected_side and row.side != expected_side]
@@ -323,6 +344,7 @@ def refresh_execution_alignments(
     *,
     user_id: int | None = None,
     portfolio_id: int | None = None,
+    decision_memory_id: int | None = None,
     calculation_as_of: datetime | None = None,
     persist: bool = True,
 ) -> dict[str, Any]:
@@ -333,9 +355,13 @@ def refresh_execution_alignments(
         query = query.where(DecisionMemory.user_id == user_id)
     if portfolio_id is not None:
         query = query.where(DecisionMemory.portfolio_id == portfolio_id)
+    if decision_memory_id is not None:
+        query = query.where(DecisionMemory.id == decision_memory_id)
     rows = db.execute(query).all()
     counts: dict[str, int] = {}
     touched = 0
+    from .outcomes import execution_dependent_values
+
     for outcome, memory in rows:
         result = evaluate_execution_alignment(db, memory, outcome, calculation_as_of=calculation_as_of)
         outcome.execution_alignment = result["alignment"]
@@ -343,8 +369,14 @@ def refresh_execution_alignments(
             **(outcome.source_refs_json or {}),
             "execution": result.get("evidence") or {},
         }
-        outcome.actual_executed_qty = result.get("executed_qty")
-        outcome.actual_execution_price = result.get("weighted_avg_execution_price")
+        execution_values = execution_dependent_values(
+            db,
+            memory,
+            outcome,
+            calculation_as_of=calculation_as_of,
+        )
+        for field, value in execution_values.items():
+            setattr(outcome, field, value)
         counts[result["alignment"]] = counts.get(result["alignment"], 0) + 1
         touched += 1
     if persist:
@@ -408,6 +440,15 @@ def link_ledger_entry_to_decision(
     ))
     ledger_entry.analysis_run_id = memory.analysis_run_id
     db.flush()
+    from .outcomes import invalidate_execution_dependent_outcomes
+
+    invalidate_execution_dependent_outcomes(
+        db,
+        memory_id=memory.id,
+        ledger_entry=ledger_entry,
+        calculation_as_of=datetime.now(UTC).replace(tzinfo=None),
+        persist=False,
+    )
     return ledger_entry
 
 

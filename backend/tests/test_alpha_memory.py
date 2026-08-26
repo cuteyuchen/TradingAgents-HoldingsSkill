@@ -20,12 +20,14 @@ from app.candidates.models import CandidateRun
 from app.database import Base
 from app.market_engine_models import AllAMedianIndexDaily, DailyBarCache
 from app.market_models import TradingCalendar
-from app.memory.decision import capture_decision_memory, determine_decision_type
-from app.memory.execution import evaluate_execution_alignment, refresh_execution_alignments
+from app.memory.decision import capture_decision_memory, determine_decision_type, extract_decision_targets
+from app.memory.execution import evaluate_execution_alignment, link_ledger_entry_to_decision, refresh_execution_alignments
 from app.memory.models import DecisionMemory, DecisionOutcome
 from app.memory.outcomes import calculate_decision_outcome, completed_session_dates, refresh_due_decision_outcomes
 from app.memory.retrieval import compute_similarity
-from app.memory.review import memory_stats, run_daily_review
+from app.memory.review import build_daily_review, memory_stats, run_daily_review
+from app.memory.service import current_memory_features
+from app.portfolio.ledger import revise_ledger_entry
 from app.portfolio_models import (
     PortfolioSnapshotDiff,
     PortfolioRiskSnapshot,
@@ -74,6 +76,8 @@ def _seed_analysis(
     quantity: float = 100.0,
     reference_price: float = 100.0,
     decision_at: datetime = DECISION_AT,
+    model_reference_price: float | None = None,
+    quote_price_basis: str | None = "QFQ",
 ) -> tuple[User, Portfolio, PortfolioSnapshot, AnalysisRun]:
     user = User(email=f"memory-{code}-{action}@example.com", password_hash="test")
     db.add(user)
@@ -132,13 +136,13 @@ def _seed_analysis(
                     "name": "Fixture Asset",
                     "action": action,
                     "recommended_qty": quantity,
-                    "reference_price": reference_price,
+                    "reference_price": model_reference_price if model_reference_price is not None else reference_price,
                     "security_type": "STOCK",
                 }],
                 "candidates": [],
             },
             "market_snapshot": {
-                "quotes": {code: {"code": code, "price": reference_price}},
+                "quotes": {code: {"code": code, "price": reference_price, "price_basis": quote_price_basis}},
             },
             "workflow": {
                 "analysis_mode": "standard",
@@ -161,6 +165,90 @@ def _seed_analysis(
     db.add(run)
     db.commit()
     return user, portfolio, snapshot, run
+
+
+def _same_portfolio_run(
+    db: Session,
+    *,
+    user: User,
+    portfolio: Portfolio,
+    code: str,
+    decision_at: datetime,
+    action: str = "add",
+    reference_price: float = 100.0,
+    quote_price_basis: str | None = "QFQ",
+) -> AnalysisRun:
+    snapshot = PortfolioSnapshot(
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_time=decision_at,
+        total_assets=100000.0,
+        total_market_value=50000.0,
+        broker_available_cash=50000.0,
+        status="confirmed",
+    )
+    db.add(snapshot)
+    db.flush()
+    db.add(HoldingItem(
+        snapshot_id=snapshot.id,
+        code=code,
+        name="Fixture Asset",
+        qty=100.0,
+        available_qty=100.0,
+        cost=reference_price,
+        screenshot_price=reference_price,
+        market_value=10000.0,
+        weight=0.1,
+    ))
+    job = AnalysisJob(
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        mode="standard",
+        status="succeeded",
+        created_at=decision_at,
+        started_at=decision_at,
+        finished_at=decision_at,
+    )
+    db.add(job)
+    db.flush()
+    run = AnalysisRun(
+        job_id=job.id,
+        user_id=user.id,
+        portfolio_snapshot_id=snapshot.id,
+        data_quality_grade="A",
+        final_rating="no_action",
+        confidence="high",
+        structured_result_json={
+            "result": {
+                "data_quality_grade": "A",
+                "final_rating": "no_action",
+                "confidence": "high",
+                "holdings": [{
+                    "code": code,
+                    "name": "Fixture Asset",
+                    "action": action,
+                    "recommended_qty": 100.0,
+                    "reference_price": reference_price,
+                    "security_type": "STOCK",
+                }],
+                "candidates": [],
+            },
+            "market_snapshot": {
+                "quotes": {code: {"code": code, "price": reference_price, "price_basis": quote_price_basis}},
+            },
+            "workflow": {
+                "analysis_mode": "standard",
+                "portfolio_context": {"market_regime": "RISK_ON", "portfolio_quality": "VALID"},
+                "candidate_context": {},
+            },
+        },
+        markdown_text="fixture",
+        created_at=decision_at,
+    )
+    db.add(run)
+    db.commit()
+    return run
 
 
 def _add_bar(
@@ -224,7 +312,7 @@ def _extra_outcome(db: Session, memory: DecisionMemory, code: str, action: str =
         reference_trade_date=date(2026, 8, 20),
         reference_at=memory.decision_at,
         reference_price=100.0,
-        reference_price_basis="fixture",
+        reference_price_basis="QFQ",
         status="PENDING",
         quality_status="PENDING",
         calculation_version="decision-outcome-v1",
@@ -240,6 +328,49 @@ def test_no_action_with_holdings_on_hold_is_not_an_action(db: Session):
         "holdings": [{"code": "600519", "action": "hold"}],
         "candidates": [],
     }) == "NO_ACTION"
+
+
+def test_reference_price_uses_server_owned_quote_not_model_entry_price(db: Session):
+    _calendar(db)
+    _user, _portfolio, _snapshot, run = _seed_analysis(
+        db,
+        reference_price=100.0,
+        model_reference_price=90.0,
+        quote_price_basis="QFQ",
+    )
+    memory = capture_decision_memory(db, run, available_at=DECISION_AT, commit=True)
+    assert memory is not None
+    outcome = _outcome(db, memory)
+    assert outcome.reference_price == pytest.approx(100.0)
+    assert outcome.reference_price_basis == "QFQ"
+
+    _holdings, candidates = extract_decision_targets(
+        {"candidates": [{"code": "000001", "action": "new_position", "entry_price": 90.0}]},
+        {
+            "candidate_context": {
+                "run": {"quote_snapshot_id": "quote-1"},
+                "action": [{
+                    "code": "000001",
+                    "lineage": {
+                        "quote_snapshot_id": "quote-1",
+                        "quote_price": 100.0,
+                        "quote_quality": "VALID",
+                        "quote_price_basis": "QFQ",
+                    },
+                }],
+            },
+        },
+    )
+    assert candidates[0]["reference_price"] == pytest.approx(100.0)
+
+
+def test_current_memory_features_leave_unknown_action_unset():
+    features = current_memory_features(
+        portfolio_context={"market_regime": "RISK_ON"},
+        candidate_context={"action": []},
+        result={"final_rating": "no_action"},
+    )
+    assert features["action_type"] is None
 
 
 def _ledger(
@@ -334,11 +465,14 @@ def test_trading_day_horizon_and_no_lookahead(db: Session):
     mature = calculate_decision_outcome(
         db, memory, h1, calculation_as_of=datetime(2026, 8, 20, 8, 0)
     )
-    assert mature["status"] == "VALID"
+    assert mature["status"] == "DEGRADED"
     assert mature["raw_return"] == pytest.approx(0.05)
-    assert mature["benchmark_return"] == pytest.approx(0.0)
-    assert mature["mfe"] == pytest.approx(0.10)
-    assert mature["mae"] == pytest.approx(-0.05)
+    assert mature["benchmark_return"] is None
+    assert mature["excess_return"] is None
+    assert mature["mfe"] is None
+    assert mature["mae"] is None
+    assert "PARTIAL_INTRADAY_PATH" in mature["source_refs"]["reason_codes"]
+    assert "INTRADAY_BENCHMARK_UNAVAILABLE" in mature["source_refs"]["reason_codes"]
 
     h5 = _outcome(db, memory, horizon=5)
     _add_bar(
@@ -354,6 +488,74 @@ def test_trading_day_horizon_and_no_lookahead(db: Session):
     assert future["status"] == "PENDING"
     assert future["target_trade_date"] == date(2026, 8, 26)
     assert future.get("end_price") is None
+
+
+def test_incompatible_raw_reference_does_not_mix_with_qfq_bars(db: Session):
+    _calendar(db)
+    _user, _portfolio, _snapshot, run = _seed_analysis(
+        db,
+        reference_price=100.0,
+        quote_price_basis="RAW_QUOTE",
+    )
+    memory = capture_decision_memory(db, run, available_at=DECISION_AT, commit=True)
+    assert memory is not None
+    _add_bar(
+        db,
+        "600519",
+        date(2026, 8, 20),
+        close=105.0,
+        high=110.0,
+        low=95.0,
+        available_at=datetime(2026, 8, 20, 7, 0),
+    )
+    result = calculate_decision_outcome(
+        db,
+        memory,
+        _outcome(db, memory),
+        calculation_as_of=AFTER_CLOSE,
+    )
+    assert result["status"] == "DEGRADED"
+    assert result["raw_return"] is None
+    assert result["mfe"] is None
+    assert result["mae"] is None
+    assert "PRICE_BASIS_MISMATCH" in result["source_refs"]["reason_codes"]
+
+
+def test_intraday_path_and_benchmark_are_explicitly_degraded(db: Session):
+    _calendar(db)
+    intraday_at = datetime(2026, 8, 20, 6, 30)  # 14:30 Asia/Shanghai
+    _user, _portfolio, _snapshot, run = _seed_analysis(
+        db,
+        decision_at=intraday_at,
+        reference_price=100.0,
+        quote_price_basis="QFQ",
+    )
+    memory = capture_decision_memory(db, run, available_at=intraday_at, commit=True)
+    assert memory is not None
+    _add_bar(
+        db,
+        "600519",
+        date(2026, 8, 20),
+        close=102.0,
+        high=120.0,
+        low=98.0,
+        available_at=datetime(2026, 8, 20, 7, 0),
+    )
+    _add_benchmark(db, date(2026, 8, 20), 100.0, datetime(2026, 8, 20, 7, 0))
+    result = calculate_decision_outcome(
+        db,
+        memory,
+        _outcome(db, memory),
+        calculation_as_of=AFTER_CLOSE,
+    )
+    assert result["status"] == "DEGRADED"
+    assert result["raw_return"] == pytest.approx(0.02)
+    assert result["mfe"] is None
+    assert result["mae"] is None
+    assert result["benchmark_return"] is None
+    assert result["excess_return"] is None
+    assert "PARTIAL_INTRADAY_PATH" in result["source_refs"]["reason_codes"]
+    assert "INTRADAY_BENCHMARK_UNAVAILABLE" in result["source_refs"]["reason_codes"]
 
 
 def test_execution_alignment_uses_confirmed_ledger_and_snapshot_evidence(db: Session):
@@ -424,6 +626,161 @@ def test_execution_alignment_uses_confirmed_ledger_and_snapshot_evidence(db: Ses
     )
     assert refreshed["counts"]["FOLLOWED"] >= 1
     assert isinstance(_outcome(db, memory).source_refs_json["execution"]["execution_window_end"], str)
+
+
+def test_unlinked_same_code_trade_is_unresolved_for_each_decision(db: Session):
+    _calendar(db)
+    user, portfolio, _snapshot, first_run = _seed_analysis(
+        db,
+        decision_at=datetime(2026, 8, 20, 1, 35),
+        quote_price_basis="QFQ",
+    )
+    second_run = _same_portfolio_run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        code="600519",
+        decision_at=datetime(2026, 8, 20, 2, 30),
+    )
+    third_run = _same_portfolio_run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        code="600519",
+        decision_at=datetime(2026, 8, 20, 5, 5),
+    )
+    memories = [
+        capture_decision_memory(db, run, available_at=run.created_at, commit=True)
+        for run in (first_run, second_run, third_run)
+    ]
+    assert all(memory is not None for memory in memories)
+    entry = TradeLedgerEntry(
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        analysis_run_id=None,
+        entry_type="TRADE",
+        security_code="600519",
+        side="BUY",
+        quantity=100.0,
+        price=101.0,
+        gross_amount=10100.0,
+        executed_at=datetime(2026, 8, 20, 6, 0),
+        trade_date=date(2026, 8, 20),
+        available_at=datetime(2026, 8, 20, 6, 0),
+        source="MANUAL",
+        idempotency_key="unlinked-shared-trade",
+        status="CONFIRMED",
+    )
+    db.add(entry)
+    db.commit()
+    cutoff = datetime(2026, 8, 22, 8, 0)
+    for memory in memories:
+        result = evaluate_execution_alignment(db, memory, _outcome(db, memory), calculation_as_of=cutoff)
+        assert result["alignment"] == "UNRESOLVED"
+        assert result["executed_qty"] is None
+        assert result["evidence"]["alignment_reason_codes"] == ["UNLINKED_LEDGER_IN_WINDOW"]
+
+
+def test_link_and_ledger_revision_refresh_matured_execution_return(db: Session):
+    _calendar(db)
+    user, portfolio, _snapshot, run = _seed_analysis(db, quote_price_basis="QFQ")
+    memory = capture_decision_memory(db, run, available_at=DECISION_AT, commit=True)
+    assert memory is not None
+    _add_bar(
+        db,
+        "600519",
+        date(2026, 8, 20),
+        close=105.0,
+        high=105.0,
+        low=100.0,
+        available_at=datetime(2026, 8, 20, 7, 0),
+    )
+    _add_benchmark(db, date(2026, 8, 20), 100.0, datetime(2026, 8, 20, 7, 0))
+    refresh_due_decision_outcomes(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        calculation_as_of=AFTER_CLOSE,
+        persist=True,
+    )
+    outcome = _outcome(db, memory)
+    assert outcome.actual_execution_return is None
+
+    entry = TradeLedgerEntry(
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        analysis_run_id=None,
+        entry_type="TRADE",
+        security_code="600519",
+        side="BUY",
+        quantity=100.0,
+        price=100.0,
+        gross_amount=10000.0,
+        fees=1.0,
+        taxes=2.0,
+        executed_at=datetime(2026, 8, 20, 3, 0),
+        trade_date=date(2026, 8, 20),
+        available_at=datetime(2026, 8, 20, 3, 0),
+        source="MANUAL",
+        idempotency_key="link-refresh-trade",
+        status="CONFIRMED",
+    )
+    db.add(entry)
+    db.commit()
+    link_ledger_entry_to_decision(
+        db,
+        memory=memory,
+        ledger_entry=entry,
+        user_id=user.id,
+        reason="link confirmed trade to matured decision",
+    )
+    db.commit()
+    assert outcome.execution_alignment == "FOLLOWED"
+    assert outcome.actual_execution_price == pytest.approx(100.0)
+    assert outcome.actual_execution_return == pytest.approx(0.05)
+    assert outcome.net_execution_return == pytest.approx(105.0 / 100.03 - 1.0)
+
+    revise_ledger_entry(
+        db,
+        entry=entry,
+        user_id=user.id,
+        changes={"price": 103.0},
+        reason="correct broker fill price",
+    )
+    db.commit()
+    assert outcome.actual_execution_price == pytest.approx(103.0)
+    assert outcome.actual_execution_return == pytest.approx(105.0 / 103.0 - 1.0)
+    assert outcome.net_execution_return == pytest.approx(105.0 / 103.03 - 1.0)
+    assert outcome.execution_fees == pytest.approx(1.0)
+    assert outcome.execution_taxes == pytest.approx(2.0)
+    assert outcome.recalculation_count >= 2
+    assert outcome.last_source_change_at is not None
+
+
+def test_daily_review_includes_outcome_matured_from_prior_decision(db: Session):
+    _calendar(db)
+    _user, portfolio, _snapshot, run = _seed_analysis(db, quote_price_basis="QFQ")
+    memory = capture_decision_memory(db, run, available_at=DECISION_AT, commit=True)
+    assert memory is not None
+    outcome = _outcome(db, memory, horizon=20)
+    outcome.status = "VALID"
+    outcome.quality_status = "VALID"
+    outcome.target_trade_date = date(2026, 8, 26)
+    outcome.available_at = datetime(2026, 8, 26, 7, 30)
+    outcome.raw_return = 0.12
+    db.commit()
+
+    payload = build_daily_review(
+        db,
+        user_id=memory.user_id,
+        portfolio_id=portfolio.id,
+        trade_date=date(2026, 8, 26),
+        as_of=datetime(2026, 8, 26, 8, 0),
+    )
+    assert payload["decision_count"] == 0
+    assert payload["outcomes_matured_count"] == 1
+    assert payload["outcome_summary"]["outcomes_matured_today"][0]["id"] == outcome.id
+    assert "OUTCOME_MATURED" in payload["reason_codes"]
 
 
 def test_retrieval_stats_and_daily_review_are_descriptive_and_idempotent(db: Session):

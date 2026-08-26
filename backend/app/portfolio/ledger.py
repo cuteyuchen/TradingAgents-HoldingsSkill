@@ -26,6 +26,19 @@ MATERIALIZED_FIELDS = frozenset({
 DEFAULT_LEDGER_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
+def _invalidate_linked_memory_outcomes(db: Session, entry: TradeLedgerEntry) -> None:
+    if entry.analysis_run_id is None:
+        return
+    from ..memory.outcomes import invalidate_execution_dependent_outcomes
+
+    invalidate_execution_dependent_outcomes(
+        db,
+        ledger_entry=entry,
+        calculation_as_of=datetime.now(UTC).replace(tzinfo=None),
+        persist=False,
+    )
+
+
 def _as_datetime(value: Any) -> datetime:
     if isinstance(value, str):
         text = value.strip()
@@ -252,6 +265,7 @@ def revise_ledger_entry(
         if field in MATERIALIZED_FIELDS:
             setattr(entry, field, value)
     db.flush()
+    _invalidate_linked_memory_outcomes(db, entry)
     return entry
 
 
@@ -272,6 +286,7 @@ def void_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, rea
     ))
     entry.status = "VOIDED"
     db.flush()
+    _invalidate_linked_memory_outcomes(db, entry)
     return entry
 
 
@@ -296,6 +311,7 @@ def confirm_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, 
     ))
     entry.status = "CONFIRMED"
     db.flush()
+    _invalidate_linked_memory_outcomes(db, entry)
     return entry
 
 

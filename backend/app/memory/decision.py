@@ -96,30 +96,81 @@ def _market_quotes(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return quotes if isinstance(quotes, dict) else {}
 
 
-def _reference_price(row: dict[str, Any], quotes: dict[str, dict[str, Any]], code: str) -> tuple[float | None, str]:
-    for field in ("reference_price", "current_price", "price", "quote_price", "entry_price"):
-        value = _number(row.get(field))
-        if value is not None and value > 0:
-            return value, f"decision_{field}"
-    quote = quotes.get(code) or {}
+def _normalise_price_basis(value: Any) -> str:
+    text = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return text or "RAW_QUOTE"
+
+
+def _quote_price_basis(quote: dict[str, Any]) -> str:
+    metadata = quote.get("metadata") if isinstance(quote.get("metadata"), dict) else {}
+    return _normalise_price_basis(
+        quote.get("price_basis")
+        or quote.get("adjustment")
+        or metadata.get("price_basis")
+        or metadata.get("adjustment")
+    )
+
+
+def _trusted_quote_price(quote: Any) -> float | None:
+    if not isinstance(quote, dict):
+        return None
+    quality = str(quote.get("quality_status") or "").upper()
+    if quality in {"CONFLICT", "INVALID", "MISSING", "STALE"} or quote.get("stale") is True:
+        return None
     for field in ("price", "close", "last"):
         value = _number(quote.get(field))
         if value is not None and value > 0:
-            return value, "analysis_market_quote"
-    for container_name in ("quote", "entry", "components", "metadata"):
-        container = row.get(container_name)
-        if not isinstance(container, dict):
-            continue
-        for field in ("price", "current_price", "close"):
-            value = _number(container.get(field))
-            if value is not None and value > 0:
-                return value, f"candidate_{container_name}_{field}"
-        raw = container.get("raw")
-        if isinstance(raw, dict):
-            value = _number(raw.get("price") or raw.get("close"))
-            if value is not None and value > 0:
-                return value, f"candidate_{container_name}_raw"
-    return None, "missing"
+            return value
+    return None
+
+
+def _candidate_context_row(candidate_context: Any, code: str) -> dict[str, Any] | None:
+    if not isinstance(candidate_context, dict):
+        return None
+    rows = candidate_context.get("action") or candidate_context.get("candidates") or []
+    for item in rows:
+        if isinstance(item, dict) and str(item.get("code") or "").strip() == code:
+            return item
+    return None
+
+
+def _reference_price(
+    row: dict[str, Any],
+    quotes: dict[str, dict[str, Any]],
+    code: str,
+    *,
+    target_type: str,
+    candidate_context: dict[str, Any] | None = None,
+) -> tuple[float | None, str, str]:
+    """Read only server-owned quote facts, never model-proposed prices."""
+
+    if target_type == "HELD_POSITION":
+        quote = quotes.get(code) or {}
+        price = _trusted_quote_price(quote)
+        if price is not None:
+            return price, _quote_price_basis(quote), "analysis_market_quote"
+        return None, "missing", "analysis_market_quote"
+
+    if target_type == "NEW_POSITION":
+        candidate = _candidate_context_row(candidate_context, code)
+        lineage = candidate.get("lineage") if isinstance(candidate, dict) else None
+        lineage = lineage if isinstance(lineage, dict) else {}
+        run = candidate_context.get("run") if isinstance(candidate_context, dict) else None
+        run = run if isinstance(run, dict) else {}
+        quote_snapshot_id = lineage.get("quote_snapshot_id") or run.get("quote_snapshot_id")
+        price = _number(lineage.get("quote_price"))
+        quality = str(lineage.get("quote_quality") or "").upper()
+        if (
+            quote_snapshot_id
+            and price is not None
+            and price > 0
+            and quality not in {"CONFLICT", "INVALID", "MISSING", "STALE"}
+            and not lineage.get("quote_is_proxy")
+        ):
+            return price, _normalise_price_basis(lineage.get("quote_price_basis")), "candidate_quote_snapshot"
+        return None, "missing", "candidate_quote_snapshot"
+
+    return None, "missing", "missing"
 
 
 def _target_row(
@@ -128,6 +179,7 @@ def _target_row(
     target_type: str,
     quotes: dict[str, dict[str, Any]],
     default_action: str,
+    candidate_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -140,7 +192,13 @@ def _target_row(
     )
     if target_type == "NEW_POSITION" and action in {"watch_only", "rotation_watch"}:
         action = "new_position"
-    reference_price, reference_basis = _reference_price(raw, quotes, code)
+    reference_price, reference_basis, reference_source = _reference_price(
+        raw,
+        quotes,
+        code,
+        target_type=target_type,
+        candidate_context=candidate_context,
+    )
     recommended_qty = _quantity(raw.get("recommended_qty") or raw.get("quantity") or raw.get("qty") or raw.get("initial_size"))
     recommended_weight = _number(raw.get("recommended_weight") or raw.get("weight"))
     target_weight = _number(raw.get("target_weight"))
@@ -157,6 +215,7 @@ def _target_row(
         "target_weight": target_weight,
         "reference_price": reference_price,
         "reference_price_basis": reference_basis,
+        "reference_price_source": reference_source,
         "reference_at": None,
         "source": dict(raw),
         "opportunity_score": _number(raw.get("opportunity_score")),
@@ -177,16 +236,29 @@ def extract_decision_targets(
     workflow = workflow or {}
     payload = {"market_snapshot": workflow.get("market_snapshot")}
     quotes = _market_quotes(payload)
+    candidate_context = workflow.get("candidate_context") if isinstance(workflow.get("candidate_context"), dict) else None
     targets: list[dict[str, Any]] = []
     holdings: list[dict[str, Any]] = []
     for raw in result.get("holdings") or result.get("today_actions") or []:
-        target = _target_row(raw, target_type="HELD_POSITION", quotes=quotes, default_action="watch_only")
+        target = _target_row(
+            raw,
+            target_type="HELD_POSITION",
+            quotes=quotes,
+            default_action="watch_only",
+            candidate_context=candidate_context,
+        )
         if target is not None:
             holdings.append(target)
             targets.append(target)
     candidates = result.get("candidates") or result.get("buy_candidates")
     for raw in candidates or []:
-        target = _target_row(raw, target_type="NEW_POSITION", quotes=quotes, default_action="new_position")
+        target = _target_row(
+            raw,
+            target_type="NEW_POSITION",
+            quotes=quotes,
+            default_action="new_position",
+            candidate_context=candidate_context,
+        )
         if target is not None:
             targets.append(target)
     if not targets:

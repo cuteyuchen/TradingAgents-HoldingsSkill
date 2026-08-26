@@ -25,6 +25,7 @@ from .models import DecisionMemory, DecisionOutcome
 OUTCOME_ACTIONS_LONG = frozenset({"add", "conditional_add", "new_position"})
 OUTCOME_ACTIONS_SHORT = frozenset({"reduce", "sell", "exit"})
 VALID_BAR_QUALITY = frozenset({"VALID", "DEGRADED"})
+QFQ_REFERENCE_BASES = frozenset({"QFQ", "ADJUSTED_QFQ", "QFQ_CLOSE", "DAILY_BAR_QFQ"})
 
 
 def _utc_naive(value: datetime | None) -> datetime | None:
@@ -68,6 +69,26 @@ def _utc_session_close(day: date) -> datetime:
 def _decision_local(value: datetime) -> datetime:
     aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value
     return aware.astimezone(CHINA_TZ)
+
+
+def _is_intraday_decision(db: Session, decision_at: datetime) -> bool:
+    local = _decision_local(decision_at)
+    row = TradingCalendarService(db).row_for(local.date())
+    return bool(row and row.is_open and local.time() < CHINA_SESSION_CLOSE)
+
+
+def _normalise_price_basis(value: Any) -> str:
+    return str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+
+
+def _price_basis_compatible(reference_basis: Any, adjustment: str) -> bool:
+    basis = _normalise_price_basis(reference_basis)
+    target = _normalise_price_basis(adjustment)
+    if not basis or not target:
+        return False
+    if target == "QFQ":
+        return basis in QFQ_REFERENCE_BASES or basis.endswith("_QFQ")
+    return basis == target
 
 
 def completed_session_dates(
@@ -172,11 +193,7 @@ def _execution_rows(db: Session, memory: DecisionMemory, target_key: str, *, cut
         *base,
         TradeLedgerEntry.analysis_run_id == memory.analysis_run_id,
     ).order_by(TradeLedgerEntry.executed_at.asc(), TradeLedgerEntry.id.asc())).scalars().all()
-    if explicit:
-        return explicit
-    return db.execute(select(TradeLedgerEntry).where(*base).order_by(
-        TradeLedgerEntry.executed_at.asc(), TradeLedgerEntry.id.asc()
-    )).scalars().all()
+    return explicit
 
 
 def _weighted_execution(rows: list[TradeLedgerEntry], action: str) -> dict[str, Any]:
@@ -196,6 +213,44 @@ def _weighted_execution(rows: list[TradeLedgerEntry], action: str) -> dict[str, 
         "fees": fees,
         "taxes": taxes,
         "net_price": net_price,
+    }
+
+
+def execution_dependent_values(
+    db: Session,
+    memory: DecisionMemory,
+    outcome: DecisionOutcome,
+    *,
+    calculation_as_of: datetime | None = None,
+) -> dict[str, Any]:
+    """Refresh only ledger-derived fields without reinterpreting market facts."""
+
+    cutoff = _utc_naive(calculation_as_of) or _now()
+    action = canonical_action(outcome.recommended_action, default="no_action")
+    rows = _execution_rows(db, memory, str(outcome.target_key or "").strip(), cutoff=cutoff)
+    execution = _weighted_execution(rows, action)
+    end_price = _number(outcome.end_price)
+    adjustment = str((outcome.source_refs_json or {}).get("adjustment") or "QFQ")
+    compatible = _price_basis_compatible(outcome.reference_price_basis, adjustment)
+    actual_price = execution["price"]
+    net_price = execution.get("net_price")
+    actual_return = (
+        end_price / actual_price - 1.0
+        if compatible and end_price is not None and actual_price and actual_price > 0
+        else None
+    )
+    net_return = (
+        end_price / net_price - 1.0
+        if compatible and end_price is not None and net_price and net_price > 0
+        else None
+    )
+    return {
+        "actual_execution_price": actual_price,
+        "actual_executed_qty": execution["executed_qty"],
+        "actual_execution_return": actual_return,
+        "net_execution_return": net_return,
+        "execution_fees": execution["fees"],
+        "execution_taxes": execution["taxes"],
     }
 
 
@@ -321,8 +376,62 @@ def calculate_decision_outcome(
             "computed_at": cutoff,
             "source_refs": {"reason": "target_close_missing"},
         }
-    highs = [float(row.high) for row in bars if row.high is not None and float(row.high) > 0]
-    lows = [float(row.low) for row in bars if row.low is not None and float(row.low) > 0]
+    execution = _weighted_execution(_execution_rows(db, memory, target_key, cutoff=cutoff), action)
+    actual_price = execution["price"]
+    reference_basis = _normalise_price_basis(outcome.reference_price_basis)
+    basis_compatible = _price_basis_compatible(reference_basis, adjustment)
+    actual_return = end_price / actual_price - 1.0 if basis_compatible and actual_price and actual_price > 0 else None
+    net_return = (
+        end_price / execution["net_price"] - 1.0
+        if basis_compatible and execution.get("net_price") and execution["net_price"] > 0
+        else None
+    )
+    if not basis_compatible:
+        return {
+            "status": "DEGRADED",
+            "quality_status": "DEGRADED",
+            "confidence": 0.0,
+            "target_trade_date": target_date,
+            "end_price": end_price,
+            "raw_return": None,
+            "benchmark_return": None,
+            "excess_return": None,
+            "mfe": None,
+            "mae": None,
+            "directional_mfe": None,
+            "directional_mae": None,
+            "directional_return": None,
+            "directional_excess_return": None,
+            "actual_execution_price": actual_price,
+            "actual_executed_qty": execution["executed_qty"],
+            "actual_execution_return": None,
+            "net_execution_return": None,
+            "execution_fees": execution["fees"],
+            "execution_taxes": execution["taxes"],
+            "available_at": max(
+                target_close,
+                *[_utc_naive(row.available_at) for row in bars if row.available_at is not None],
+            ),
+            "computed_at": cutoff,
+            "source_refs": {
+                "adjustment": adjustment,
+                "price_return_basis": adjustment,
+                "reference_price_basis": reference_basis or None,
+                "price_basis_compatible": False,
+                "reason_codes": ["PRICE_BASIS_MISMATCH"],
+                "bar_ids": [row.id for row in bars],
+                "reference_bar_ids": [row.id for row in bars if row.trade_date == reference_date],
+                "target_bar_id": end_bar.id,
+                "ledger_entry_ids": [row.id for row in execution["rows"]],
+                "execution_window_trading_days": 2,
+            },
+        }
+
+    intraday = _is_intraday_decision(db, memory.decision_at)
+    path_start_date = dates[1] if intraday and len(dates) > 1 else reference_date
+    path_bars = [row for row in bars if row.trade_date >= path_start_date] if not (intraday and len(dates) == 1) else []
+    highs = [float(row.high) for row in path_bars if row.high is not None and float(row.high) > 0]
+    lows = [float(row.low) for row in path_bars if row.low is not None and float(row.low) > 0]
     raw_return = end_price / float(reference_price) - 1.0
     mfe = max((high / float(reference_price) - 1.0 for high in highs), default=None)
     mae = min((low / float(reference_price) - 1.0 for low in lows), default=None)
@@ -333,20 +442,21 @@ def calculate_decision_outcome(
     target_index = benchmark_by_date.get(target_date)
     benchmark_return = None
     benchmark_refs: dict[str, Any] = {}
-    if reference_index and target_index and reference_index.index_value:
+    if not intraday and reference_index and target_index and reference_index.index_value:
         benchmark_return = target_index.index_value / reference_index.index_value - 1.0
         benchmark_refs = {"reference_index_id": reference_index.id, "target_index_id": target_index.id}
     excess_return = raw_return - benchmark_return if benchmark_return is not None else None
     directional_excess = None
     if excess_return is not None and action in OUTCOME_ACTIONS_LONG | OUTCOME_ACTIONS_SHORT:
         directional_excess = excess_return if action in OUTCOME_ACTIONS_LONG else -excess_return
-    execution = _weighted_execution(_execution_rows(db, memory, target_key, cutoff=cutoff), action)
-    actual_price = execution["price"]
-    actual_return = end_price / actual_price - 1.0 if actual_price and actual_price > 0 else None
-    net_return = end_price / execution["net_price"] - 1.0 if execution.get("net_price") and execution["net_price"] > 0 else None
+    reason_codes: list[str] = []
+    if intraday:
+        reason_codes.extend(["PARTIAL_INTRADAY_PATH", "INTRADAY_BENCHMARK_UNAVAILABLE"])
+    elif benchmark_return is None:
+        reason_codes.append("BENCHMARK_UNAVAILABLE")
     bar_quality = "DEGRADED" if any(str(row.quality_status).upper() != "VALID" for row in bars) else "VALID"
     decision_quality = str(memory.quality_status or "VALID").upper()
-    quality_status = "VALID" if benchmark_return is not None and bar_quality == "VALID" and decision_quality == "VALID" else "DEGRADED"
+    quality_status = "VALID" if not reason_codes and benchmark_return is not None and bar_quality == "VALID" and decision_quality == "VALID" else "DEGRADED"
     confidence = 0.95 if quality_status == "VALID" else 0.70
     return {
         "status": quality_status,
@@ -378,11 +488,17 @@ def calculate_decision_outcome(
         "source_refs": {
             "adjustment": adjustment,
             "price_return_basis": adjustment,
+            "reference_price_basis": reference_basis or None,
+            "price_basis_compatible": True,
             "bar_ids": [row.id for row in bars],
+            "path_bar_ids": [row.id for row in path_bars],
             "reference_bar_ids": [row.id for row in bars if row.trade_date == reference_date],
             "target_bar_id": end_bar.id,
             "ledger_entry_ids": [row.id for row in execution["rows"]],
             "benchmark": benchmark_refs,
+            "reason_codes": reason_codes,
+            "intraday_decision": intraday,
+            "path_start_date": path_start_date.isoformat() if intraday else reference_date.isoformat(),
             "execution_window_trading_days": 2,
         },
     }
@@ -499,10 +615,78 @@ def refresh_due_decision_outcomes(
     }
 
 
+def invalidate_execution_dependent_outcomes(
+    db: Session,
+    *,
+    memory_id: int | None = None,
+    ledger_entry: TradeLedgerEntry | None = None,
+    calculation_as_of: datetime | None = None,
+    persist: bool = False,
+) -> dict[str, Any]:
+    """Recompute mature execution facts after a ledger mutation or link."""
+
+    cutoff = _utc_naive(calculation_as_of) or _now()
+    query = select(DecisionMemory).where()
+    if memory_id is not None:
+        query = query.where(DecisionMemory.id == memory_id)
+    elif ledger_entry is not None and ledger_entry.analysis_run_id is not None:
+        query = query.where(
+            DecisionMemory.analysis_run_id == ledger_entry.analysis_run_id,
+            DecisionMemory.user_id == ledger_entry.user_id,
+            DecisionMemory.portfolio_id == ledger_entry.portfolio_id,
+        )
+    else:
+        if persist:
+            db.commit()
+        return {"status": "skipped", "memories_considered": 0, "outcomes_invalidated": 0}
+
+    memories = db.execute(query).scalars().all()
+    if not memories:
+        if persist:
+            db.commit()
+        return {"status": "skipped", "memories_considered": 0, "outcomes_invalidated": 0}
+
+    from .execution import refresh_execution_alignments
+
+    for memory in memories:
+        refresh_execution_alignments(
+            db,
+            user_id=memory.user_id,
+            portfolio_id=memory.portfolio_id,
+            decision_memory_id=memory.id,
+            calculation_as_of=cutoff,
+            persist=False,
+        )
+
+    outcomes = db.execute(select(DecisionOutcome).where(
+        DecisionOutcome.decision_memory_id.in_([memory.id for memory in memories]),
+    )).scalars().all()
+    invalidated = 0
+    for outcome in outcomes:
+        if (
+            outcome.status in {"VALID", "DEGRADED"}
+            and outcome.available_at is not None
+            and _utc_naive(outcome.available_at) <= cutoff
+        ):
+            outcome.recalculation_count = int(outcome.recalculation_count or 0) + 1
+            outcome.last_source_change_at = cutoff
+            invalidated += 1
+    if persist:
+        db.commit()
+    return {
+        "status": "completed",
+        "memories_considered": len(memories),
+        "outcomes_invalidated": invalidated,
+        "calculation_as_of": cutoff,
+    }
+
+
 __all__ = [
     "calculate_decision_outcome",
     "completed_session_dates",
     "ensure_outcome_rows",
+    "execution_dependent_values",
     "horizon_trade_date",
+    "invalidate_execution_dependent_outcomes",
     "refresh_due_decision_outcomes",
 ]

@@ -176,12 +176,13 @@ def build_daily_review(
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
     cutoff = _utc_naive(as_of) or _now()
-    memories = db.execute(select(DecisionMemory).where(
+    today_decisions = db.execute(select(DecisionMemory).where(
         DecisionMemory.user_id == user_id,
         DecisionMemory.portfolio_id == portfolio_id,
         DecisionMemory.trade_date == trade_date,
         DecisionMemory.available_at <= cutoff,
     ).order_by(DecisionMemory.decision_at.asc(), DecisionMemory.id.asc())).scalars().all()
+    memories = today_decisions
     memory_ids = [memory.id for memory in memories]
     outcomes = db.execute(select(DecisionOutcome).where(
         DecisionOutcome.decision_memory_id.in_(memory_ids or [-1]),
@@ -217,12 +218,20 @@ def build_daily_review(
             "execution_alignment": alignment,
             "candidate_action_count": len(candidates),
         })
+    matured_candidates = db.execute(select(DecisionOutcome, DecisionMemory).join(
+        DecisionMemory, DecisionOutcome.decision_memory_id == DecisionMemory.id
+    ).where(
+        DecisionMemory.user_id == user_id,
+        DecisionMemory.portfolio_id == portfolio_id,
+        DecisionMemory.available_at <= cutoff,
+        DecisionOutcome.status.in_(("VALID", "DEGRADED")),
+        DecisionOutcome.available_at.is_not(None),
+        DecisionOutcome.available_at <= cutoff,
+    ).order_by(DecisionOutcome.available_at.asc(), DecisionOutcome.id.asc())).all()
     matured = [
-        row for row in outcomes
-        if row.status in {"VALID", "DEGRADED"}
-        and row.available_at is not None
-        and _local_date(row.available_at) == trade_date
-        and _utc_naive(row.available_at) <= cutoff
+        row
+        for row, _memory in matured_candidates
+        if _local_date(row.available_at) == trade_date
     ]
     market = db.execute(select(MarketScoreSnapshot).where(
         MarketScoreSnapshot.market == "CN",
