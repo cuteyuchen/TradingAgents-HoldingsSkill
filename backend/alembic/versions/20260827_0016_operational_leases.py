@@ -6,10 +6,10 @@ import sqlalchemy as sa
 
 
 revision = "20260827_0016"
-# Keep the hotfix independently installable from the Phase H head. Later
-# feature branches may add their own migration chain after this revision.
-down_revision = "20260826_0014"
-branch_labels = ("phase_h1",)
+# Keep the Phase H lease hotfix and Phase I evidence schema on one linear head
+# so clean installs and ``upgrade head`` do not encounter multiple heads.
+down_revision = "20260827_0015"
+branch_labels = None
 depends_on = None
 
 
