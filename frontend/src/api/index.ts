@@ -10,6 +10,10 @@ import type {
   EvaluationCoverage,
   EvaluationEpisode,
   EvaluationSummary,
+  CampaignCoverage,
+  CampaignIntegrity,
+  ForwardSummary,
+  ObservationCampaign,
   HoldingUpload,
   ModelProfile,
   ModelProvider,
@@ -163,6 +167,11 @@ export const api = {
   getEvaluationEpisode: (portfolioId: number, episodeId: string) => request<EvaluationEpisode>(`/api/v3/portfolios/${portfolioId}/evaluation/episodes/${encodeURIComponent(episodeId)}`),
   getEvaluationCoverage: (portfolioId: number) => request<EvaluationCoverage>(`/api/v3/portfolios/${portfolioId}/evaluation/coverage`),
   getPaperObservationStatus: (portfolioId: number) => request<PaperObservationStatus>(`/api/v3/portfolios/${portfolioId}/evaluation/paper-observation`),
+  listObservationCampaigns: (portfolioId: number) => request<ObservationCampaign[]>(`/api/v3/portfolios/${portfolioId}/evaluation/campaigns`),
+  getObservationCampaign: (portfolioId: number, campaignId: string) => request<ObservationCampaign>(`/api/v3/portfolios/${portfolioId}/evaluation/campaigns/${encodeURIComponent(campaignId)}`),
+  getCampaignCoverage: (portfolioId: number, campaignId: string) => request<CampaignCoverage>(`/api/v3/portfolios/${portfolioId}/evaluation/campaigns/${encodeURIComponent(campaignId)}/coverage`),
+  getCampaignIntegrity: (portfolioId: number, campaignId: string) => request<CampaignIntegrity>(`/api/v3/portfolios/${portfolioId}/evaluation/campaigns/${encodeURIComponent(campaignId)}/integrity`),
+  getForwardSummary: (portfolioId: number, campaignId: string) => request<ForwardSummary>(`/api/v3/portfolios/${portfolioId}/evaluation/campaigns/${encodeURIComponent(campaignId)}/forward-summary`),
 }
 
 async function requestBlob(path: string, retryAuth = true): Promise<Blob> {

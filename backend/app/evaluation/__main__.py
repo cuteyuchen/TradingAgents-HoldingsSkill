@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import select
 
@@ -18,6 +18,17 @@ from .service import (
     replay_date_range,
     replay_episode,
     verify_snapshot_hashes,
+)
+from .forward import (
+    campaign_coverage,
+    campaign_integrity,
+    create_daily_evidence_seal,
+    create_observation_campaign,
+    forward_summary,
+    get_observation_campaign,
+    list_observation_campaigns,
+    mature_campaign_outcomes,
+    transition_campaign,
 )
 
 
@@ -39,6 +50,24 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("summary")
     sub.add_parser("paper-observation-status")
     sub.add_parser("verify-snapshot-hashes")
+    sub.add_parser("campaign-list")
+    campaign_create = sub.add_parser("campaign-create")
+    campaign_create.add_argument("--start", type=date.fromisoformat)
+    campaign_create.add_argument("--end", type=date.fromisoformat)
+    campaign_create.add_argument("--config-hash")
+    campaign_status = sub.add_parser("campaign-status")
+    campaign_status.add_argument("campaign_id")
+    for name in ("campaign-start", "campaign-pause", "campaign-resume", "campaign-complete", "campaign-coverage", "campaign-integrity", "forward-summary"):
+        command_parser = sub.add_parser(name)
+        if name != "campaign-list":
+            command_parser.add_argument("campaign_id")
+    seal = sub.add_parser("daily-seal")
+    seal.add_argument("campaign_id")
+    seal.add_argument("trading_date", type=date.fromisoformat)
+    mature = sub.add_parser("mature-outcomes")
+    mature.add_argument("campaign_id")
+    mature.add_argument("--as-of", type=datetime.fromisoformat)
+    mature.add_argument("--limit", type=int, default=1000)
     return parser
 
 
@@ -64,6 +93,50 @@ def main(argv: list[str] | None = None) -> int:
             result = evaluation_summary(db, user_id=args.user_id, portfolio_id=args.portfolio_id)
         elif args.command == "verify-snapshot-hashes":
             result = verify_snapshot_hashes(db, user_id=args.user_id, portfolio_id=args.portfolio_id)
+        elif args.command == "campaign-list":
+            result = list_observation_campaigns(db, user_id=args.user_id, portfolio_id=args.portfolio_id)
+        elif args.command == "campaign-create":
+            result = create_observation_campaign(
+                db,
+                user_id=args.user_id,
+                portfolio_id=args.portfolio_id,
+                start_date=args.start,
+                end_date=args.end,
+                config_hash=args.config_hash,
+            )
+        elif args.command == "campaign-status":
+            result = get_observation_campaign(db, campaign_id=args.campaign_id, user_id=args.user_id, portfolio_id=args.portfolio_id)
+        elif args.command in {"campaign-start", "campaign-pause", "campaign-resume", "campaign-complete"}:
+            result = transition_campaign(
+                db,
+                campaign_id=args.campaign_id,
+                user_id=args.user_id,
+                portfolio_id=args.portfolio_id,
+                action=args.command.removeprefix("campaign-"),
+            )
+        elif args.command == "campaign-coverage":
+            result = campaign_coverage(db, campaign_id=args.campaign_id, user_id=args.user_id, portfolio_id=args.portfolio_id)
+        elif args.command == "campaign-integrity":
+            result = campaign_integrity(db, campaign_id=args.campaign_id, user_id=args.user_id, portfolio_id=args.portfolio_id)
+        elif args.command == "forward-summary":
+            result = forward_summary(db, campaign_id=args.campaign_id, user_id=args.user_id, portfolio_id=args.portfolio_id)
+        elif args.command == "daily-seal":
+            result = create_daily_evidence_seal(
+                db,
+                campaign_id=args.campaign_id,
+                user_id=args.user_id,
+                portfolio_id=args.portfolio_id,
+                trading_date=args.trading_date,
+            )
+        elif args.command == "mature-outcomes":
+            result = mature_campaign_outcomes(
+                db,
+                campaign_id=args.campaign_id,
+                user_id=args.user_id,
+                portfolio_id=args.portfolio_id,
+                as_of=args.as_of,
+                limit=args.limit,
+            )
         else:
             result = paper_observation_status(db, user_id=args.user_id, portfolio_id=args.portfolio_id)
     print(json.dumps(result, ensure_ascii=False, default=str, indent=2))

@@ -21,7 +21,10 @@
     "final_quote_refresh",
     "portfolio_manager_final",
     "memory_context",
-    "persistence_and_notification"
+    "persistence_and_notification",
+    "forward_observation_campaign",
+    "evidence_integrity_audit",
+    "outcome_maturity"
   ],
   "rules": [
     "NO_ACTION is a first-class successful result. Do not trade merely because analysis completed; first prove that changing the current portfolio is better than keeping it.",
@@ -50,7 +53,12 @@
     ,"Daily Workflow is deterministic orchestration over existing Market, Portfolio, Candidate, Trigger, Analysis, Ledger, and Memory facts. It does not create a second scheduler, execute broker orders, or turn Dashboard reads into recomputation."
     ,"The Daily Investment Workbench is read-only: Candidate ACTION is not a final buy instruction, Trigger is a request for re-analysis, and Portfolio Gate remains the final authority. Data outages pause new risk and do not force automatic sales of existing holdings."
     ,"Daily Review is idempotent and may be refreshed in place when late Outcomes, revised Outcome sources, or Ledger revisions arrive; refreshes preserve the same ReviewRun identity and increment refresh_count."
-    ,"Material notifications use explicit severity (INFO, IMPORTANT, ACTION_REQUIRED, CRITICAL), event dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and NO_ACTION resolutions are meaningful events; repeated unchanged observations are not."
+     ,"Material notifications use explicit severity (INFO, IMPORTANT, ACTION_REQUIRED, CRITICAL), event dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and NO_ACTION resolutions are meaningful events; repeated unchanged observations are not."
+     ,"Phase J campaigns are forward-only evidence windows: count only REAL_TIME_PAPER_OBSERVATION episodes; historical replay modes never enter coverage or forward metrics."
+     ,"Daily Observation Coverage requires a frozen episode, valid point-in-time manifest, matching hash, and registered Paper Observation; scheduler execution alone is not a capture."
+     ,"Daily Evidence Seal is immutable and append-only. Late outcomes may be completed separately, but seals and original DecisionEpisode records are never rewritten."
+     ,"Outcome maturity uses trading-calendar T+1/T+3/T+5/T+10/T+20 horizons and explicit PENDING, COMPUTED, MISSING_MARKET_DATA, ADJUSTMENT_UNCERTAIN, and BLOCKED_DATA_QUALITY states."
+     ,"Phase J is descriptive observation only: no retrospective backfill, auto trading, broker execution, optimizer, parameter search, threshold mutation, new factors, or profitability claim."
   ],
   "decision_contract": {
     "version": "2.4.0",
@@ -160,7 +168,12 @@
     "paper_observation_mode": "REAL_TIME_PAPER_OBSERVATION",
     "no_backfill": true,
     "current_model_label": "RECOMPUTED_WITH_CURRENT_MODEL",
-    "stable_profitability_claim": false
+    "stable_profitability_claim": false,
+    "forward_campaign": true,
+    "forward_source": "FORWARD_ONLY",
+    "no_retrospective_backfill": true,
+    "evidence_seal_immutable": true,
+    "outcome_maturity_scheduler": true
   },
   "upstream_references": [
     "TauricResearch/TradingAgents",

@@ -77,6 +77,16 @@ Paper Observation means real-time, advisory-only observation (`REAL_TIME_PAPER_O
 
 Daily Review is idempotent. Late mature Outcomes, revised Outcome sources, or Ledger revisions mark the same ReviewRun stale; an in-place refresh clears `review_stale` and increments `refresh_count`. Material notifications use explicit `INFO`/`IMPORTANT`/`ACTION_REQUIRED`/`CRITICAL` severity, dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and explicit `NO_ACTION` resolutions may notify; unchanged observations do not. A total quote-provider outage blocks adding new risk and does not automatically sell existing holdings.
 
+## Forward Observation Campaign (Phase J)
+
+Phase J adds a bounded `ObservationCampaign` for real-time evidence governance. Only `REAL_TIME_PAPER_OBSERVATION` episodes enter a campaign; `FACT_REPLAY`, `DETERMINISTIC_LOGIC_REPLAY`, and `MODEL_RECOMPUTE` remain historical or recomputed evidence and are never counted as forward coverage. Campaign lifecycle is explicit (`PLANNED`, `ACTIVE`, `PAUSED`, `COMPLETED`, `BLOCKED`) and pause/complete never deletes prior evidence.
+
+After each real A-share trading day, the deterministic maintenance path records `DailyObservationCoverage`, runs the `EpisodeIntegrityAuditor`, and creates an immutable `DailyEvidenceSeal`. Coverage requires a frozen DecisionEpisode, valid point-in-time Snapshot Manifest, matching hashes, and registered Paper Observation; scheduler execution alone is not capture. Missing dates are recorded as `MISSED_DECISION_CAPTURE` and cannot be retrospectively backfilled.
+
+`OutcomeMaturityScheduler` appends only newly mature T+1/T+3/T+5/T+10/T+20 outcomes using the persisted trading calendar. Late market data may complete an outcome, while corporate-action uncertainty remains `ADJUSTMENT_UNCERTAIN`; a Daily Evidence Seal is never rewritten when outcomes arrive. Forward dashboards and APIs expose `source: FORWARD_ONLY`, descriptive sample maturity, NO_ACTION, Candidate funnel, Trigger effectiveness, MFE/MAE/drawdown, integrity failures, and data-quality blockers separately from historical replay.
+
+Phase J is observation only: no broker execution, auto-trading, optimizer, parameter search, threshold mutation, new Candidate factor, dynamic risk budget, or profitability claim is permitted.
+
 ## Quality-First Workflow
 
 Target routine execution time is about 10 minutes, but this is a progress

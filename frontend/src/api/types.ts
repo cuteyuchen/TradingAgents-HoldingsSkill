@@ -296,6 +296,84 @@ export interface PaperObservationStatus {
   runs: Array<Record<string, any>>
 }
 
+export interface ObservationCampaign {
+  id: number
+  campaign_id: string
+  user_id: number
+  portfolio_id: number
+  start_date?: string | null
+  end_date?: string | null
+  started_at?: string | null
+  ended_at?: string | null
+  timezone: string
+  decision_contract_version: string
+  evaluation_schema_version: string
+  code_commit?: string | null
+  config_hash?: string | null
+  status: string
+  expected_trading_days: number
+  observed_trading_days: number
+  decision_capture_count: number
+  missed_capture_count: number
+  completed_outcome_count: number
+  pending_outcome_count: number
+  data_quality_failure_count: number
+  created_at: string
+  updated_at?: string | null
+}
+
+export interface DailyObservationCoverage {
+  id: number
+  campaign_id: number
+  portfolio_id: number
+  trading_date: string
+  market_coverage: Record<string, any>
+  candidate_coverage: Record<string, any>
+  trigger_coverage: Record<string, any>
+  analysis_coverage: Record<string, any>
+  decision_coverage: Record<string, any>
+  episode_coverage: Record<string, any>
+  snapshot_integrity: Record<string, any>
+  data_quality: Record<string, any>
+  status: string
+  missing_reasons: string[]
+  created_at?: string | null
+}
+
+export interface CampaignCoverage {
+  source: 'FORWARD_ONLY'
+  campaign: ObservationCampaign
+  days: DailyObservationCoverage[]
+}
+
+export interface CampaignIntegrity {
+  source?: 'FORWARD_ONLY'
+  status: string
+  campaign: ObservationCampaign
+  episodes: number
+  audits: Array<{ episode_id: string; status: string; failures: string[]; [key: string]: any }>
+  seals: Array<Record<string, any>>
+}
+
+export interface ForwardSummary {
+  source: 'FORWARD_ONLY'
+  campaign: ObservationCampaign
+  episodes: number
+  unique_trading_days: number
+  unique_symbols: number
+  decision_distribution: Record<string, number>
+  no_action_count: number
+  no_action_rate?: number | null
+  candidate_stage_distribution: Record<string, number>
+  outcomes: number
+  completed_t20: number
+  horizons: Record<string, { n: number; median: number | null; status: string }>
+  risk?: { mfe: { n: number; median: number | null; status: string }; mae: { n: number; median: number | null; status: string }; drawdown: { n: number; median: number | null; status: string } }
+  trigger_effectiveness?: Record<string, number>
+  sample_maturity?: string
+  data_quality_failures: Record<string, number>
+}
+
 // Legacy archive types remain for migration/debug views.
 export interface ScreenshotPayload {
   filename?: string | null

@@ -225,6 +225,93 @@ class PaperObservation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class ObservationCampaign(Base):
+    """A bounded real-time forward-observation window, not a strategy version."""
+
+    __tablename__ = "observation_campaigns"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", name="uq_observation_campaigns_campaign_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    start_date: Mapped[date | None] = mapped_column(Date, index=True)
+    end_date: Mapped[date | None] = mapped_column(Date, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    decision_contract_version: Mapped[str] = mapped_column(String(24), default="2.4.0")
+    evaluation_schema_version: Mapped[str] = mapped_column(String(24), default=EVALUATION_SCHEMA_VERSION)
+    code_commit: Mapped[str | None] = mapped_column(String(64))
+    config_hash: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="PLANNED", index=True)
+    expected_trading_days: Mapped[int] = mapped_column(Integer, default=0)
+    observed_trading_days: Mapped[int] = mapped_column(Integer, default=0)
+    decision_capture_count: Mapped[int] = mapped_column(Integer, default=0)
+    missed_capture_count: Mapped[int] = mapped_column(Integer, default=0)
+    completed_outcome_count: Mapped[int] = mapped_column(Integer, default=0)
+    pending_outcome_count: Mapped[int] = mapped_column(Integer, default=0)
+    data_quality_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class DailyObservationCoverage(Base):
+    """Immutable-by-day coverage projection for a forward campaign."""
+
+    __tablename__ = "daily_observation_coverages"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "trading_date", name="uq_daily_observation_coverage_campaign_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("observation_campaigns.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    market_coverage: Mapped[dict | None] = mapped_column(JSON)
+    candidate_coverage: Mapped[dict | None] = mapped_column(JSON)
+    trigger_coverage: Mapped[dict | None] = mapped_column(JSON)
+    analysis_coverage: Mapped[dict | None] = mapped_column(JSON)
+    decision_coverage: Mapped[dict | None] = mapped_column(JSON)
+    episode_coverage: Mapped[dict | None] = mapped_column(JSON)
+    snapshot_integrity: Mapped[dict | None] = mapped_column(JSON)
+    data_quality: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(24), default="PARTIAL", index=True)
+    missing_reasons_json: Mapped[list | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class DailyEvidenceSeal(Base):
+    """Immutable daily digest of forward evidence, excluding future outcomes."""
+
+    __tablename__ = "daily_evidence_seals"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "trading_date", name="uq_daily_evidence_seal_portfolio_day"),
+        UniqueConstraint("seal_id", name="uq_daily_evidence_seal_seal_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    seal_id: Mapped[str] = mapped_column(String(64), index=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("observation_campaigns.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    episode_ids_json: Mapped[list | None] = mapped_column(JSON)
+    manifest_hashes_json: Mapped[list | None] = mapped_column(JSON)
+    episode_count: Mapped[int] = mapped_column(Integer, default=0)
+    coverage_hash: Mapped[str] = mapped_column(String(64))
+    code_commit: Mapped[str | None] = mapped_column(String(64))
+    decision_contract_version: Mapped[str] = mapped_column(String(24), default="2.4.0")
+    evaluation_schema_version: Mapped[str] = mapped_column(String(24), default=EVALUATION_SCHEMA_VERSION)
+    evidence_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="SEALED", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 def _immutable_update(_mapper, _connection, _target) -> None:
     raise RuntimeError("evaluation_episode_is_immutable")
 
@@ -233,7 +320,7 @@ def _immutable_delete(_mapper, _connection, _target) -> None:
     raise RuntimeError("evaluation_episode_is_immutable")
 
 
-for _model in (DecisionEpisode, EvaluationSnapshot):
+for _model in (DecisionEpisode, EvaluationSnapshot, DailyEvidenceSeal):
     event.listen(_model, "before_update", _immutable_update)
     event.listen(_model, "before_delete", _immutable_delete)
 
@@ -242,10 +329,13 @@ __all__ = [
     "CandidateEvaluation",
     "DecisionEpisode",
     "DecisionEvaluationOutcome",
+    "DailyEvidenceSeal",
+    "DailyObservationCoverage",
     "EVALUATION_SCHEMA_VERSION",
     "EvaluationRun",
     "EvaluationSnapshot",
     "PaperObservation",
     "PaperObservationRun",
+    "ObservationCampaign",
     "TriggerEvaluation",
 ]

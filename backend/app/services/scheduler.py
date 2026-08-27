@@ -104,6 +104,31 @@ def run_scheduled_job(job_id: int, schedule_id: int) -> None:
             return
         if job.status == "succeeded":
             schedule.consecutive_failures = 0
+            try:
+                from ..evaluation.forward import _expected_trading_day
+                from ..evaluation.models import ObservationCampaign
+                from ..evaluation.service import capture_realtime_paper_observation
+
+                run = getattr(job, "run", None)
+                if run is not None:
+                    local_day = _as_utc_time(datetime.now(UTC)).astimezone(CHINA_TZ).date()
+                    campaigns = db.query(ObservationCampaign).filter(
+                        ObservationCampaign.user_id == schedule.user_id,
+                        ObservationCampaign.portfolio_id == schedule.portfolio_id,
+                        ObservationCampaign.status == "ACTIVE",
+                    ).all()
+                    if any(_expected_trading_day(db, campaign=campaign, trading_date=local_day) for campaign in campaigns):
+                        capture_realtime_paper_observation(
+                            db,
+                            user_id=schedule.user_id,
+                            portfolio_id=schedule.portfolio_id,
+                            analysis_run_id=run.id,
+                            now=datetime.now(UTC),
+                        )
+            except Exception:
+                # Evidence capture must never change the existing analysis job
+                # or schedule outcome; the close-of-day audit will surface it.
+                logger.exception("Forward observation capture failed for portfolio %s", schedule.portfolio_id)
         else:
             schedule.consecutive_failures += 1
             if schedule.consecutive_failures >= schedule.max_consecutive_failures:
@@ -119,40 +144,62 @@ def run_scheduled_daily_review(*, user_id: int, portfolio_id: int, trade_date: d
 
     db = SessionLocal()
     try:
-        from ..operations.workflow import refresh_review_state
+        try:
+            from ..operations.workflow import refresh_review_state
 
-        metadata = refresh_review_state(
-            db,
-            user_id=user_id,
-            portfolio_id=portfolio_id,
-            trade_date=trade_date,
-            force=True,
-        )
-        row = db.query(DailyReviewRun).filter(
-            DailyReviewRun.user_id == user_id,
-            DailyReviewRun.portfolio_id == portfolio_id,
-            DailyReviewRun.trade_date == trade_date,
-            DailyReviewRun.review_version == "daily-review-v1",
-        ).first()
-        if row is not None:
-            logger.info(
-                "daily_review portfolio=%s trade_date=%s decisions=%s matured_outcomes=%s quality=%s",
-                portfolio_id,
-                trade_date.isoformat(),
-                row.decision_count,
-                row.outcomes_matured_count,
-                row.quality_status,
+            metadata = refresh_review_state(
+                db,
+                user_id=user_id,
+                portfolio_id=portfolio_id,
+                trade_date=trade_date,
+                force=True,
             )
-            if metadata.get("refresh_count"):
+            row = db.query(DailyReviewRun).filter(
+                DailyReviewRun.user_id == user_id,
+                DailyReviewRun.portfolio_id == portfolio_id,
+                DailyReviewRun.trade_date == trade_date,
+                DailyReviewRun.review_version == "daily-review-v1",
+            ).first()
+            if row is not None:
                 logger.info(
-                    "review_refresh portfolio=%s trade_date=%s review=%s refresh_count=%s",
+                    "daily_review portfolio=%s trade_date=%s decisions=%s matured_outcomes=%s quality=%s",
                     portfolio_id,
                     trade_date.isoformat(),
-                    row.id,
-                    metadata["refresh_count"],
+                    row.decision_count,
+                    row.outcomes_matured_count,
+                    row.quality_status,
                 )
-    except Exception:
-        logger.exception("Daily Review maintenance failed for portfolio %s", portfolio_id)
+                if metadata.get("refresh_count"):
+                    logger.info(
+                        "review_refresh portfolio=%s trade_date=%s review=%s refresh_count=%s",
+                        portfolio_id,
+                        trade_date.isoformat(),
+                        row.id,
+                        metadata["refresh_count"],
+                    )
+        except Exception:
+            logger.exception("Daily Review maintenance failed for portfolio %s", portfolio_id)
+        # Phase J is deterministic maintenance only: seal today's forward
+        # evidence and mature horizons whose trading dates have arrived.
+        try:
+            from ..evaluation.forward import process_campaign_close
+
+            campaign_result = process_campaign_close(
+                db,
+                user_id=user_id,
+                portfolio_id=portfolio_id,
+                trading_date=trade_date,
+                now=datetime.now(UTC),
+            )
+            if campaign_result.get("campaigns"):
+                logger.info(
+                    "forward_observation portfolio=%s trade_date=%s campaigns=%s",
+                    portfolio_id,
+                    trade_date.isoformat(),
+                    len(campaign_result["campaigns"]),
+                )
+        except Exception:
+            logger.exception("Forward observation maintenance failed for portfolio %s", portfolio_id)
     finally:
         db.close()
 
