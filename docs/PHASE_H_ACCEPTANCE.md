@@ -5,7 +5,8 @@
 - Branch: `codex/phase-h-daily-workbench`
 - Phase H baseline commit: `259ab84` (`feat: add phase h daily operating workbench`)
 - Required historical baseline: `e18e4ad` is an ancestor of the branch.
-- H.1 scope: operational hardening and reproducible acceptance only.
+- H.1 / Final Seal scope: operational hardening, migration continuity, and
+  restart-safe worker recovery only.
 - Decision Contract: `2.4.0`, unchanged.
 
 ## 2. Changed files in H.1
@@ -17,8 +18,12 @@
 - `backend/app/memory/review.py`: review lease lifecycle and atomic SQL refresh counter update.
 - `backend/app/services/scheduler.py`: review lease reclaim and bidirectional fixed-checkpoint deduplication.
 - `backend/app/config.py` and `backend/app/operations/config.py`: bounded claim leases.
-- `backend/alembic/versions/20260827_0016_operational_leases.py`: clean-install lease columns and indexes rooted at the Phase H head.
-- `backend/tests/test_daily_operations.py`: concurrency, boundary, restart, read-only, partial-failure, and notification retry coverage.
+- `backend/alembic/versions/20260826_0014_review_refresh_metadata.py`: published review metadata migration, unchanged in responsibility.
+- `backend/alembic/versions/20260826_0015_operational_claims.py`: published durable checkpoint and notification claim migration, restored as a standalone revision.
+- `backend/alembic/versions/20260827_0016_operational_leases.py`: lease columns and indexes appended after the published Phase H head.
+- `backend/app/services/analysis_lease.py`: worker heartbeat, lease renewal, and stale running-job recovery.
+- `backend/tests/test_daily_operations.py`: concurrency, boundary, restart, heartbeat, running-crash, read-only, partial-failure, and notification retry coverage.
+- `backend/tests/test_phase_h_migrations.py`: deployed `0015 -> 0016` upgrade and repeated-head regression.
 - `skill/tradingagents-holdings-advisor/runtime.json`: complete notification severity contract.
 
 ## 3. Checkpoint idempotency
@@ -37,7 +42,10 @@ terminal state always wins over a later missed-window calculation. No whole-day
 replay is performed, and claims survive service restart. Non-terminal claims
 carry a bounded lease; expired claims are reclaimed in place and increment
 `attempt_count`. A checkpoint `completed_at` is written only for terminal
-statuses. Queued AnalysisJobs are re-dispatched by job id, never duplicated.
+statuses. Checkpoint-backed AnalysisJobs renew their lease from a separate
+worker heartbeat. A live heartbeat prevents reclaim beyond the initial lease;
+when a worker crashes, the stale claim atomically moves the same running job to
+`retrying`, and the same job id is re-dispatched without creating a second job.
 
 ## 4. Trading calendar and monitor
 
@@ -93,10 +101,12 @@ become broker or final portfolio instructions.
 
 ## 8. Migration clean install
 
-The H.1 lease columns are included in migration
-`20260827_0016_operational_leases.py`, rooted at the Phase H head
-`20260826_0014`. A fresh temporary SQLite database was upgraded twice
-successfully. Existing local databases remain compatible via the existing
+The published migration lineage is preserved as
+`20260826_0014 -> 20260826_0015 -> 20260827_0016`. Revision `0014` owns only
+review refresh metadata; revision `0015` owns the durable operational claim
+tables; revision `0016` adds lease columns and indexes. A database initialized
+at deployed revision `0015` upgrades to `head` (`0016`) and can repeat the
+`head` upgrade safely. Existing local databases remain compatible via the
 `create_all`/lightweight migration path.
 
 ## 9. Decision Contract regression
@@ -110,15 +120,16 @@ final authority.
 
 ## 10. Verification
 
-- H.1 operations/Scheduler tests: `33 passed` (including the new claim,
-  boundary, restart, Dashboard, and notification cases).
-- Backend full suite: `247 passed, 16 warnings`.
+- Final Seal operations and migration tests: `35 passed` (including claim,
+  boundary, restart, heartbeat, running-crash, and deployed-upgrade cases).
+- Backend full suite: `259 passed, 16 warnings`.
 - Backend `compileall`: passed.
 - Skill tests: `13 passed`.
 - Skill validator: passed (`Skill is valid!`).
 - Frontend `npm run typecheck`: passed.
 - Frontend `npm run build`: passed.
-- Alembic `upgrade head` twice: passed; current head `20260826_0014`.
+- Alembic deployed upgrade `20260826_0015 -> head` plus repeated `head`:
+  passed; current head `20260827_0016`.
 - `git diff --check`: passed; only repository line-ending warnings remain.
 - Docker Compose build: passed.
 
@@ -134,9 +145,9 @@ architecture remain unimplemented.
 
 ## 12. Conclusion
 
-After the H.1 commit, the acceptance code is:
+After the Final Seal commit, the acceptance code is:
 
-`PASS_PHASE_H_OPERATIONAL_ACCEPTANCE`
+`PASS_PHASE_H_FINAL_SEAL`
 
 The final commit SHA and final clean working-tree state are recorded in the
 delivery response.

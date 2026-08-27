@@ -24,6 +24,7 @@ from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
 from .model_client import call_model, parse_json_result
+from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_prompt
 
 logger = logging.getLogger(__name__)
@@ -1268,6 +1269,7 @@ def _fail_closed_portfolio_gate_result(final: dict[str, Any], error: Exception) 
 def run_analysis_job(job_id: int) -> None:
     db = SessionLocal()
     job: AnalysisJob | None = None
+    heartbeat: AnalysisLeaseHeartbeat | None = None
     try:
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
         if job is None or job.status not in {"queued", "retrying"}:
@@ -1277,6 +1279,9 @@ def run_analysis_job(job_id: int) -> None:
         job.error_code = None
         job.error_message = None
         db.commit()
+        heartbeat = AnalysisLeaseHeartbeat.for_job(db, job_id=job.id)
+        if heartbeat is not None:
+            heartbeat.start()
 
         snapshot_row = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == job.snapshot_id).first()
         if snapshot_row is None or snapshot_row.status != "confirmed":
@@ -1846,4 +1851,6 @@ def run_analysis_job(job_id: int) -> None:
                 job.finished_at = datetime.now(UTC)
                 db.commit()
     finally:
+        if heartbeat is not None:
+            heartbeat.stop()
         db.close()

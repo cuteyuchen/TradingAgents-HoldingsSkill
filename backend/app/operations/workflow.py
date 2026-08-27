@@ -20,6 +20,7 @@ from ..memory.review import run_daily_review
 from ..config import settings
 from ..services.analysis_admission import AnalysisJobAdmission, active_portfolio_analysis
 from ..services.analysis_engine import run_analysis_job
+from ..services.analysis_lease import reclaim_running_analysis_job
 from ..services.realtime_monitor import get_realtime_monitor
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
 from ..v2_models import AnalysisJob, AnalysisRun, Portfolio, PortfolioSnapshot
@@ -318,8 +319,14 @@ def _admit_checkpoint_job(
     key = checkpoint_idempotency_key(portfolio.id, trade_date, checkpoint)
     existing = db.execute(select(AnalysisJob).where(AnalysisJob.idempotency_key == key)).scalar_one_or_none()
     if existing is not None:
-        if reclaim and str(existing.status).lower() in {"queued", "retrying"}:
-            return AnalysisJobAdmission(existing, should_start=True, source="reclaimed")
+        if reclaim:
+            status = str(existing.status).lower()
+            if status == "running":
+                reclaim_running_analysis_job(db, job_id=existing.id)
+                db.refresh(existing)
+                status = str(existing.status).lower()
+            if status in {"queued", "retrying"}:
+                return AnalysisJobAdmission(existing, should_start=True, source="reclaimed")
         source = "idempotency"
         return AnalysisJobAdmission(existing, should_start=False, source=source)
     existing = _checkpoint_job(
@@ -330,8 +337,14 @@ def _admit_checkpoint_job(
         as_of=now,
     )
     if existing is not None:
-        if reclaim and str(existing.status).lower() in {"queued", "retrying"}:
-            return AnalysisJobAdmission(existing, should_start=True, source="reclaimed")
+        if reclaim:
+            status = str(existing.status).lower()
+            if status == "running":
+                reclaim_running_analysis_job(db, job_id=existing.id)
+                db.refresh(existing)
+                status = str(existing.status).lower()
+            if status in {"queued", "retrying"}:
+                return AnalysisJobAdmission(existing, should_start=True, source="reclaimed")
         return AnalysisJobAdmission(existing, should_start=False, source="existing_schedule")
     active = active_portfolio_analysis(db, user_id=portfolio.user_id, portfolio_id=portfolio.id)
     if active is not None:

@@ -29,6 +29,7 @@ from app.operations.notifications import (
 from app.portfolio_models import PortfolioRiskSnapshot
 from app.routers.operations_v3 import _portfolio
 from app.services import scheduler as scheduler_service
+from app.services.analysis_lease import AnalysisLeaseHeartbeat, renew_analysis_checkpoint_lease
 from app.services.trading_calendar import CHINA_TZ
 from app.v2_models import AnalysisJob, AnalysisRun, NotificationChannel, Portfolio, PortfolioSnapshot, Schedule, User
 
@@ -317,6 +318,128 @@ def test_stale_analysis_claim_reclaims_same_queued_job_after_restart(monkeypatch
         assert claim.job_id == job_id
         assert claim.attempt_count == 2
         assert claim.completed_at is None
+    finally:
+        restarted.close()
+
+
+def test_running_analysis_heartbeat_extends_lease_without_duplicate_job(monkeypatch):
+    db = _db()
+    bind = db.bind
+    day = date(2026, 8, 20)
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        _FakeThread.starts = []
+        monkeypatch.setattr(workflow.threading, "Thread", _FakeThread)
+        first = workflow.run_due_checkpoints(
+            db,
+            portfolio=portfolio,
+            now=_local(day, 9, 40),
+        )
+        job_id = first["started_jobs"][0]
+        job = db.get(AnalysisJob, job_id)
+        claim = db.query(DailyOperationalCheckpoint).filter_by(
+            portfolio_id=portfolio.id,
+            trade_date=day,
+            checkpoint_name="09:35",
+        ).one()
+        job.status = "running"
+        job.current_stage = "analysts_running"
+        db.commit()
+        portfolio_id = portfolio.id
+
+        heartbeat = AnalysisLeaseHeartbeat.for_job(
+            db,
+            job_id=job_id,
+            session_factory=lambda: Session(bind=bind),
+        )
+        assert heartbeat is not None
+        assert heartbeat.beat(now=_utc_naive(_local(day, 9, 48))) is True
+        db.refresh(claim)
+        assert claim.attempt_count == 1
+        assert claim.lease_expires_at == _utc_naive(_local(day, 9, 58))
+    finally:
+        db.close()
+
+    restarted = Session(bind=bind)
+    try:
+        _FakeThread.starts = []
+        result = workflow.run_due_checkpoints(
+            restarted,
+            portfolio=restarted.get(Portfolio, portfolio_id),
+            now=_local(day, 9, 55),
+        )
+        claim = restarted.query(DailyOperationalCheckpoint).filter_by(
+            portfolio_id=portfolio_id,
+            trade_date=day,
+            checkpoint_name="09:35",
+        ).one()
+        assert result["started_jobs"] == []
+        assert _FakeThread.starts == []
+        assert restarted.query(AnalysisJob).count() == 1
+        assert restarted.get(AnalysisJob, job_id).status == "running"
+        assert claim.attempt_count == 1
+    finally:
+        restarted.close()
+
+
+def test_expired_running_analysis_job_retries_same_job_after_crash(monkeypatch):
+    db = _db()
+    bind = db.bind
+    day = date(2026, 8, 20)
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        _FakeThread.starts = []
+        monkeypatch.setattr(workflow.threading, "Thread", _FakeThread)
+        first = workflow.run_due_checkpoints(
+            db,
+            portfolio=portfolio,
+            now=_local(day, 9, 40),
+        )
+        job_id = first["started_jobs"][0]
+        job = db.get(AnalysisJob, job_id)
+        claim = db.query(DailyOperationalCheckpoint).filter_by(
+            portfolio_id=portfolio.id,
+            trade_date=day,
+            checkpoint_name="09:35",
+        ).one()
+        job.status = "running"
+        job.current_stage = "analysts_running"
+        claim.status = "RUNNING"
+        claim.lease_expires_at = _utc_naive(_local(day, 9, 39))
+        db.commit()
+        portfolio_id = portfolio.id
+    finally:
+        db.close()
+
+    restarted = Session(bind=bind)
+    try:
+        _FakeThread.starts = []
+        result = workflow.run_due_checkpoints(
+            restarted,
+            portfolio=restarted.get(Portfolio, portfolio_id),
+            now=_local(day, 9, 49),
+        )
+        job = restarted.get(AnalysisJob, job_id)
+        claim = restarted.query(DailyOperationalCheckpoint).filter_by(
+            portfolio_id=portfolio_id,
+            trade_date=day,
+            checkpoint_name="09:35",
+        ).one()
+        assert result["started_jobs"] == [job_id]
+        assert _FakeThread.starts == [(job_id,)]
+        assert restarted.query(AnalysisJob).count() == 1
+        assert job.status == "retrying"
+        assert job.current_stage == "retrying"
+        assert job.retry_count == 1
+        assert claim.attempt_count == 2
+        assert claim.job_id == job_id
+        assert claim.completed_at is None
+        assert renew_analysis_checkpoint_lease(
+            restarted,
+            job_id=job_id,
+            attempt_count=1,
+            now=_utc_naive(_local(day, 9, 49)),
+        ) is False
     finally:
         restarted.close()
 
