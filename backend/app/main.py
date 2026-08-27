@@ -110,6 +110,7 @@ from .routers import (  # noqa: E402
     operations_v3,
     portfolio_v3,
     triggers_v3,
+    evaluation_v3,
 )
 
 app.include_router(auth_v2.router)
@@ -126,6 +127,7 @@ app.include_router(monitor_v3.router)
 app.include_router(operations_v3.router)
 app.include_router(triggers_v3.router)
 app.include_router(portfolio_v3.router)
+app.include_router(evaluation_v3.router)
 
 
 @app.get("/healthz")

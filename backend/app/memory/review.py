@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..market_engine_models import MarketScoreSnapshot
 from ..portfolio_models import TradeLedgerEntry, TradeLedgerRevision
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
+from ..operations.config import REVIEW_CLAIM_LEASE
 from .config import DAILY_REVIEW_VERSION, MINIMUM_STATS_SAMPLE
 from .execution import refresh_execution_alignments
 from .models import DailyReviewRun, DecisionMemory, DecisionOutcome
@@ -365,6 +366,7 @@ def _apply_review(row: DailyReviewRun, payload: dict[str, Any], *, refreshed: bo
     row.quality_status = payload["quality_status"]
     row.confidence = payload["confidence"]
     row.review_stale = False
+    row.lease_expires_at = None
     # The counter is incremented with a SQL expression in run_daily_review so
     # two concurrent refreshers cannot overwrite one another's count.
     if not refreshed:
@@ -401,11 +403,15 @@ def run_daily_review(
             trade_date=trade_date,
             status="RUNNING",
             review_version=DAILY_REVIEW_VERSION,
+            lease_expires_at=_now() + REVIEW_CLAIM_LEASE,
+            attempt_count=1,
         )
         db.add(existing)
         db.flush()
     else:
         existing.status = "RUNNING"
+        existing.lease_expires_at = _now() + REVIEW_CLAIM_LEASE
+        existing.attempt_count = int(existing.attempt_count or 1)
         db.flush()
     try:
         refresh_due_decision_outcomes(
@@ -463,6 +469,7 @@ def run_daily_review(
         failed.quality_status = "BLOCKED"
         failed.reason_codes_json = ["MAINTENANCE_FAILED", str(exc)[:300]]
         failed.completed_at = None
+        failed.lease_expires_at = None
         db.commit()
         return failed
 

@@ -14,10 +14,12 @@
 - `backend/app/operations/workflow.py`: database-backed checkpoint ownership and claim outcomes.
 - `backend/app/operations/notifications.py`: durable notification claim, retry, cooldown, read model, and read state.
 - `backend/app/operations/dashboard.py`: section-level `ERROR` projection for partial failures.
-- `backend/app/memory/review.py`: atomic SQL refresh counter update.
-- `backend/alembic/versions/20260826_0014_review_refresh_metadata.py`: clean-install schema for H.1 durability tables while preserving head `20260826_0014`.
+- `backend/app/memory/review.py`: review lease lifecycle and atomic SQL refresh counter update.
+- `backend/app/services/scheduler.py`: review lease reclaim and bidirectional fixed-checkpoint deduplication.
+- `backend/app/config.py` and `backend/app/operations/config.py`: bounded claim leases.
+- `backend/alembic/versions/20260827_0016_operational_leases.py`: clean-install lease columns and indexes rooted at the Phase H head.
 - `backend/tests/test_daily_operations.py`: concurrency, boundary, restart, read-only, partial-failure, and notification retry coverage.
-- `frontend/src/views/DashboardView.vue`: render Dashboard section errors as error-state tags.
+- `skill/tradingagents-holdings-advisor/runtime.json`: complete notification severity contract.
 
 ## 3. Checkpoint idempotency
 
@@ -32,7 +34,10 @@ job guard.
 Checkpoint semantics use `Asia/Shanghai` and the configured 15-minute window:
 exact time, +14:59, and +15:00 are due; +15:01 is `MISSED`. A persisted
 terminal state always wins over a later missed-window calculation. No whole-day
-replay is performed, and claims survive service restart.
+replay is performed, and claims survive service restart. Non-terminal claims
+carry a bounded lease; expired claims are reclaimed in place and increment
+`attempt_count`. A checkpoint `completed_at` is written only for terminal
+statuses. Queued AnalysisJobs are re-dispatched by job id, never duplicated.
 
 ## 4. Trading calendar and monitor
 
@@ -74,11 +79,13 @@ Candidate snapshot cannot be displayed as actionable `ACTION`.
 `(user_id, portfolio_id, dedupe_key)` and a stable notification id. Dispatch is
 at-least-once with durable claim states: `DISPATCHING`, `SENT`,
 `DASHBOARD_ONLY`, `FAILED`, `COOLDOWN`, and `RETRY`. A process restart cannot
-forget dedupe state. Failed channel delivery is retryable after cooldown;
-duplicate workers receive `ALREADY_CLAIMED` or `DEDUPED`. Notification failure
+forget dedupe state. Failed channel delivery is retryable after cooldown; an
+expired `DISPATCHING` lease is reclaimed with a compare-and-set update, so
+duplicate workers receive `ALREADY_CLAIMED` or `DEDUPED` while a crashed
+worker can retry. Notification failure
 does not roll back Analysis, Candidate, Monitor, Decision, or Ledger facts.
 
-Severity remains `INFO`, `IMPORTANT`, or `CRITICAL`. Regime changes, Candidate
+Severity is `INFO`, `IMPORTANT`, `ACTION_REQUIRED`, or `CRITICAL`. Regime changes, Candidate
 promotion/demotion, confirmed P0/P1 Triggers, provider degradation/outage, and
 explicit `NO_ACTION` resolutions are material events. 20:30 remains a
 critical-event hook only. Candidate `ACTION` and Trigger confirmation never
@@ -86,12 +93,11 @@ become broker or final portfolio instructions.
 
 ## 8. Migration clean install
 
-The H.1 tables are included in migration `20260826_0014`; the final Alembic
-head remains `20260826_0014`. A fresh temporary SQLite database was upgraded
-twice successfully. The resulting schema contains `daily_operational_runs`,
-`daily_operational_checkpoints`, and `operating_notifications`, including the
-unique constraints and indexes. Existing local databases remain compatible via
-the existing `create_all`/lightweight migration path.
+The H.1 lease columns are included in migration
+`20260827_0016_operational_leases.py`, rooted at the Phase H head
+`20260826_0014`. A fresh temporary SQLite database was upgraded twice
+successfully. Existing local databases remain compatible via the existing
+`create_all`/lightweight migration path.
 
 ## 9. Decision Contract regression
 

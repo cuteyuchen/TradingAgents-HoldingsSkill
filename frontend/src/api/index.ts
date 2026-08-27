@@ -7,6 +7,9 @@ import type {
   DashboardDiagnostics,
   DashboardHealth,
   DashboardTimeline,
+  EvaluationCoverage,
+  EvaluationEpisode,
+  EvaluationSummary,
   HoldingUpload,
   ModelProfile,
   ModelProvider,
@@ -15,6 +18,7 @@ import type {
   ParsedHoldings,
   Portfolio,
   PortfolioSnapshot,
+  PaperObservationStatus,
   Schedule,
   TokenPair,
   User,
@@ -154,6 +158,11 @@ export const api = {
     unreadOnly ? 'unread_only=true' : '',
   ].filter(Boolean).join('&')}` : ''}`),
   markOperatingNotificationRead: (notificationId: string, portfolioId?: number) => request<Record<string, unknown>>(`/api/v3/notifications/${encodeURIComponent(notificationId)}/read${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`, { method: 'POST' }),
+  getEvaluationSummary: (portfolioId: number) => request<EvaluationSummary>(`/api/v3/portfolios/${portfolioId}/evaluation/summary`),
+  listEvaluationEpisodes: (portfolioId: number, limit = 100) => request<EvaluationEpisode[]>(`/api/v3/portfolios/${portfolioId}/evaluation/episodes?limit=${limit}`),
+  getEvaluationEpisode: (portfolioId: number, episodeId: string) => request<EvaluationEpisode>(`/api/v3/portfolios/${portfolioId}/evaluation/episodes/${encodeURIComponent(episodeId)}`),
+  getEvaluationCoverage: (portfolioId: number) => request<EvaluationCoverage>(`/api/v3/portfolios/${portfolioId}/evaluation/coverage`),
+  getPaperObservationStatus: (portfolioId: number) => request<PaperObservationStatus>(`/api/v3/portfolios/${portfolioId}/evaluation/paper-observation`),
 }
 
 async function requestBlob(path: string, retryAuth = true): Promise<Blob> {

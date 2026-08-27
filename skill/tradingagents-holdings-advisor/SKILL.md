@@ -67,7 +67,15 @@ The frozen operating timeline is 08:45 maintenance, 09:20 pre-market snapshot, 0
 
 The Dashboard APIs are read-only projections of persisted Market, Portfolio, Candidate, Trigger, Analysis, Decision Memory, Trade Ledger, and Review facts. Candidate Engine stages remain authoritative: `ACTION` is a candidate stage, not a final buy instruction; Trigger means “reanalyze,” not buy/sell. Freshness and partial failures remain visible. On non-trading days, the workbench shows the latest reliable close, portfolio snapshot, and completed Review without starting monitor, candidate scan, or analysis checkpoints.
 
-Daily Review is idempotent. Late mature Outcomes, revised Outcome sources, or Ledger revisions mark the same ReviewRun stale; an in-place refresh clears `review_stale` and increments `refresh_count`. Material notifications use explicit `INFO`/`IMPORTANT`/`CRITICAL` severity, dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and explicit `NO_ACTION` resolutions may notify; unchanged observations do not. A total quote-provider outage blocks adding new risk and does not automatically sell existing holdings.
+## Decision Evaluation and Paper Observation (Phase I)
+
+Decision Evaluation is an append-only evidence layer. It freezes a `DecisionEpisode` with the existing Decision Contract `2.4.0` and Evaluation Schema `1.0.0`, then observes T+1/T+3/T+5/T+10/T+20 trading-day outcomes. It never rewrites Decision Memory, Candidate, Trigger, Analysis, Portfolio Gate, or user execution facts. `NO_ACTION` remains a first-class result; Candidate `ACTION` is not a trade, and Trigger is only a reason to re-analyze.
+
+Historical replay is explicitly separated into `FACT_REPLAY`, `DETERMINISTIC_LOGIC_REPLAY`, and `MODEL_RECOMPUTE`. Replay is point-in-time (`available_at <= decision_time`) and defaults to no external I/O. Current-model results are labeled `RECOMPUTED_WITH_CURRENT_MODEL` and are excluded from historical performance metrics. Missing snapshots, prices, calendars, or uncertain corporate-action adjustments are reported as evidence-quality failures rather than filled with today's data.
+
+Paper Observation means real-time, advisory-only observation (`REAL_TIME_PAPER_OBSERVATION`), not broker paper trading. A Decision is frozen when produced; if no Decision was captured on the observation date, record `OBSERVATION_MISSING`/`MISSED_DECISION_CAPTURE` and never backfill a synthetic historical Decision. Evaluation metrics are descriptive and sample-size labeled (`INSUFFICIENT_SAMPLE`, `EARLY_EVIDENCE`, `MATURE_SAMPLE`); this capability must never be used for auto-trading, parameter search, optimizer behavior, or claims of stable profitability.
+
+Daily Review is idempotent. Late mature Outcomes, revised Outcome sources, or Ledger revisions mark the same ReviewRun stale; an in-place refresh clears `review_stale` and increments `refresh_count`. Material notifications use explicit `INFO`/`IMPORTANT`/`ACTION_REQUIRED`/`CRITICAL` severity, dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and explicit `NO_ACTION` resolutions may notify; unchanged observations do not. A total quote-provider outage blocks adding new risk and does not automatically sell existing holdings.
 
 ## Quality-First Workflow
 

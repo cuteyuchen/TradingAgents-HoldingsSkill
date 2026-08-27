@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect, or_, update
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -42,6 +42,10 @@ def _as_china_time(value: datetime | None = None) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=CHINA_TZ)
     return value.astimezone(CHINA_TZ)
+
+
+def _as_utc_time(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def next_run(
@@ -156,9 +160,23 @@ def run_scheduled_daily_review(*, user_id: int, portfolio_id: int, trade_date: d
 def _enqueue_memory_reviews(db: Session, *, trade_date: date, now_utc: datetime) -> None:
     """Claim one review per portfolio after the 15:30 checkpoint, including catch-up."""
 
-    local = now_utc.astimezone(CHINA_TZ)
+    from ..operations.config import REVIEW_CLAIM_LEASE
+
+    moment = _as_utc_time(now_utc)
+    moment_naive = moment.replace(tzinfo=None)
+    local = moment.astimezone(CHINA_TZ)
     if local.time() < time(15, 30):
         return
+    stale_condition = (
+        (DailyReviewRun.lease_expires_at.is_not(None) & (DailyReviewRun.lease_expires_at <= moment_naive))
+        | (
+            DailyReviewRun.lease_expires_at.is_(None)
+            & (
+                DailyReviewRun.created_at.is_(None)
+                | (DailyReviewRun.created_at <= moment_naive - REVIEW_CLAIM_LEASE)
+            )
+        )
+    )
     for portfolio in db.query(Portfolio).order_by(Portfolio.id.asc()).all():
         existing = db.query(DailyReviewRun).filter(
             DailyReviewRun.user_id == portfolio.user_id,
@@ -167,43 +185,79 @@ def _enqueue_memory_reviews(db: Session, *, trade_date: date, now_utc: datetime)
             DailyReviewRun.review_version == "daily-review-v1",
         ).first()
         if existing is not None and existing.status == "RUNNING":
-            continue
-        if existing is not None and existing.status == "COMPLETED":
+            reclaimed = db.execute(
+                update(DailyReviewRun)
+                .where(
+                    DailyReviewRun.id == existing.id,
+                    DailyReviewRun.status == "RUNNING",
+                    stale_condition,
+                )
+                .values(
+                    lease_expires_at=moment_naive + REVIEW_CLAIM_LEASE,
+                    attempt_count=func.coalesce(DailyReviewRun.attempt_count, 0) + 1,
+                )
+            ).rowcount
+            if not reclaimed:
+                continue
+            db.commit()
+            should_start = True
+        elif existing is not None and existing.status == "COMPLETED":
             from ..operations.workflow import review_staleness_reasons
 
-            reasons = review_staleness_reasons(db, review=existing, as_of=now_utc)
+            reasons = review_staleness_reasons(db, review=existing, as_of=moment)
             if not existing.review_stale and not reasons:
                 continue
-            existing.review_stale = True
-            existing.status = "RUNNING"
+            reclaimed = db.execute(
+                update(DailyReviewRun)
+                .where(
+                    DailyReviewRun.id == existing.id,
+                    DailyReviewRun.status == "COMPLETED",
+                )
+                .values(
+                    status="RUNNING",
+                    review_stale=True,
+                    lease_expires_at=moment_naive + REVIEW_CLAIM_LEASE,
+                    attempt_count=func.coalesce(DailyReviewRun.attempt_count, 0) + 1,
+                )
+            ).rowcount
+            if not reclaimed:
+                continue
             db.commit()
-            threading.Thread(
-                target=run_scheduled_daily_review,
-                kwargs={
-                    "user_id": portfolio.user_id,
-                    "portfolio_id": portfolio.id,
-                    "trade_date": trade_date,
-                },
-                daemon=True,
-            ).start()
-            continue
-        if existing is None:
+            should_start = True
+        elif existing is None:
             existing = DailyReviewRun(
                 user_id=portfolio.user_id,
                 portfolio_id=portfolio.id,
                 trade_date=trade_date,
                 status="RUNNING",
                 review_version="daily-review-v1",
+                lease_expires_at=moment_naive + REVIEW_CLAIM_LEASE,
+                attempt_count=1,
             )
             db.add(existing)
+            try:
+                db.commit()
+            except IntegrityError:
+                # Another scheduler process may have claimed the same unique day.
+                # The database constraint is the cross-process single-flight guard.
+                db.rollback()
+                continue
+            should_start = True
         else:
-            existing.status = "RUNNING"
-        try:
+            reclaimed = db.execute(
+                update(DailyReviewRun)
+                .where(DailyReviewRun.id == existing.id)
+                .values(
+                    status="RUNNING",
+                    lease_expires_at=moment_naive + REVIEW_CLAIM_LEASE,
+                    attempt_count=func.coalesce(DailyReviewRun.attempt_count, 0) + 1,
+                )
+            ).rowcount
+            if not reclaimed:
+                continue
             db.commit()
-        except IntegrityError:
-            # Another scheduler process may have claimed the same unique day.
-            # The database constraint is the cross-process single-flight guard.
-            db.rollback()
+            should_start = True
+        if not should_start:
             continue
         threading.Thread(
             target=run_scheduled_daily_review,
@@ -306,10 +360,49 @@ def create_scheduled_job(
     *,
     force: bool = False,
     with_admission: bool = False,
+    now: datetime | None = None,
 ) -> AnalysisJob | AnalysisJobAdmission:
     """Create a scheduled job or reuse the portfolio's active full analysis."""
 
-    local_now = datetime.now(CHINA_TZ)
+    local_now = _as_china_time(now)
+    moment_naive = local_now.astimezone(UTC).replace(tzinfo=None)
+    trade_date = local_now.date()
+    checkpoint = str(schedule.checkpoint or "").strip()
+
+    # A fixed checkpoint is a portfolio/day fact, independent of which legacy
+    # Schedule row happened to wake up first.  This is the reverse direction
+    # of the Phase H admission check and prevents a completed reconcile-today
+    # job from being recreated by the legacy scheduler.
+    if checkpoint:
+        from ..operations.workflow import checkpoint_idempotency_key
+
+        phase_h_job = db.query(AnalysisJob).filter(
+            AnalysisJob.user_id == schedule.user_id,
+            AnalysisJob.portfolio_id == schedule.portfolio_id,
+            AnalysisJob.idempotency_key == checkpoint_idempotency_key(
+                schedule.portfolio_id,
+                trade_date,
+                checkpoint,
+            ),
+        ).order_by(AnalysisJob.id.desc()).first()
+        if phase_h_job is not None:
+            admission = AnalysisJobAdmission(phase_h_job, should_start=False, source="existing_checkpoint")
+            return admission if with_admission else admission.job
+
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC).replace(tzinfo=None)
+        day_end = (local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).astimezone(UTC).replace(tzinfo=None)
+        checkpoint_job = db.query(AnalysisJob).filter(
+            AnalysisJob.user_id == schedule.user_id,
+            AnalysisJob.portfolio_id == schedule.portfolio_id,
+            AnalysisJob.trigger_type == "scheduled",
+            AnalysisJob.checkpoint == checkpoint,
+            AnalysisJob.created_at >= day_start,
+            AnalysisJob.created_at < min(day_end, moment_naive),
+        ).order_by(AnalysisJob.created_at.desc(), AnalysisJob.id.desc()).first()
+        if checkpoint_job is not None:
+            admission = AnalysisJobAdmission(checkpoint_job, should_start=False, source="existing_checkpoint")
+            return admission if with_admission else admission.job
+
     key = f"schedule:{schedule.id}:{local_now.date().isoformat()}:{schedule.checkpoint}"
     existing = db.query(AnalysisJob).filter(AnalysisJob.idempotency_key == key).first()
     if existing and not force:
@@ -326,11 +419,12 @@ def create_scheduled_job(
     snapshot = _latest_snapshot(db, schedule)
     if snapshot is None:
         raise RuntimeError("no_confirmed_snapshot")
-    age_days = (datetime.now(UTC).date() - snapshot.snapshot_time.replace(tzinfo=UTC).date()).days
+    snapshot_local_date = snapshot.snapshot_time.replace(tzinfo=UTC).astimezone(CHINA_TZ).date()
+    age_days = (local_now.date() - snapshot_local_date).days
     if age_days > schedule.stale_snapshot_days:
         raise RuntimeError(f"snapshot_stale:{age_days}d")
     if existing and force:
-        key = key + f":manual:{int(datetime.now(UTC).timestamp())}"
+        key = key + f":manual:{int(local_now.timestamp())}"
     job = AnalysisJob(
         user_id=schedule.user_id,
         portfolio_id=schedule.portfolio_id,
@@ -393,7 +487,7 @@ def tick_schedules() -> None:
                     )
                     db.commit()
                     continue
-                admission = create_scheduled_job(db, schedule, with_admission=True)
+                admission = create_scheduled_job(db, schedule, with_admission=True, now=local)
                 if isinstance(admission, AnalysisJobAdmission):
                     job = admission.job
                     should_start = admission.should_start

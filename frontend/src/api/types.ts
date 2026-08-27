@@ -242,6 +242,60 @@ export interface NotificationChannel {
   updated_at: string
 }
 
+export interface EvaluationSummary {
+  status: string
+  portfolio_id: number
+  episodes: number
+  decision_distribution: Record<string, number>
+  no_action_count: number
+  no_action_rate?: number | null
+  candidate_stage_distribution: Record<string, number>
+  trigger_count: number
+  outcomes: number
+  coverage: Record<string, number>
+  horizons: Record<string, { median: number | null; mean: number | null; n: number; status: string; distribution?: number[] }>
+  mfe: { median: number | null; mean: number | null; n: number; status: string }
+  mae: { median: number | null; mean: number | null; n: number; status: string }
+  drawdown: { median: number | null; mean: number | null; n: number; status: string }
+  data_quality_failures: Record<string, number>
+  evaluation_schema_version: string
+  decision_contract_version: string
+}
+
+export interface EvaluationEpisode {
+  episode_id: string
+  symbol: string
+  decision_time: string
+  trading_date: string
+  decision_type: string
+  candidate_stage?: string | null
+  portfolio_gate_result?: string | null
+  evidence_status: string
+  source_mode: string
+  manifest_hash?: string | null
+  outcomes?: Array<Record<string, any>>
+  snapshots?: Array<Record<string, any>>
+  [key: string]: any
+}
+
+export interface EvaluationCoverage {
+  episodes: number
+  episodes_ready: number
+  episodes_insufficient_evidence: number
+  outcomes: number
+  outcomes_complete: number
+  outcomes_pending: number
+  paper_observations: number
+  paper_observations_captured: number
+  paper_observations_missing: number
+  status: string
+}
+
+export interface PaperObservationStatus {
+  status: string
+  runs: Array<Record<string, any>>
+}
+
 // Legacy archive types remain for migration/debug views.
 export interface ScreenshotPayload {
   filename?: string | null

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
+from datetime import timedelta, time
 
 from ..config import settings
 
@@ -18,6 +18,10 @@ class OperatingCheckpoint:
 
 
 WORKFLOW_VERSION = "daily-operations-v1"
+ANALYSIS_CLAIM_LEASE = timedelta(minutes=settings.ANALYSIS_CLAIM_LEASE_MINUTES)
+REVIEW_CLAIM_LEASE = timedelta(minutes=settings.REVIEW_CLAIM_LEASE_MINUTES)
+NOTIFICATION_DISPATCH_LEASE = timedelta(minutes=settings.NOTIFICATION_DISPATCH_LEASE_MINUTES)
+SNAPSHOT_HOOK_LOOKBACK = timedelta(minutes=15)
 
 CHECKPOINTS: tuple[OperatingCheckpoint, ...] = (
     OperatingCheckpoint("maintenance", time(8, 45), "Data Maintenance", "maintenance", catch_up_minutes=30),
@@ -57,10 +61,14 @@ NOTIFICATION_COOLDOWNS_MINUTES = {
 
 __all__ = [
     "ANALYSIS_CHECKPOINTS",
+    "ANALYSIS_CLAIM_LEASE",
     "CHECKPOINTS",
     "CHECKPOINT_BY_KEY",
     "FRESHNESS_LIMITS_SECONDS",
+    "NOTIFICATION_DISPATCH_LEASE",
     "NOTIFICATION_COOLDOWNS_MINUTES",
     "OperatingCheckpoint",
+    "REVIEW_CLAIM_LEASE",
+    "SNAPSHOT_HOOK_LOOKBACK",
     "WORKFLOW_VERSION",
 ]

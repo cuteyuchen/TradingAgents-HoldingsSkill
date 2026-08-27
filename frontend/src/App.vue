@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
   BellRing,
+  ClipboardCheck,
   LayoutDashboard,
   LogOut,
   Moon,
@@ -40,6 +41,7 @@ const navigation = [
   { name: 'dashboard', label: '总览', icon: LayoutDashboard },
   { name: 'upload', label: '今日持仓', icon: Upload },
   { name: 'reports', label: '分析报告', icon: BarChart3 },
+  { name: 'evaluation', label: '评估', icon: ClipboardCheck },
   { name: 'settings', label: '系统设置', icon: Settings },
 ]
 

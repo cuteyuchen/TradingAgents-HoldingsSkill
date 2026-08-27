@@ -2,6 +2,7 @@
   "name": "tradingagents-holdings-advisor",
   "version": "2.4.0",
   "prompt_version": "2026-08-26",
+  "evaluation_schema_version": "1.0.0",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
     "confirmed_portfolio_snapshot",
@@ -49,7 +50,7 @@
     ,"Daily Workflow is deterministic orchestration over existing Market, Portfolio, Candidate, Trigger, Analysis, Ledger, and Memory facts. It does not create a second scheduler, execute broker orders, or turn Dashboard reads into recomputation."
     ,"The Daily Investment Workbench is read-only: Candidate ACTION is not a final buy instruction, Trigger is a request for re-analysis, and Portfolio Gate remains the final authority. Data outages pause new risk and do not force automatic sales of existing holdings."
     ,"Daily Review is idempotent and may be refreshed in place when late Outcomes, revised Outcome sources, or Ledger revisions arrive; refreshes preserve the same ReviewRun identity and increment refresh_count."
-    ,"Material notifications use explicit severity (INFO, IMPORTANT, CRITICAL), event dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and NO_ACTION resolutions are meaningful events; repeated unchanged observations are not."
+    ,"Material notifications use explicit severity (INFO, IMPORTANT, ACTION_REQUIRED, CRITICAL), event dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and NO_ACTION resolutions are meaningful events; repeated unchanged observations are not."
   ],
   "decision_contract": {
     "version": "2.4.0",
@@ -143,13 +144,23 @@
     }
   },
   "notification_semantics": {
-    "severity": ["INFO", "IMPORTANT", "CRITICAL"],
+    "severity": ["INFO", "IMPORTANT", "ACTION_REQUIRED", "CRITICAL"],
     "dedupe": true,
     "cooldown": true,
     "candidate_action_is_not_order": true,
     "trigger_is_not_order": true,
     "provider_total_outage_blocks_new_risk": true,
     "no_action_is_successful_result": true
+  },
+  "evaluation": {
+    "append_only": true,
+    "replay_modes": ["FACT_REPLAY", "DETERMINISTIC_LOGIC_REPLAY", "MODEL_RECOMPUTE"],
+    "historical_replay_external_io": "DENY_EXTERNAL_IO",
+    "outcome_horizons_trading_days": [1, 3, 5, 10, 20],
+    "paper_observation_mode": "REAL_TIME_PAPER_OBSERVATION",
+    "no_backfill": true,
+    "current_model_label": "RECOMPUTED_WITH_CURRENT_MODEL",
+    "stable_profitability_claim": false
   },
   "upstream_references": [
     "TauricResearch/TradingAgents",
