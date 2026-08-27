@@ -22,6 +22,25 @@ from .runner import (
 from .replay import ReplayDataQualityError
 
 
+def _replay_capability(manifest: dict[str, Any] | None, scope: str) -> str:
+    if not isinstance(manifest, dict):
+        return "FULL"
+    key = {
+        "MARKET": "market_score",
+        "CANDIDATE": "candidate_runs",
+        "MEMORY_DECISION": "decision_memory",
+        "BAR_FACTOR": "daily_bars",
+        "PORTFOLIO_DECISION": "portfolio_snapshots",
+    }.get(scope)
+    item = manifest.get(key) if key else None
+    if not isinstance(item, dict):
+        return "UNKNOWN"
+    capabilities = item.get("capabilities")
+    if isinstance(capabilities, dict):
+        return str(capabilities.get("PRODUCTION_REPLAY") or next(iter(capabilities.values()), "UNKNOWN"))
+    return str(item.get("status") or "UNKNOWN")
+
+
 def serialize_calibration_report(row: CalibrationReport) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -70,12 +89,21 @@ def create_calibration_report(
 ) -> CalibrationReport:
     if bootstrap_iterations <= 0 or bootstrap_iterations > MAX_BOOTSTRAP_ITERATIONS:
         raise ValueError("invalid_bootstrap_iterations")
+    case_rows = list(cases or [])
     evidence = build_calibration_evidence(
-        list(cases or []),
+        case_rows,
         target_parameter=target_parameter,
         parameter_grid=parameter_grid,
         seed=random_seed,
         bootstrap_iterations=bootstrap_iterations,
+        production_config=backtest_run.baseline_config_json,
+        quality_status=backtest_run.quality_status,
+        leakage_status=backtest_run.leakage_status,
+        availability_manifest=backtest_run.data_manifest_json,
+        replay_mode=backtest_run.replay_mode,
+        replay_capability=_replay_capability(backtest_run.data_manifest_json, backtest_run.scope),
+        scope=backtest_run.scope,
+        censored_sample=backtest_run.scope == "CANDIDATE" or any(bool(row.get("censored_sample")) for row in case_rows),
     )
     existing = db.execute(select(CalibrationReport).where(
         CalibrationReport.backtest_run_id == backtest_run.id,
@@ -113,6 +141,8 @@ def create_calibration_report(
             "baseline": evidence.get("baseline"),
             "challenger": evidence.get("challenger"),
             "selection_rule": evidence.get("selection_rule"),
+            "quality_gate": evidence.get("quality_gate"),
+            "folds": evidence.get("folds"),
             "no_auto_apply": True,
         },
         calibration_version=CALIBRATION_ENGINE_VERSION,

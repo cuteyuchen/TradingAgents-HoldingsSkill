@@ -2,8 +2,8 @@
 
 ## 1. Release Identity
 
-- Baseline: `16b8afb` (Phase H final seal).
-- Branch: `codex/phase-i-backtest-calibration`.
+- Baseline: `59957bf` (Phase I architecture baseline).
+- Branch: `codex/phase-i-1-integrity-hardening`.
 - Runtime Contract / Decision Contract: `2.4.0`, unchanged.
 - Alembic chain: `20260826_0014 -> 20260826_0015 -> 20260827_0016 -> 20260827_0017`.
 - Current head: `20260827_0017` (`backtest_calibration`).
@@ -55,15 +55,15 @@ Replay validates timestamp ordering and rejects future-visible facts. It never u
 - Reference basis must match every path bar adjustment. RAW/QFQ mixing returns `PRICE_BASIS_MISMATCH` and no high-confidence return.
 - Limit-up, limit-down, suspension, missing open, and missing target close are explicitly non-executable or blocked.
 - Same-day/intraday paths exclude the same-day daily high/low and mark unavailable intraday benchmark evidence as degraded.
-- The cost model is versioned and includes fees, sell tax, slippage, and `simple-cny-cost-v1`.
+- Transaction costs snapshot the authoritative Phase E portfolio-ledger broker settings at run creation and reuse the same commission/minimum-commission/sell-tax calculation. No synthetic slippage is added: `slippage_bps` is `None`, `slippage_not_modeled` is true, and slippage is excluded from returns.
 
 All replay source rows are bulk loaded by category. No day-by-security SQL loop or production write is used.
 
 ## 5. Chronology and Calibration
 
-Chronological train/validation/test splits and walk-forward folds never shuffle dates. Date-block bootstrap resamples whole trade dates so cross-sectional rows are not treated as independent observations. Every result exposes case count, trade-date count, coverage, confidence interval, baseline, challenger, and known limitations.
+Chronological train/validation/test splits and walk-forward folds never shuffle dates. For every fold, calibration selects a local challenger from Train, evaluates it on Validation, aggregates all fold validation evidence, fixes one final challenger, and only then reads the held-out Test folds. Date-block bootstrap resamples whole trade dates so cross-sectional rows are not treated as independent observations. Every result exposes case count, trade-date count, coverage, confidence interval, baseline, challenger, fold directions, and known limitations.
 
-Calibration supports Market Score/regime diagnostics, Candidate opportunity/entry/RR/Portfolio Fit/Decision Edge thresholds, factor ablation, one-factor weight perturbation, action frequency, robustness plateau, and baseline comparison. Candidate selection reads train/validation only; the test set is evaluated after selection and cannot choose the challenger.
+Calibration supports Market Score/regime thresholds with paired hysteresis boundaries, Candidate opportunity/entry/RR/Portfolio Fit/Decision Edge thresholds, factor ablation, one-factor weight perturbation, action frequency, robustness plateau, and baseline comparison. Threshold variants rerun the complete production eligibility predicate with exactly one override; they are not single-field filters. Candidate selection reads train/validation only; the test set is evaluated after selection and cannot choose the challenger.
 
 Recommendations are limited to:
 
@@ -72,13 +72,13 @@ Recommendations are limited to:
 - `INSUFFICIENT_EVIDENCE`
 - `REJECT_CHANGE`
 
-Minimum sample and date requirements, validation/test degradation, tail risk, fold direction, fragile peaks, data quality, and leakage status all fail closed. The report never emits `OPTIMAL_PARAMETER` and cannot mutate any production configuration.
+Minimum sample and date requirements, validation/test degradation, tail risk, fold direction, fragile peaks, BacktestRun quality, availability-manifest capability, censored production samples, replay capability, and leakage status all fail closed. Factor/weight calibration and threshold changes that expand a censored candidate sample cannot recommend `CONSIDER_CHANGE`. The report never emits `OPTIMAL_PARAMETER` and cannot mutate any production configuration.
 
 ## 6. API and Worker Contract
 
 Research endpoints are under `/api/v3/research`: availability, backtest list/detail/create, cancel, heartbeat, calibration list/detail/create. They use current-user ownership checks for Runs, Reports, and Portfolios. Client-supplied outcomes, returns, scores, source IDs, and historical rows are rejected; all outcome and lineage fields are server-owned.
 
-Backtest runs have durable status, lease expiry, heartbeat, attempt count, cancellation observation, stale reclaim, stable calculation keys, frozen source IDs, and source-set invalidation. Heartbeat keeps a long run alive; an expired lease is reclaimed for the same Run without creating an AnalysisJob.
+Backtest POST creates a durable queued Run; a server-owned worker claims it with CAS, runs it outside the HTTP request, renews the lease with a server heartbeat, and persists completion/failure. Startup and scheduler ticks reclaim expired `RUNNING` Runs and redispatch the same Run without creating a second Run. The client heartbeat endpoint remains an observability/control API; it is not the worker liveness mechanism.
 
 ## 7. Frontend and Skill
 
@@ -88,8 +88,8 @@ The Skill keeps live analysis unchanged. Historical research is offline system e
 
 ## 8. Verification
 
-- Phase I tests: `12 passed`.
-- Full backend suite: `271 passed`.
+- Phase I + Phase I.1 research tests: `25 passed`.
+- Full backend suite: `284 passed`.
 - `compileall`: passed.
 - Frontend `npm run typecheck`: passed.
 - Frontend `npm run build`: passed.

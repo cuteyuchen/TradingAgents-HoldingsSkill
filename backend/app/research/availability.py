@@ -420,8 +420,12 @@ def build_replay_availability_manifest(
     manifest["price_basis"] = {"daily_bars": "QFQ_DECLARED", "source_availability": "INGESTION_SEMANTICS_UNCONFIRMED"}
     manifest["benchmark_basis"] = {"default": "ALL_A_MEDIAN_INDEX_DAILY", "intraday": "UNAVAILABLE_WITHOUT_INTRADAY_HISTORY"}
     manifest["execution_model"] = "NEXT_OPEN_PROXY_FOR_EOD_DIAGNOSTIC_ONLY"
-    manifest["transaction_cost_model"] = "simple-cny-cost-v1"
-    manifest["slippage_model"] = "fixed-bps-v1"
+    manifest["transaction_cost_model"] = "phase-e-portfolio-ledger-v1"
+    manifest["slippage_model"] = {
+        "status": "NOT_MODELED",
+        "slippage_bps": None,
+        "excluded_from_return": True,
+    }
     manifest["known_limitations"] = [
         "No historical effective-dated SecurityMaster lifecycle facts.",
         "Fundamental and valuation point-in-time replay is unsupported.",

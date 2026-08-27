@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -21,12 +22,13 @@ from .config import (
     BACKTEST_ENGINE_VERSION,
     BACKTEST_STATUSES,
     DEFAULT_HORIZONS,
-    DEFAULT_TRANSACTION_COST_MODEL,
     MAX_BOOTSTRAP_ITERATIONS,
     MAX_DATE_SPAN_DAYS,
     METRICS_ENGINE_VERSION,
+    TransactionCostModel,
     current_production_config,
     current_config_version,
+    current_transaction_cost_model,
     normalise_replay_mode,
     normalise_scope,
     validate_horizons,
@@ -47,6 +49,8 @@ from .replay import (
 )
 
 LEASE_MINUTES = 10
+WORKER_HEARTBEAT_SECONDS = 30
+MAX_BACKTEST_WORKERS_PER_TICK = 4
 
 
 def _now() -> datetime:
@@ -148,6 +152,12 @@ def _allow_update(row: BacktestRun | BacktestMetricSlice) -> None:
     setattr(row, "_allow_research_update", True)
 
 
+def _run_transaction_cost_model(run: BacktestRun) -> TransactionCostModel:
+    experiment = run.experiment_config_json if isinstance(run.experiment_config_json, dict) else {}
+    snapshot = experiment.get("transaction_cost_model")
+    return TransactionCostModel.from_dict(snapshot if isinstance(snapshot, dict) else None)
+
+
 def create_backtest_run(
     db: Session,
     *,
@@ -173,6 +183,15 @@ def create_backtest_run(
     if scope == "PORTFOLIO_DECISION" and portfolio_id is None:
         raise ValueError("portfolio_id_required_for_portfolio_scope")
     config = current_production_config()
+    transaction_cost_model = current_transaction_cost_model()
+    experiment_payload = {
+        "horizons": list(horizon_values),
+        "bootstrap_iterations": bootstrap_iterations,
+        **(experiment_config or {}),
+        # Experiments may describe a study, but cannot replace the
+        # authoritative Phase E broker cost settings.
+        "transaction_cost_model": transaction_cost_model.as_dict(),
+    }
     manifest = build_replay_availability_manifest(
         db,
         start_date=start_date,
@@ -219,7 +238,7 @@ def create_backtest_run(
         config=config,
         data_hash=data_hash,
         horizons=horizon_values,
-        experiment=experiment_config,
+        experiment=experiment_payload,
     )
     existing = db.execute(select(BacktestRun).where(BacktestRun.calculation_key == key)).scalar_one_or_none()
     if existing is not None:
@@ -237,12 +256,7 @@ def create_backtest_run(
         config_version=current_config_version(),
         engine_version=BACKTEST_ENGINE_VERSION,
         baseline_config_json=config,
-        experiment_config_json={
-            "horizons": list(horizon_values),
-            "bootstrap_iterations": bootstrap_iterations,
-            "transaction_cost_model": DEFAULT_TRANSACTION_COST_MODEL.as_dict(),
-            **(experiment_config or {}),
-        },
+        experiment_config_json=experiment_payload,
         data_manifest_json=manifest,
         data_hash=data_hash,
         calculation_key=key,
@@ -419,9 +433,11 @@ def _market_outcome_rows(cases: list[ReplayCase], benchmark_rows: list[AllAMedia
             )
             result.append({
                 "trade_date": case.trade_date,
+                "entity_id": case.entity_id,
                 "horizon": horizon,
                 "market_score": score,
                 "market_regime": case.facts.get("market_regime"),
+                "canonical_observation": case.facts.get("canonical_observation"),
                 "quality_status": case.quality_status,
                 "coverage": case.coverage,
                 "forward_return": outcome.get("forward_return"),
@@ -436,16 +452,28 @@ def _market_outcome_rows(cases: list[ReplayCase], benchmark_rows: list[AllAMedia
     return result
 
 
-def _candidate_outcome_rows(cases: list[ReplayCase], bars: list[DailyBarCache], benchmark_rows: list[AllAMedianIndexDaily], horizons: tuple[int, ...], calendar_dates: list[date], cutoff: datetime | None) -> list[dict[str, Any]]:
+def _candidate_outcome_rows(
+    cases: list[ReplayCase],
+    bars: list[DailyBarCache],
+    benchmark_rows: list[AllAMedianIndexDaily],
+    horizons: tuple[int, ...],
+    calendar_dates: list[date],
+    cutoff: datetime | None,
+    *,
+    transaction_cost_model: TransactionCostModel | None = None,
+) -> list[dict[str, Any]]:
     bars_by_code: dict[str, list[DailyBarCache]] = defaultdict(list)
     for row in bars:
         bars_by_code[row.code].append(row)
+    transaction_cost_model = transaction_cost_model or current_transaction_cost_model()
     result = []
     for case in cases:
         code = str(case.facts.get("code") or "")
         code_bars = bars_by_code.get(code, [])
         for horizon in horizons:
-            target_dates = _future_dates(calendar_dates, case.trade_date, horizon)
+            intraday = bool(case.facts.get("intraday"))
+            future_dates = _future_dates(calendar_dates, case.trade_date, max(0, horizon - 1 if intraday else horizon))
+            target_dates = [case.trade_date, *future_dates] if intraday else future_dates
             outcome = calculate_forward_outcome(
                 decision_date=case.trade_date,
                 horizon=horizon,
@@ -454,13 +482,16 @@ def _candidate_outcome_rows(cases: list[ReplayCase], bars: list[DailyBarCache], 
                 bars=code_bars,
                 benchmark_rows=benchmark_rows,
                 action="BUY" if case.facts.get("stage") == "ACTION" else "WATCH",
-                execution_basis="NEXT_OPEN_PROXY",
+                execution_basis="INTRADAY_REFERENCE_QUOTE" if intraday else "NEXT_OPEN_PROXY",
                 target_dates=target_dates,
                 as_of=cutoff,
-                transaction_cost_model=DEFAULT_TRANSACTION_COST_MODEL,
+                transaction_cost_model=transaction_cost_model,
+                intraday=intraday,
             )
             result.append({
                 "trade_date": case.trade_date,
+                "entity_id": case.entity_id,
+                "intraday": intraday,
                 "horizon": horizon,
                 "code": code,
                 "security_type": case.facts.get("security_type"),
@@ -475,6 +506,18 @@ def _candidate_outcome_rows(cases: list[ReplayCase], bars: list[DailyBarCache], 
                 "risk_reward_ratio": case.facts.get("risk_reward_ratio"),
                 "coverage": case.coverage,
                 "market_regime": case.facts.get("market_regime"),
+                "candidate_quality_status": case.quality_status,
+                "market_available": case.facts.get("market_available", True),
+                "market_quality": case.facts.get("market_quality", "VALID"),
+                "market_frozen": case.facts.get("market_frozen", False),
+                "funding_mode": case.facts.get("funding_mode"),
+                "quote_is_proxy": case.facts.get("quote_is_proxy", False),
+                "limit_up": case.facts.get("limit_up", False),
+                "limit_down": case.facts.get("limit_down", False),
+                "edge_vs_current_holdings": case.facts.get("edge_vs_current_holdings"),
+                "held_baseline": case.facts.get("held_baseline"),
+                "components": case.facts.get("components") or {},
+                "reference_price_basis": case.facts.get("reference_price_basis"),
                 "censored_sample": True,
                 **outcome,
                 "source_ids": list(case.source_ids) + [str(outcome["target_bar_id"])] if outcome.get("target_bar_id") else list(case.source_ids),
@@ -528,6 +571,9 @@ def _load_replay_rows(
     user_id: int | None,
     portfolio_id: int | None,
     as_of: datetime | None,
+    decision_feature_cutoff: datetime | date | None = None,
+    outcome_evaluation_cutoff: datetime | date | None = None,
+    transaction_cost_model: TransactionCostModel | None = None,
 ) -> tuple[dict[str, list[Any]], list[dict[str, Any]], list[str]]:
     """Load one complete, bulk-fetched replay input set and its outcome rows."""
 
@@ -539,6 +585,8 @@ def _load_replay_rows(
         start_date=start_date,
         end_date=end_date,
         as_of=as_of,
+        decision_feature_cutoff=decision_feature_cutoff,
+        outcome_evaluation_cutoff=outcome_evaluation_cutoff,
         user_id=user_id,
         portfolio_id=portfolio_id,
     )
@@ -571,7 +619,15 @@ def _load_replay_rows(
         benchmark_rows = _load_future_benchmark(
             db, start_date=start_date, end_date=end_date, horizon=max(horizon_values)
         )
-        rows = _candidate_outcome_rows(cases, bars, benchmark_rows, horizon_values, calendar_dates, cutoff)
+        rows = _candidate_outcome_rows(
+            cases,
+            bars,
+            benchmark_rows,
+            horizon_values,
+            calendar_dates,
+            cutoff,
+            transaction_cost_model=transaction_cost_model,
+        )
         source_facts["future_bars"] = bars
         source_facts["future_benchmarks"] = benchmark_rows
     elif scope == "MEMORY_DECISION":
@@ -603,7 +659,14 @@ def _load_replay_rows(
     return facts, rows, sorted(source_ids)
 
 
-def load_backtest_rows(db: Session, *, run: BacktestRun, as_of: datetime | None = None) -> list[dict[str, Any]]:
+def load_backtest_rows(
+    db: Session,
+    *,
+    run: BacktestRun,
+    as_of: datetime | None = None,
+    decision_feature_cutoff: datetime | date | None = None,
+    outcome_evaluation_cutoff: datetime | date | None = None,
+) -> list[dict[str, Any]]:
     """Rebuild server-owned evaluation rows for calibration without accepting client facts."""
 
     horizons = validate_horizons(list(run.horizons_json or DEFAULT_HORIZONS), market=run.scope == "MARKET")
@@ -617,6 +680,9 @@ def load_backtest_rows(db: Session, *, run: BacktestRun, as_of: datetime | None 
         user_id=run.user_id,
         portfolio_id=run.portfolio_id,
         as_of=as_of,
+        decision_feature_cutoff=decision_feature_cutoff,
+        outcome_evaluation_cutoff=outcome_evaluation_cutoff,
+        transaction_cost_model=_run_transaction_cost_model(run),
     )
     return rows
 
@@ -779,6 +845,7 @@ def execute_backtest_run(db: Session, *, run: BacktestRun, as_of: datetime | Non
                 user_id=run.user_id,
                 portfolio_id=run.portfolio_id,
                 as_of=as_of,
+                transaction_cost_model=_run_transaction_cost_model(run),
             )
             frozen_source_ids = (run.data_manifest_json or {}).get("frozen_source_ids")
             if frozen_source_ids is not None and sorted(frozen_source_ids) != source_ids:
@@ -853,7 +920,7 @@ def execute_backtest_run(db: Session, *, run: BacktestRun, as_of: datetime | Non
                 "replay_mode": run.replay_mode,
                 "scope": run.scope,
                 "execution_basis": run.data_manifest_json.get("execution_model") if isinstance(run.data_manifest_json, dict) else None,
-                "transaction_cost_assumption": DEFAULT_TRANSACTION_COST_MODEL.as_dict(),
+                "transaction_cost_assumption": _run_transaction_cost_model(run).as_dict(),
                 "no_production_write": True,
             }
             run.completed_at = _now()
@@ -889,7 +956,7 @@ def execute_backtest_run(db: Session, *, run: BacktestRun, as_of: datetime | Non
         raise
 
 
-def run_backtest(
+def enqueue_backtest_run(
     db: Session,
     *,
     scope: str,
@@ -903,6 +970,8 @@ def run_backtest(
     random_seed: int = 0,
     bootstrap_iterations: int = 500,
 ) -> BacktestRun:
+    """Create a durable queued run for the server-owned research worker."""
+
     run = create_backtest_run(
         db,
         scope=scope,
@@ -917,6 +986,152 @@ def run_backtest(
         bootstrap_iterations=bootstrap_iterations,
     )
     db.commit()
+    return run
+
+
+def claim_queued_backtest_run(db: Session, *, run_id: int) -> BacktestRun | None:
+    """CAS-claim one queued run so two scheduler ticks cannot double-dispatch it."""
+
+    now = _now()
+    claimed = db.execute(
+        update(BacktestRun)
+        .where(
+            BacktestRun.id == run_id,
+            BacktestRun.status == "QUEUED",
+            BacktestRun.cancel_requested.is_(False),
+        )
+        .values(
+            status="RUNNING",
+            current_stage="DATA_AUDIT",
+            started_at=now,
+            last_heartbeat_at=now,
+            lease_expires_at=now + timedelta(minutes=LEASE_MINUTES),
+        )
+    ).rowcount
+    if not claimed:
+        return None
+    db.commit()
+    return db.get(BacktestRun, run_id)
+
+
+def _server_backtest_heartbeat(run_id: int, stop_event: threading.Event) -> None:
+    """Renew a worker lease independently from the long-running calculation."""
+
+    from ..database import SessionLocal
+
+    while not stop_event.wait(WORKER_HEARTBEAT_SECONDS):
+        heartbeat_db = SessionLocal()
+        try:
+            heartbeat_backtest_run(heartbeat_db, run_id=run_id)
+            heartbeat_db.commit()
+        except Exception:
+            heartbeat_db.rollback()
+        finally:
+            heartbeat_db.close()
+
+
+def run_backtest_worker(run_id: int) -> None:
+    """Execute one already claimed run in a server-owned session."""
+
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    stop_event = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    try:
+        run = db.get(BacktestRun, run_id)
+        if run is None:
+            return
+        if run.status == "QUEUED":
+            run = claim_queued_backtest_run(db, run_id=run_id)
+        if run is None or run.status != "RUNNING":
+            return
+        heartbeat_thread = threading.Thread(
+            target=_server_backtest_heartbeat,
+            args=(run_id, stop_event),
+            name=f"backtest-heartbeat-{run_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        execute_backtest_run(db, run=run)
+    except Exception:
+        # execute_backtest_run persists FAILED before re-raising.  A worker
+        # thread must not take down the scheduler that owns it.
+        return
+    finally:
+        stop_event.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
+        db.close()
+
+
+def dispatch_queued_backtest_runs(
+    db: Session,
+    *,
+    limit: int = MAX_BACKTEST_WORKERS_PER_TICK,
+    start_workers: bool = True,
+) -> list[int]:
+    """Reclaim stale work and dispatch each run through a CAS claim."""
+
+    if limit <= 0:
+        return []
+    reclaimed = reclaim_stale_backtest_runs(db)
+    if reclaimed:
+        db.commit()
+    queued_ids = list(db.execute(
+        select(BacktestRun.id)
+        .where(BacktestRun.status == "QUEUED", BacktestRun.cancel_requested.is_(False))
+        .order_by(BacktestRun.id.asc())
+        .limit(limit)
+    ).scalars())
+    dispatched: list[int] = []
+    for run_id in queued_ids:
+        if claim_queued_backtest_run(db, run_id=run_id) is None:
+            continue
+        dispatched.append(int(run_id))
+        if start_workers:
+            threading.Thread(
+                target=run_backtest_worker,
+                args=(int(run_id),),
+                name=f"backtest-worker-{run_id}",
+                daemon=True,
+            ).start()
+    return dispatched
+
+
+def run_backtest(
+    db: Session,
+    *,
+    scope: str,
+    replay_mode: str,
+    start_date: date,
+    end_date: date,
+    user_id: int | None = None,
+    portfolio_id: int | None = None,
+    horizons: Iterable[int] | None = None,
+    experiment_config: dict[str, Any] | None = None,
+    random_seed: int = 0,
+    bootstrap_iterations: int = 500,
+) -> BacktestRun:
+    """Synchronous compatibility helper for direct research callers/tests.
+
+    HTTP requests use :func:`enqueue_backtest_run` and the server worker;
+    keeping this explicit helper avoids changing the established Python API.
+    """
+
+    run = enqueue_backtest_run(
+        db,
+        scope=scope,
+        replay_mode=replay_mode,
+        start_date=start_date,
+        end_date=end_date,
+        user_id=user_id,
+        portfolio_id=portfolio_id,
+        horizons=horizons,
+        experiment_config=experiment_config,
+        random_seed=random_seed,
+        bootstrap_iterations=bootstrap_iterations,
+    )
     if run.status == "QUEUED":
         execute_backtest_run(db, run=run)
     return run
@@ -940,6 +1155,10 @@ def list_backtest_runs(db: Session, *, user_id: int | None = None, portfolio_id:
 
 __all__ = [
     "create_backtest_run",
+    "enqueue_backtest_run",
+    "claim_queued_backtest_run",
+    "run_backtest_worker",
+    "dispatch_queued_backtest_runs",
     "execute_backtest_run",
     "run_backtest",
     "load_backtest_rows",

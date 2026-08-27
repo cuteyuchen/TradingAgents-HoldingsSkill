@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache
 from ..market_models import TradingCalendar
-from .config import DEFAULT_TRANSACTION_COST_MODEL, TransactionCostModel
+from ..portfolio import ledger as portfolio_ledger
+from .config import TransactionCostModel, current_transaction_cost_model
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 VALID_QUALITY = {"VALID", "DEGRADED"}
@@ -79,23 +80,39 @@ def estimate_transaction_cost(
     price: float,
     quantity: float = 1.0,
     action: str = "BUY",
-    model: TransactionCostModel = DEFAULT_TRANSACTION_COST_MODEL,
-) -> dict[str, float]:
+    model: TransactionCostModel | None = None,
+) -> dict[str, Any]:
+    """Use the same commission/tax calculation as the Phase E ledger.
+
+    There is no authoritative historical slippage series in the repository,
+    so slippage is reported as unmodeled instead of being fabricated.
+    """
+
+    model = model or current_transaction_cost_model()
     price = max(0.0, float(price))
     quantity = max(0.0, float(quantity))
     notional = price * quantity
     is_sell = str(action or "BUY").upper() in SHORT_ACTIONS
-    fee_rate = model.sell_fee_rate if is_sell else model.buy_fee_rate
-    fees = notional * fee_rate
-    taxes = notional * model.sell_tax_rate if is_sell else 0.0
-    slippage = notional * model.slippage_bps / 10_000.0
+    total = portfolio_ledger.transaction_cost_estimate(
+        side="SELL" if is_sell else "BUY",
+        gross_amount=notional,
+        commission_bps=model.commission_bps,
+        minimum_commission=model.minimum_commission,
+        sell_tax_bps=model.sell_tax_bps,
+    )
+    fees = None
+    if model.commission_bps is not None and model.minimum_commission is not None:
+        fees = max(notional * model.commission_bps / 10_000.0, model.minimum_commission)
+    taxes = notional * model.sell_tax_bps / 10_000.0 if is_sell and model.sell_tax_bps is not None else 0.0
+    slippage = None
     return {
         "notional": notional,
         "fees": fees,
         "taxes": taxes,
         "slippage": slippage,
-        "total_cost": fees + taxes + slippage,
-        "cost_rate": (fees + taxes + slippage) / notional if notional else 0.0,
+        "total_cost": total,
+        "cost_rate": total / notional if total is not None and notional else None,
+        "slippage_not_modeled": model.slippage_not_modeled,
         "model_version": model.model_version,
     }
 
@@ -157,7 +174,7 @@ def calculate_forward_outcome(
     execution_basis: str = "EOD_CLOSE",
     target_dates: Iterable[date] | None = None,
     as_of: datetime | None = None,
-    transaction_cost_model: TransactionCostModel = DEFAULT_TRANSACTION_COST_MODEL,
+    transaction_cost_model: TransactionCostModel | None = None,
     intraday: bool = False,
 ) -> dict[str, Any]:
     """Calculate one horizon while keeping incomplete evidence explicitly degraded."""
@@ -168,7 +185,12 @@ def calculate_forward_outcome(
     action_upper = str(action or "BUY").upper()
     direction = -1.0 if action_upper in SHORT_ACTIONS else 1.0 if action_upper in LONG_ACTIONS else None
     materialised = sorted((_bar_dict(row) for row in bars), key=lambda row: (row["trade_date"] or date.min, row["id"] or 0))
-    materialised = [row for row in materialised if row["trade_date"] is not None and row["trade_date"] > decision_date]
+    if intraday:
+        # An intraday decision can use the same session's close for H1.  The
+        # daily high/low from that session remains excluded from MFE/MAE below.
+        materialised = [row for row in materialised if row["trade_date"] is not None and row["trade_date"] >= decision_date]
+    else:
+        materialised = [row for row in materialised if row["trade_date"] is not None and row["trade_date"] > decision_date]
     if cutoff is not None:
         materialised = [row for row in materialised if row["available_at"] is None or row["available_at"] <= cutoff]
     if not materialised:
@@ -179,6 +201,8 @@ def calculate_forward_outcome(
     if not price_basis_compatible(reference_price_basis, adjustment):
         return _blocked("PRICE_BASIS_MISMATCH", horizon=horizon, execution_basis=execution_basis, status="DEGRADED")
     target_dates_list = list(target_dates or [])
+    if intraday and target_dates_list and target_dates_list[0] != decision_date:
+        target_dates_list.insert(0, decision_date)
     if len(target_dates_list) < horizon:
         return _blocked("TRADING_CALENDAR_RANGE_MISSING", horizon=horizon, execution_basis=execution_basis)
     target_date = target_dates_list[horizon - 1]
@@ -194,7 +218,7 @@ def calculate_forward_outcome(
         return _blocked("PRICE_BASIS_MISMATCH", horizon=horizon, execution_basis=execution_basis, status="DEGRADED")
 
     first_bar = path[0]
-    if execution_basis == "NEXT_OPEN_PROXY":
+    if execution_basis == "NEXT_OPEN_PROXY" and not intraday:
         side = "SELL" if action_upper in SHORT_ACTIONS else "BUY"
         if _suspended(first_bar):
             return _blocked("SUSPENDED_NON_EXECUTABLE", horizon=horizon, execution_basis=execution_basis, status="DEGRADED", extra={"execution_status": "NON_EXECUTABLE"})
@@ -246,7 +270,7 @@ def calculate_forward_outcome(
     excess = raw_return - benchmark_return if benchmark_return is not None else None
     directional_excess = excess * direction if excess is not None and direction is not None else None
     cost = estimate_transaction_cost(price=execution_price, action=action_upper, model=transaction_cost_model)
-    net_return = raw_return - cost["cost_rate"] if action_upper not in SHORT_ACTIONS else raw_return - cost["cost_rate"]
+    net_return = raw_return - cost["cost_rate"] if cost["cost_rate"] is not None else None
     quality = "VALID" if not reason_codes and str(first_bar["quality_status"]).upper() == "VALID" else "DEGRADED"
     return {
         "status": quality,

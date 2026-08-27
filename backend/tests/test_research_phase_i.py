@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -104,7 +104,9 @@ def test_market_backtest_uses_future_all_a_index_without_live_io():
         _calendar(db, days)
         db.add(MarketScoreSnapshot(
             snapshot_id="score-80", market="CN", trade_date=days[0],
-            captured_at=datetime(2026, 6, 1, 10), display_score=80, raw_score=80,
+            # Persisted timestamps are UTC-naive in the application. 02:00 UTC
+            # is the 10:00 Shanghai close-checkpoint candidate.
+            captured_at=datetime(2026, 6, 1, 2, tzinfo=UTC), display_score=80, raw_score=80,
             regime="RISK_ON", quality_status="VALID",
         ))
         for index, day in enumerate(days):
@@ -150,7 +152,12 @@ def test_candidate_replay_is_censored_and_uses_server_owned_qfq_price():
             candidate_run_id=run.id, code="600000", security_type="STOCK", stage="ACTION", rank=1,
             score=88, opportunity_score=88, entry_score=80, portfolio_fit_score=75,
             decision_edge=6, risk_reward_ratio=1.7, data_coverage=0.9, quality_status="VALID",
-            lineage_json={"owner": "SERVER_QUOTE_SNAPSHOT", "price": 100, "price_basis": "QFQ"},
+            lineage_json={
+                "quote_snapshot_id": "quote-server-1",
+                "quote_price": 100,
+                "quote_price_basis": "QFQ",
+                "quote_provider": "server",
+            },
             entry_json={"entry_price": 90},
         ))
         for index, day in enumerate(days):

@@ -25,11 +25,16 @@ from ..research.service import (
     get_calibration_report,
     list_backtest_runs,
     list_calibration_reports,
-    run_backtest,
     run_calibration,
     serialize_calibration_report,
 )
-from ..research.runner import cancel_backtest_run, heartbeat_backtest_run, serialize_backtest_run
+from ..research.runner import (
+    cancel_backtest_run,
+    dispatch_queued_backtest_runs,
+    enqueue_backtest_run,
+    heartbeat_backtest_run,
+    serialize_backtest_run,
+)
 from ..v2_dependencies import get_current_user
 from ..v2_models import Portfolio, User
 
@@ -154,7 +159,7 @@ def create_backtest(
 ) -> dict[str, Any]:
     _portfolio(db, user_id=current_user.id, portfolio_id=payload.portfolio_id)
     try:
-        row = run_backtest(
+        row = enqueue_backtest_run(
             db,
             scope=payload.scope,
             replay_mode=payload.replay_mode,
@@ -167,6 +172,7 @@ def create_backtest(
             random_seed=payload.random_seed,
             bootstrap_iterations=payload.bootstrap_iterations,
         )
+        dispatch_queued_backtest_runs(db, limit=1)
         return serialize_backtest_run(row)
     except ValueError as exc:
         db.rollback()

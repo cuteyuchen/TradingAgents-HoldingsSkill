@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
@@ -80,19 +81,61 @@ class ResearchScope(StrEnum):
 
 @dataclass(frozen=True)
 class TransactionCostModel:
-    """Conservative, explicit cost assumptions used for simulated outcomes."""
+    """Snapshot of the authoritative Phase E broker cost configuration.
 
-    buy_fee_rate: float = 0.0003
-    sell_fee_rate: float = 0.0003
-    sell_tax_rate: float = 0.0005
-    slippage_bps: float = 5.0
-    model_version: str = "simple-cny-cost-v1"
+    Research is allowed to record a cost assumption, but it must not invent a
+    friction model that differs from live portfolio accounting.  Slippage is
+    intentionally optional: no persisted slippage model exists in Phase E.
+    """
+
+    commission_bps: float | None = None
+    minimum_commission: float | None = None
+    sell_tax_bps: float | None = None
+    slippage_bps: float | None = None
+    model_version: str = "phase-e-portfolio-ledger-v1"
+
+    @classmethod
+    def from_settings(cls) -> "TransactionCostModel":
+        from ..config import settings
+
+        return cls(
+            commission_bps=settings.PORTFOLIO_BROKER_COMMISSION_BPS,
+            minimum_commission=settings.PORTFOLIO_MINIMUM_COMMISSION,
+            sell_tax_bps=settings.PORTFOLIO_SELL_TAX_BPS,
+        )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any] | None) -> "TransactionCostModel":
+        """Restore a frozen run snapshot, falling back for legacy runs."""
+
+        if not isinstance(value, Mapping) or not any(
+            value.get(key) is not None
+            for key in ("commission_bps", "minimum_commission", "sell_tax_bps")
+        ):
+            return cls.from_settings()
+        return cls(
+            commission_bps=value.get("commission_bps"),
+            minimum_commission=value.get("minimum_commission"),
+            sell_tax_bps=value.get("sell_tax_bps"),
+            slippage_bps=value.get("slippage_bps"),
+            model_version=str(value.get("model_version") or "phase-e-portfolio-ledger-v1"),
+        )
+
+    @property
+    def slippage_not_modeled(self) -> bool:
+        return self.slippage_bps is None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "slippage_not_modeled": self.slippage_not_modeled}
 
 
 DEFAULT_TRANSACTION_COST_MODEL = TransactionCostModel()
+
+
+def current_transaction_cost_model() -> TransactionCostModel:
+    """Read broker settings at call time so research follows runtime config."""
+
+    return TransactionCostModel.from_settings()
 
 
 def normalise_replay_mode(value: str | ReplayMode) -> str:
@@ -184,6 +227,7 @@ __all__ = [
     "ResearchScope",
     "TransactionCostModel",
     "DEFAULT_TRANSACTION_COST_MODEL",
+    "current_transaction_cost_model",
     "normalise_replay_mode",
     "normalise_scope",
     "validate_horizons",

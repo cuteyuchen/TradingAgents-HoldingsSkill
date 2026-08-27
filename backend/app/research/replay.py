@@ -26,6 +26,7 @@ from .config import BACKTEST_ENGINE_VERSION, normalise_replay_mode, normalise_sc
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 _NETWORK_POLICY_DEPTH = 0
+MARKET_DAILY_CANONICAL_CLOSE = time(15, 0)
 
 
 class ReplayDataQualityError(ValueError):
@@ -92,6 +93,21 @@ def _as_of(value: datetime | date | None, *, fallback: date | None = None) -> da
     if fallback is not None:
         return datetime.combine(fallback, time(23, 59, 59))
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _local_wall_time(value: datetime | None) -> time | None:
+    if value is None:
+        return None
+    # SQLAlchemy DateTime columns are stored as UTC-naive values in this
+    # application. Treating a naive timestamp as Shanghai wall time would
+    # move the canonical 15:00 boundary by eight hours.
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(CHINA_TZ).time()
+
+
+def _is_intraday_decision(value: datetime | None) -> bool:
+    local_time = _local_wall_time(value)
+    return local_time is not None and local_time < MARKET_DAILY_CANONICAL_CLOSE
 
 
 def content_hash(value: Any) -> str:
@@ -210,6 +226,8 @@ def load_replay_facts(
     start_date: date,
     end_date: date,
     as_of: datetime | None = None,
+    decision_feature_cutoff: datetime | date | None = None,
+    outcome_evaluation_cutoff: datetime | date | None = None,
     user_id: int | None = None,
     portfolio_id: int | None = None,
 ) -> dict[str, list[Any]]:
@@ -218,6 +236,21 @@ def load_replay_facts(
     scope = normalise_scope(scope)
     mode = normalise_replay_mode(replay_mode)
     cutoff = _as_of(as_of, fallback=end_date)
+    feature_cutoff = (
+        _as_of(decision_feature_cutoff, fallback=end_date)
+        if decision_feature_cutoff is not None
+        else cutoff
+    )
+    # A historical decision cohort may be evaluated after the requested
+    # decision range.  This cutoff belongs to outcome maturity, not feature
+    # visibility, and is intentionally independent from ``feature_cutoff``.
+    outcome_cutoff = (
+        _as_of(outcome_evaluation_cutoff)
+        if outcome_evaluation_cutoff is not None
+        else _as_of(as_of)
+        if as_of is not None
+        else _as_of(None)
+    )
     if mode == "DETERMINISTIC_RECOMPUTE":
         # Recompute is permitted only when the caller supplies a fully PIT data
         # preparation set.  The current schema does not have that set.
@@ -229,20 +262,20 @@ def load_replay_facts(
             MarketScoreSnapshot.market == "CN",
             MarketScoreSnapshot.trade_date >= start_date,
             MarketScoreSnapshot.trade_date <= end_date,
-            MarketScoreSnapshot.captured_at <= cutoff,
+            MarketScoreSnapshot.captured_at <= feature_cutoff,
         ).order_by(MarketScoreSnapshot.trade_date.asc(), MarketScoreSnapshot.captured_at.asc(), MarketScoreSnapshot.id.asc())).scalars())
         metrics = list(db.execute(select(MarketMetricSnapshot).where(
             MarketMetricSnapshot.market == "CN",
             MarketMetricSnapshot.trade_date >= start_date,
             MarketMetricSnapshot.trade_date <= end_date,
-            MarketMetricSnapshot.captured_at <= cutoff,
+            MarketMetricSnapshot.captured_at <= feature_cutoff,
         ).order_by(MarketMetricSnapshot.trade_date.asc(), MarketMetricSnapshot.captured_at.asc(), MarketMetricSnapshot.id.asc())).scalars())
         index = list(db.execute(select(AllAMedianIndexDaily).where(
             AllAMedianIndexDaily.market == "CN",
             AllAMedianIndexDaily.trade_date >= start_date,
             AllAMedianIndexDaily.trade_date <= end_date,
             AllAMedianIndexDaily.available_at.is_not(None),
-            AllAMedianIndexDaily.available_at <= cutoff,
+            AllAMedianIndexDaily.available_at <= feature_cutoff,
             AllAMedianIndexDaily.quality_status.in_(("VALID", "DEGRADED")),
         ).order_by(AllAMedianIndexDaily.trade_date.asc(), AllAMedianIndexDaily.id.asc())).scalars())
         result.update({"market_scores": scores, "market_metrics": metrics, "benchmarks": index})
@@ -250,7 +283,7 @@ def load_replay_facts(
         query = select(CandidateRun).where(
             CandidateRun.trade_date >= start_date,
             CandidateRun.trade_date <= end_date,
-            CandidateRun.captured_at <= cutoff,
+            CandidateRun.captured_at <= feature_cutoff,
         )
         if user_id is not None:
             query = query.where(CandidateRun.user_id == user_id)
@@ -259,10 +292,10 @@ def load_replay_facts(
         runs = list(db.execute(query.order_by(CandidateRun.trade_date.asc(), CandidateRun.captured_at.asc(), CandidateRun.id.asc())).scalars())
         run_ids = [row.id for row in runs]
         scores = list(db.execute(select(CandidateScore).where(CandidateScore.candidate_run_id.in_(run_ids))).scalars()) if run_ids else []
-        result.update({"candidate_runs": runs, "candidate_scores": scores, "benchmarks": _benchmark_rows(db, start_date, end_date, cutoff)})
+        result.update({"candidate_runs": runs, "candidate_scores": scores, "benchmarks": _benchmark_rows(db, start_date, end_date, feature_cutoff)})
     elif scope == "PORTFOLIO_DECISION":
         query = select(PortfolioSnapshot).where(
-            PortfolioSnapshot.snapshot_time <= cutoff,
+            PortfolioSnapshot.snapshot_time <= feature_cutoff,
             PortfolioSnapshot.status.in_(("confirmed", "CONFIRMED")),
         )
         if user_id is not None:
@@ -270,7 +303,7 @@ def load_replay_facts(
         if portfolio_id is not None:
             query = query.where(PortfolioSnapshot.portfolio_id == portfolio_id)
         snapshots = [row for row in db.execute(query.order_by(PortfolioSnapshot.snapshot_time.asc(), PortfolioSnapshot.id.asc())).scalars() if start_date <= _date(row.snapshot_time) <= end_date]
-        risk_query = select(PortfolioRiskSnapshot).where(PortfolioRiskSnapshot.as_of <= cutoff)
+        risk_query = select(PortfolioRiskSnapshot).where(PortfolioRiskSnapshot.as_of <= feature_cutoff)
         if user_id is not None:
             risk_query = risk_query.where(PortfolioRiskSnapshot.user_id == user_id)
         if portfolio_id is not None:
@@ -281,7 +314,7 @@ def load_replay_facts(
         query = select(DecisionMemory).where(
             DecisionMemory.trade_date >= start_date,
             DecisionMemory.trade_date <= end_date,
-            DecisionMemory.available_at <= cutoff,
+            DecisionMemory.available_at <= feature_cutoff,
         )
         if user_id is not None:
             query = query.where(DecisionMemory.user_id == user_id)
@@ -292,7 +325,7 @@ def load_replay_facts(
         outcomes = list(db.execute(select(DecisionOutcome).where(
             DecisionOutcome.decision_memory_id.in_(memory_ids),
             DecisionOutcome.available_at.is_not(None),
-            DecisionOutcome.available_at <= cutoff,
+            DecisionOutcome.available_at <= outcome_cutoff,
         ).order_by(DecisionOutcome.target_trade_date.asc(), DecisionOutcome.id.asc())).scalars()) if memory_ids else []
         result.update({"decision_memories": memories, "decision_outcomes": outcomes})
     elif scope == "BAR_FACTOR":
@@ -301,7 +334,7 @@ def load_replay_facts(
             DailyBarCache.trade_date >= start_date,
             DailyBarCache.trade_date <= end_date,
             DailyBarCache.adjustment == "QFQ",
-            (DailyBarCache.available_at.is_(None) | (DailyBarCache.available_at <= cutoff)),
+            (DailyBarCache.available_at.is_(None) | (DailyBarCache.available_at <= feature_cutoff)),
         ).order_by(DailyBarCache.trade_date.asc(), DailyBarCache.code.asc(), DailyBarCache.id.asc())).scalars())
         result["daily_bars"] = bars
     return result
@@ -322,7 +355,7 @@ def replay_market_cases(facts: dict[str, list[Any]], *, replay_mode: str) -> lis
     mode = normalise_replay_mode(replay_mode)
     benchmarks = {row.trade_date: row for row in facts.get("benchmarks", [])}
     result = []
-    for row in facts.get("market_scores", []):
+    for row in canonical_market_score_rows(facts.get("market_scores", [])):
         score = row.display_score if row.display_score is not None else row.raw_score
         benchmark = benchmarks.get(row.trade_date)
         result.append(ReplayCase(
@@ -342,6 +375,7 @@ def replay_market_cases(facts: dict[str, list[Any]], *, replay_mode: str) -> lis
                 "benchmark_id": benchmark.id if benchmark else None,
                 "score_config_version": row.score_config_version,
                 "calculation_version": row.calculation_version,
+                "canonical_observation": "CLOSE_BEFORE_15_00",
             },
             quality_status=str(row.quality_status or "MISSING"),
             reason_codes=() if benchmark else ("BENCHMARK_UNAVAILABLE",),
@@ -361,7 +395,11 @@ def replay_candidate_cases(facts: dict[str, list[Any]], *, replay_mode: str) -> 
             continue
         benchmark = benchmarks.get(run.trade_date)
         lineage = row.lineage_json if isinstance(row.lineage_json, dict) else {}
-        reference_price = _server_owned_price(lineage, row.entry_json, run.metadata_json, run.quote_snapshot_id)
+        run_metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+        market = run_metadata.get("market") if isinstance(run_metadata.get("market"), dict) else {}
+        # ``entry_json`` is model-derived analysis output. It must never be a
+        # source of the research reference price.
+        reference_price = _server_owned_price(lineage, run.metadata_json)
         result.append(ReplayCase(
             trade_date=run.trade_date,
             as_of=_naive_utc(run.as_of) or _as_of(run.trade_date),
@@ -384,13 +422,31 @@ def replay_candidate_cases(facts: dict[str, list[Any]], *, replay_mode: str) -> 
                 "coverage": row.data_coverage,
                 "confidence": row.confidence,
                 "reference_price": reference_price,
-                "reference_price_basis": lineage.get("price_basis") or lineage.get("reference_price_basis"),
+                "reference_price_basis": _server_owned_basis(lineage, run.metadata_json),
                 "quote_snapshot_id": run.quote_snapshot_id,
                 "benchmark_index": benchmark.index_value if benchmark else None,
-                "market_regime": (run.metadata_json or {}).get("market_regime") if isinstance(run.metadata_json, dict) else None,
+                "market_regime": market.get("regime"),
                 "candidate_run_id": run.id,
                 "candidate_score_id": row.id,
                 "censored_sample": True,
+                "market_available": bool(market.get("available", False)),
+                "market_quality": market.get("quality_status") or "MISSING",
+                "market_frozen": bool(market.get("is_frozen")),
+                "funding_mode": getattr(row, "funding_mode", None),
+                "quote_quality": lineage.get("quote_quality") or lineage.get("quality_status") or "MISSING",
+                "quote_is_proxy": bool(
+                    lineage.get("quote_is_proxy")
+                    or lineage.get("source") == "daily_bar_cache_close_proxy"
+                ),
+                "limit_up": "PRICE_LIMIT_UP" in (getattr(row, "risk_flags_json", None) or []),
+                "limit_down": "PRICE_LIMIT_DOWN" in (getattr(row, "risk_flags_json", None) or []),
+                "edge_vs_no_action": getattr(row, "edge_vs_no_action", None),
+                "edge_vs_current_holdings": getattr(row, "edge_vs_current_holdings", None),
+                "components": getattr(row, "components_json", None) or {},
+                "portfolio_fit_components": getattr(row, "portfolio_fit_json", None) or {},
+                "hard_cap_violation": bool((getattr(row, "portfolio_fit_json", None) or {}).get("hard_cap_violation")) if isinstance(getattr(row, "portfolio_fit_json", None), dict) else False,
+                "held_baseline": (getattr(row, "comparison_json", None) or {}).get("held_baseline") if isinstance(getattr(row, "comparison_json", None), dict) else None,
+                "intraday": _is_intraday_decision(getattr(run, "as_of", None)),
             },
             quality_status=str(row.quality_status or run.quality_status or "MISSING"),
             reason_codes=("CENSORED_PRODUCTION_SAMPLE",) + (() if benchmark else ("BENCHMARK_UNAVAILABLE",)),
@@ -398,6 +454,41 @@ def replay_candidate_cases(facts: dict[str, list[Any]], *, replay_mode: str) -> 
             coverage=row.data_coverage,
         ))
     return result
+
+
+def canonical_market_score_rows(rows: Iterable[Any]) -> list[Any]:
+    """Choose one reliable close checkpoint per trade date for daily studies."""
+
+    grouped: dict[date, list[Any]] = {}
+    for row in rows:
+        trade_date = _date(getattr(row, "trade_date", None))
+        if trade_date is None:
+            continue
+        grouped.setdefault(trade_date, []).append(row)
+    selected: list[Any] = []
+    for trade_date, candidates in grouped.items():
+        reliable = [
+            row for row in candidates
+            if str(getattr(row, "quality_status", "VALID") or "VALID").upper() in {"VALID", "DEGRADED"}
+        ] or candidates
+        before_close = [
+            row for row in reliable
+            if (_local_wall_time(getattr(row, "captured_at", None)) or time.min) <= MARKET_DAILY_CANONICAL_CLOSE
+        ]
+        # Daily regime calibration is a close-checkpoint study. If the
+        # checkpoint is absent, omit the day instead of promoting an
+        # after-close observation into the daily cohort.
+        if not before_close:
+            continue
+        pool = before_close
+        selected.append(max(
+            pool,
+            key=lambda row: (
+                _naive_utc(getattr(row, "captured_at", None)) or datetime.min,
+                int(getattr(row, "id", 0) or 0),
+            ),
+        ))
+    return sorted(selected, key=lambda row: (_date(getattr(row, "trade_date", None)) or date.min, int(getattr(row, "id", 0) or 0)))
 
 
 def replay_memory_cases(facts: dict[str, list[Any]], *, replay_mode: str) -> list[ReplayCase]:
@@ -485,7 +576,13 @@ def _server_owned_price(*values: Any) -> float | None:
             or value.get("basis")
             or ""
         ).upper()
-        if not ownership or not any(token in ownership for token in ("SERVER", "TRUSTED", "QUOTE", "SNAPSHOT")):
+        # Candidate persistence also records a server-owned quote as lineage
+        # fields (quote_snapshot_id + quote_price), without an ``owner`` key.
+        lineage_quote = bool(
+            value.get("quote_snapshot_id")
+            and any(value.get(key) is not None for key in ("quote_price", "quote_price_basis", "quote_provider", "quote_provenance"))
+        )
+        if not lineage_quote and (not ownership or not any(token in ownership for token in ("SERVER", "TRUSTED", "QUOTE", "SNAPSHOT"))):
             continue
         for key in ("server_owned_price", "quote_price", "price", "reference_price"):
             candidate = value.get(key)
@@ -503,6 +600,36 @@ def _server_owned_price(*values: Any) -> float | None:
     return None
 
 
+def _server_owned_basis(*values: Any) -> str | None:
+    """Return a price basis only when it belongs to the trusted quote."""
+
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        ownership = str(
+            value.get("owner")
+            or value.get("ownership")
+            or value.get("provenance")
+            or value.get("source")
+            or value.get("basis")
+            or ""
+        ).upper()
+        lineage_quote = bool(
+            value.get("quote_snapshot_id")
+            and any(value.get(key) is not None for key in ("quote_price", "quote_price_basis", "quote_provider", "quote_provenance"))
+        )
+        if lineage_quote or (ownership and any(token in ownership for token in ("SERVER", "TRUSTED", "QUOTE", "SNAPSHOT"))):
+            basis = value.get("price_basis") or value.get("reference_price_basis") or value.get("quote_price_basis")
+            if basis:
+                return str(basis)
+            nested = value.get("quote") or value.get("quote_snapshot") or value.get("server_quote")
+            if isinstance(nested, dict):
+                nested_basis = _server_owned_basis(nested)
+                if nested_basis:
+                    return nested_basis
+    return None
+
+
 __all__ = [
     "ReplayCase",
     "ReplayDataQualityError",
@@ -513,6 +640,7 @@ __all__ = [
     "content_hash",
     "validate_point_in_time",
     "load_replay_facts",
+    "canonical_market_score_rows",
     "replay_market_cases",
     "replay_candidate_cases",
     "replay_memory_cases",

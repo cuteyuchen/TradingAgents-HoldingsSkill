@@ -318,6 +318,19 @@ def _run_daily_operations(db: Session, *, now_utc: datetime, portfolios: list[Po
             logger.exception("daily_workflow portfolio=%s failed", portfolio.id)
 
 
+def _dispatch_research_backtests(db: Session) -> None:
+    """Keep research jobs server-owned and restart-safe alongside the scheduler."""
+
+    from ..research.runner import dispatch_queued_backtest_runs
+
+    try:
+        dispatched = dispatch_queued_backtest_runs(db)
+        if dispatched:
+            logger.info("research backtests dispatched=%s", dispatched)
+    except Exception:
+        logger.exception("research backtest worker dispatch failed")
+
+
 def _sync_monitor_lifecycle(now_utc: datetime, *, calendar: TradingCalendarService) -> None:
     """Restart-safe monitor lifecycle driven by the same scheduler clock."""
 
@@ -451,6 +464,7 @@ def tick_schedules() -> None:
         rows = db.query(Schedule).filter(Schedule.enabled.is_(True)).all()
         now_utc = datetime.now(UTC)
         local = now_utc.astimezone(CHINA_TZ)
+        _dispatch_research_backtests(db)
         calendar = TradingCalendarService(db)
         _sync_monitor_lifecycle(now_utc, calendar=calendar)
         calendar_row = calendar.row_for(local.date())
@@ -525,6 +539,11 @@ def start_scheduler() -> None:
     global _scheduler
     if not settings.SCHEDULER_ENABLED or _scheduler is not None:
         return
+    try:
+        with SessionLocal() as db:
+            _dispatch_research_backtests(db)
+    except Exception:
+        logger.exception("initial research backtest worker dispatch failed")
     _scheduler = BackgroundScheduler(timezone="UTC", daemon=True)
     _scheduler.add_job(
         tick_schedules,
