@@ -7,7 +7,7 @@
 - Decision Contract: `2.4.0`
 - Evaluation Schema: `1.0.0`
 - Migration: `20260827_0017_forward_observation`
-- Final SHA: `5033d34`
+- Final implementation SHA: `5f37d82` (the acceptance-document update is a metadata-only follow-up commit)
 
 ## Scope
 
