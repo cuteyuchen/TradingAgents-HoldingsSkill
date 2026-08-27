@@ -6,15 +6,15 @@ import threading
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..decision_contract import canonicalize_analysis_mode
 from ..memory.models import DailyReviewRun, DecisionMemory, DecisionOutcome
-from ..market_engine_models import DailyBarCache
+from ..market_engine_models import DailyBarCache, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
-from ..market_runtime_models import ProviderHealth
+from ..market_runtime_models import MarketSnapshot, ProviderHealth
 from ..portfolio_models import TradeLedgerEntry, TradeLedgerRevision
 from ..memory.review import run_daily_review
 from ..config import settings
@@ -23,14 +23,21 @@ from ..services.analysis_engine import run_analysis_job
 from ..services.realtime_monitor import get_realtime_monitor
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
 from ..v2_models import AnalysisJob, AnalysisRun, Portfolio, PortfolioSnapshot
-from .config import ANALYSIS_CHECKPOINTS, CHECKPOINTS, CHECKPOINT_BY_KEY, WORKFLOW_VERSION
+from .config import (
+    ANALYSIS_CHECKPOINTS,
+    ANALYSIS_CLAIM_LEASE,
+    CHECKPOINTS,
+    CHECKPOINT_BY_KEY,
+    SNAPSHOT_HOOK_LOOKBACK,
+    WORKFLOW_VERSION,
+)
 from .models import DailyOperationalCheckpoint, DailyOperationalRun
 from .timeline import WorkflowState, base_timeline, checkpoint_moment, china_time, derive_workflow_state
 
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_TERMINAL_STATUSES = frozenset({
-    "SUCCESS", "FAILED", "REUSED", "SKIPPED", "MISSED", "BLOCKED", "NOT_AVAILABLE",
+    "SUCCESS", "FAILED", "REUSED", "SKIPPED", "MISSED", "BLOCKED", "NOT_AVAILABLE", "DEGRADED",
 })
 JOB_STATUS_MAP = {
     "queued": "RUNNING",
@@ -48,6 +55,18 @@ def _naive_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _claim_moment(value: datetime | None) -> datetime:
+    return _naive_utc(value) or datetime.now(UTC).replace(tzinfo=None)
+
+
+def _checkpoint_lease_expired(claim: DailyOperationalCheckpoint, *, now: datetime) -> bool:
+    expires_at = _naive_utc(claim.lease_expires_at)
+    if expires_at is not None:
+        return expires_at <= now
+    claimed_at = _naive_utc(claim.claimed_at)
+    return claimed_at is None or claimed_at + ANALYSIS_CLAIM_LEASE <= now
 
 
 def _day_bounds(local_date: date) -> tuple[datetime, datetime]:
@@ -146,20 +165,24 @@ def checkpoint_idempotency_key(portfolio_id: int, trade_date: date, checkpoint: 
     return f"phase-h:{portfolio_id}:{trade_date.isoformat()}:{checkpoint}"
 
 
-def claim_checkpoint(
+def _claim_checkpoint(
     db: Session,
     *,
     portfolio: Portfolio,
     trade_date: date,
     checkpoint_name: str,
-) -> tuple[DailyOperationalCheckpoint, bool]:
+    now: datetime | None = None,
+) -> tuple[DailyOperationalCheckpoint, bool, bool]:
     """Claim one checkpoint with a database-enforced uniqueness boundary.
 
     The savepoint keeps a uniqueness collision local to this claim. A losing
     worker can therefore report an already-owned checkpoint without rolling
-    back unrelated scheduler state in its outer transaction.
+    back unrelated scheduler state in its outer transaction.  A stale
+    non-terminal claim is reclaimed in place, so a restart never creates a
+    second checkpoint row.
     """
 
+    moment = _claim_moment(now)
     query = select(DailyOperationalCheckpoint).where(
         DailyOperationalCheckpoint.portfolio_id == portfolio.id,
         DailyOperationalCheckpoint.trade_date == trade_date,
@@ -168,7 +191,41 @@ def claim_checkpoint(
     )
     existing = db.execute(query).scalar_one_or_none()
     if existing is not None:
-        return existing, False
+        status = str(existing.status or "").upper()
+        if status in CHECKPOINT_TERMINAL_STATUSES or not _checkpoint_lease_expired(existing, now=moment):
+            return existing, False, False
+        stale_condition = (
+            (DailyOperationalCheckpoint.lease_expires_at.is_not(None) & (DailyOperationalCheckpoint.lease_expires_at <= moment))
+            | (
+                DailyOperationalCheckpoint.lease_expires_at.is_(None)
+                & (
+                    DailyOperationalCheckpoint.claimed_at.is_(None)
+                    | (DailyOperationalCheckpoint.claimed_at <= moment - ANALYSIS_CLAIM_LEASE)
+                )
+            )
+        )
+        result = db.execute(
+            update(DailyOperationalCheckpoint)
+            .where(
+                DailyOperationalCheckpoint.id == existing.id,
+                DailyOperationalCheckpoint.status.not_in(tuple(CHECKPOINT_TERMINAL_STATUSES)),
+                stale_condition,
+            )
+            .values(
+                status="CLAIMED",
+                claimed_at=moment,
+                lease_expires_at=moment + ANALYSIS_CLAIM_LEASE,
+                completed_at=None,
+                attempt_count=func.coalesce(DailyOperationalCheckpoint.attempt_count, 0) + 1,
+                last_error=None,
+            )
+        )
+        if result.rowcount:
+            db.flush()
+            refreshed = db.execute(select(DailyOperationalCheckpoint).where(DailyOperationalCheckpoint.id == existing.id)).scalar_one()
+            return refreshed, True, True
+        refreshed = db.execute(query).scalar_one()
+        return refreshed, False, False
     candidate = DailyOperationalCheckpoint(
         user_id=portfolio.user_id,
         portfolio_id=portfolio.id,
@@ -177,17 +234,47 @@ def claim_checkpoint(
         workflow_version=WORKFLOW_VERSION,
         status="CLAIMED",
         metadata_json={},
+        claimed_at=moment,
+        lease_expires_at=moment + ANALYSIS_CLAIM_LEASE,
+        completed_at=None,
+        attempt_count=1,
     )
     try:
         with db.begin_nested():
             db.add(candidate)
             db.flush()
-        return candidate, True
+        return candidate, True, False
     except IntegrityError:
         existing = db.execute(query).scalar_one_or_none()
         if existing is None:
             raise
-        return existing, False
+        return _claim_checkpoint(
+            db,
+            portfolio=portfolio,
+            trade_date=trade_date,
+            checkpoint_name=checkpoint_name,
+            now=moment,
+        )
+
+
+def claim_checkpoint(
+    db: Session,
+    *,
+    portfolio: Portfolio,
+    trade_date: date,
+    checkpoint_name: str,
+    now: datetime | None = None,
+) -> tuple[DailyOperationalCheckpoint, bool]:
+    """Backward-compatible two-value checkpoint claim API."""
+
+    claim, owned, _reclaimed = _claim_checkpoint(
+        db,
+        portfolio=portfolio,
+        trade_date=trade_date,
+        checkpoint_name=checkpoint_name,
+        now=now,
+    )
+    return claim, owned
 
 
 def _finish_checkpoint_claim(
@@ -202,7 +289,13 @@ def _finish_checkpoint_claim(
 ) -> None:
     claim.status = status
     claim.job_id = job_id
-    claim.completed_at = _naive_utc(local)
+    if status in CHECKPOINT_TERMINAL_STATUSES:
+        claim.completed_at = _naive_utc(local)
+        claim.lease_expires_at = None
+    else:
+        claim.completed_at = None
+        claim.claimed_at = _naive_utc(local) or claim.claimed_at
+        claim.lease_expires_at = (_naive_utc(local) or datetime.now(UTC).replace(tzinfo=None)) + ANALYSIS_CLAIM_LEASE
     claim.last_error = error
     payload = dict(claim.metadata_json or {})
     if reason:
@@ -220,10 +313,13 @@ def _admit_checkpoint_job(
     checkpoint: str,
     mode: str,
     now: datetime,
+    reclaim: bool = False,
 ) -> AnalysisJobAdmission | None:
     key = checkpoint_idempotency_key(portfolio.id, trade_date, checkpoint)
     existing = db.execute(select(AnalysisJob).where(AnalysisJob.idempotency_key == key)).scalar_one_or_none()
     if existing is not None:
+        if reclaim and str(existing.status).lower() in {"queued", "retrying"}:
+            return AnalysisJobAdmission(existing, should_start=True, source="reclaimed")
         source = "idempotency"
         return AnalysisJobAdmission(existing, should_start=False, source=source)
     existing = _checkpoint_job(
@@ -234,6 +330,8 @@ def _admit_checkpoint_job(
         as_of=now,
     )
     if existing is not None:
+        if reclaim and str(existing.status).lower() in {"queued", "retrying"}:
+            return AnalysisJobAdmission(existing, should_start=True, source="reclaimed")
         return AnalysisJobAdmission(existing, should_start=False, source="existing_schedule")
     active = active_portfolio_analysis(db, user_id=portfolio.user_id, portfolio_id=portfolio.id)
     if active is not None:
@@ -278,8 +376,12 @@ def _checkpoint_status(
     if local < scheduled:
         return "PENDING", False
     existing = state.get(checkpoint.key)
-    if isinstance(existing, dict) and existing.get("status") in {*CHECKPOINT_TERMINAL_STATUSES, "RUNNING"}:
-        return str(existing["status"]), False
+    if isinstance(existing, dict):
+        status = str(existing.get("status") or "").upper()
+        if status in CHECKPOINT_TERMINAL_STATUSES:
+            return status, False
+        if status in {"CLAIMED", "RUNNING"}:
+            return status, True
     catch_up = checkpoint.catch_up_minutes
     if catch_up is not None and local > scheduled + timedelta(minutes=catch_up):
         return "MISSED", True
@@ -401,6 +503,81 @@ def _run_monitor_lifecycle(local: datetime) -> dict[str, Any]:
     return {"status": "RUNNING" if active and monitor.is_running() else "PAUSED" if time(11, 30) <= current < time(13, 0) else "STOPPED", "running": monitor.is_running()}
 
 
+def _snapshot_hook_result(
+    db: Session,
+    *,
+    trade_date: date,
+    checkpoint: Any,
+    local: datetime,
+) -> tuple[str, str, dict[str, Any]]:
+    """Project an existing persisted snapshot into a hook checkpoint.
+
+    The operating timeline owns the checkpoint, but it does not own a market
+    calculation.  A hook is successful only when a compatible persisted fact
+    is already available in its bounded observation window.
+    """
+
+    scheduled_local = local.replace(
+        hour=checkpoint.at.hour,
+        minute=checkpoint.at.minute,
+        second=0,
+        microsecond=0,
+    )
+    scheduled_at = _naive_utc(scheduled_local)
+    observed_until = min(
+        scheduled_local + timedelta(minutes=checkpoint.catch_up_minutes or 0),
+        local,
+    )
+    upper = _naive_utc(observed_until)
+    lower = scheduled_at - SNAPSHOT_HOOK_LOOKBACK
+
+    score_rows = db.execute(select(MarketScoreSnapshot).where(
+        MarketScoreSnapshot.market == "CN",
+        MarketScoreSnapshot.trade_date == trade_date,
+        MarketScoreSnapshot.captured_at >= lower,
+        MarketScoreSnapshot.captured_at <= upper,
+        MarketScoreSnapshot.quality_status.in_(("VALID", "DEGRADED")),
+        MarketScoreSnapshot.is_frozen.is_(False),
+        MarketScoreSnapshot.display_score.is_not(None),
+    ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc())).scalars().all()
+    if score_rows:
+        row = min(
+            score_rows,
+            key=lambda candidate: (
+                abs((_naive_utc(candidate.captured_at) - scheduled_at).total_seconds()),
+                -_naive_utc(candidate.captured_at).timestamp(),
+            ),
+        )
+        return "SUCCESS", "PERSISTED_MARKET_SCORE_SNAPSHOT", {
+            "snapshot_id": row.snapshot_id,
+            "snapshot_source": "market_score_snapshot",
+            "snapshot_quality_status": str(row.quality_status).upper(),
+        }
+
+    metadata_rows = db.execute(select(MarketSnapshot).where(
+        MarketSnapshot.market == "CN",
+        MarketSnapshot.trade_date == trade_date,
+        MarketSnapshot.completed_at >= lower,
+        MarketSnapshot.completed_at <= upper,
+        MarketSnapshot.quality_status.in_(("VALID", "DEGRADED")),
+    ).order_by(MarketSnapshot.completed_at.desc(), MarketSnapshot.id.desc())).scalars().all()
+    if metadata_rows:
+        row = min(
+            metadata_rows,
+            key=lambda candidate: (
+                abs((_naive_utc(candidate.completed_at) - scheduled_at).total_seconds()),
+                -_naive_utc(candidate.completed_at).timestamp(),
+            ),
+        )
+        return "SUCCESS", "PERSISTED_MARKET_SNAPSHOT", {
+            "snapshot_id": row.snapshot_id,
+            "snapshot_source": "market_snapshot",
+            "snapshot_quality_status": str(row.quality_status).upper(),
+        }
+
+    return "NOT_AVAILABLE", "HOOK_ONLY", {}
+
+
 def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | None = None) -> dict[str, Any]:
     local = china_time(now)
     trade_date = local.date()
@@ -423,15 +600,16 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
         # Daily Review is claimed by the existing review scheduler once a
         # review row exists; keep its pre-claim state visible as PENDING.
         if checkpoint.key != "daily_review":
-            claim, owned = claim_checkpoint(
+            claim, owned, reclaimed = _claim_checkpoint(
                 db,
                 portfolio=portfolio,
                 trade_date=trade_date,
                 checkpoint_name=checkpoint.key,
+                now=local,
             )
-            if not owned:
+            if not owned and not reclaimed:
                 prior_status = str(claim.status or "CLAIMED").upper()
-                visible_status = prior_status if prior_status in CHECKPOINT_TERMINAL_STATUSES else "REUSED"
+                visible_status = prior_status if prior_status in CHECKPOINT_TERMINAL_STATUSES else "RUNNING"
                 _checkpoint_record(
                     state,
                     key=checkpoint.key,
@@ -443,7 +621,8 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
                 continue
         else:
             claim = None
-        if current == "MISSED":
+            reclaimed = False
+        if current == "MISSED" and not reclaimed:
             _checkpoint_record(state, key=checkpoint.key, local=local, status="MISSED", reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
             if claim is not None:
                 _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
@@ -483,15 +662,28 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
             _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="MONITOR_LIFECYCLE_SCHEDULER_OWNED", metadata={"monitor": monitor_state})
             _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="MONITOR_LIFECYCLE_SCHEDULER_OWNED", metadata={"monitor": monitor_state})
         elif checkpoint.key == "morning_snapshot":
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="MORNING_SNAPSHOT_HOOK")
-            _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="MORNING_SNAPSHOT_HOOK")
+            hook_status, hook_reason, hook_metadata = _snapshot_hook_result(
+                db,
+                trade_date=trade_date,
+                checkpoint=checkpoint,
+                local=local,
+            )
+            _checkpoint_record(state, key=checkpoint.key, local=local, status=hook_status, reason=hook_reason, metadata=hook_metadata)
+            _finish_checkpoint_claim(claim, status=hook_status, local=local, reason=hook_reason, metadata=hook_metadata)
         elif checkpoint.key == "late_caution":
             _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="LATE_SESSION_REVIEW_ONLY")
             _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="LATE_SESSION_REVIEW_ONLY")
         elif checkpoint.key == "market_close":
             monitor_state = _run_monitor_lifecycle(local)
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="CLOSE_SNAPSHOT_HOOK", metadata={"monitor": monitor_state})
-            _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="CLOSE_SNAPSHOT_HOOK", metadata={"monitor": monitor_state})
+            hook_status, hook_reason, hook_metadata = _snapshot_hook_result(
+                db,
+                trade_date=trade_date,
+                checkpoint=checkpoint,
+                local=local,
+            )
+            hook_metadata = {**hook_metadata, "monitor": monitor_state}
+            _checkpoint_record(state, key=checkpoint.key, local=local, status=hook_status, reason=hook_reason, metadata=hook_metadata)
+            _finish_checkpoint_claim(claim, status=hook_status, local=local, reason=hook_reason, metadata=hook_metadata)
         elif checkpoint.key == "daily_review":
             review = db.execute(select(DailyReviewRun).where(
                 DailyReviewRun.user_id == portfolio.user_id,
@@ -510,15 +702,17 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
         current, actionable = _checkpoint_status(checkpoint=checkpoint, local=local, state=state)
         if not actionable:
             continue
-        claim, owned = claim_checkpoint(
+        claim, owned, reclaimed = _claim_checkpoint(
             db,
             portfolio=portfolio,
             trade_date=trade_date,
             checkpoint_name=checkpoint.key,
+            now=local,
         )
-        if not owned:
+        if not owned and not reclaimed:
             prior_status = str(claim.status or "CLAIMED").upper()
-            visible_status = prior_status if prior_status in CHECKPOINT_TERMINAL_STATUSES else "REUSED"
+            job = db.get(AnalysisJob, claim.job_id) if claim.job_id else None
+            visible_status = prior_status if prior_status in CHECKPOINT_TERMINAL_STATUSES else _job_status(job) or "RUNNING"
             state[checkpoint.key] = {
                 "status": visible_status,
                 "job_id": claim.job_id,
@@ -529,7 +723,7 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
                 "checkpoint_claim_id": claim.id,
             }
             continue
-        if current == "MISSED":
+        if current == "MISSED" and not reclaimed:
             state[checkpoint.key] = {"status": "MISSED", "scheduled_at": checkpoint.at.strftime("%H:%M"), "updated_at": local.isoformat()}
             _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
             continue
@@ -540,6 +734,7 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
             checkpoint=checkpoint.key,
             mode=checkpoint.mode or "standard",
             now=local,
+            reclaim=reclaimed,
         )
         if admission is None:
             state[checkpoint.key] = {"status": "BLOCKED", "reason": "confirmed_snapshot_not_found", "updated_at": local.isoformat()}

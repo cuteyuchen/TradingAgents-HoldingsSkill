@@ -43,3 +43,6 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
     assert metadata["decision_contract_version"] == "2.4.0"
     assert metadata["contract_keys"]["candidate_max"] == 3
     assert '"default_portfolio_action": "no_action"' in prompt
+    assert runtime["notification_semantics"]["severity"] == [
+        "INFO", "IMPORTANT", "ACTION_REQUIRED", "CRITICAL"
+    ]

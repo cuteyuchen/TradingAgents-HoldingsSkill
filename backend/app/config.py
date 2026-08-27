@@ -65,6 +65,15 @@ class Settings:
     SCHEDULER_ENABLED: bool = _bool_env("SCHEDULER_ENABLED", "true")
     SCHEDULER_INTERVAL_SECONDS: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
     CHECKPOINT_CATCHUP_MINUTES: int = max(0, int(os.getenv("CHECKPOINT_CATCHUP_MINUTES", "15")))
+    ANALYSIS_CLAIM_LEASE_MINUTES: int = max(
+        1, int(os.getenv("ANALYSIS_CLAIM_LEASE_MINUTES", "10"))
+    )
+    REVIEW_CLAIM_LEASE_MINUTES: int = max(
+        1, int(os.getenv("REVIEW_CLAIM_LEASE_MINUTES", "10"))
+    )
+    NOTIFICATION_DISPATCH_LEASE_MINUTES: int = max(
+        1, int(os.getenv("NOTIFICATION_DISPATCH_LEASE_MINUTES", "5"))
+    )
     NOTIFICATION_DEFAULT_COOLDOWN_MINUTES: int = max(
         0, int(os.getenv("NOTIFICATION_DEFAULT_COOLDOWN_MINUTES", "60"))
     )

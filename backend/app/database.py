@@ -139,6 +139,26 @@ def _apply_lightweight_migrations() -> None:
                 conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN last_refreshed_at DATETIME"))
             if "refresh_count" not in review_columns:
                 conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN refresh_count INTEGER NOT NULL DEFAULT 0"))
+            if "lease_expires_at" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN lease_expires_at DATETIME"))
+            if "attempt_count" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1"))
+
+    if inspector.has_table("daily_operational_checkpoints"):
+        checkpoint_columns = {c["name"] for c in inspector.get_columns("daily_operational_checkpoints")}
+        if "lease_expires_at" not in checkpoint_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE daily_operational_checkpoints ADD COLUMN lease_expires_at DATETIME"
+                ))
+
+    if inspector.has_table("operating_notifications"):
+        notification_columns = {c["name"] for c in inspector.get_columns("operating_notifications")}
+        if "lease_expires_at" not in notification_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE operating_notifications ADD COLUMN lease_expires_at DATETIME"
+                ))
 
 
 def _repair_historical_pnl_values() -> None:

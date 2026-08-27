@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.market_engine_models import MarketScoreSnapshot
 from app.market_models import TradingCalendar
 from app.market_runtime_models import ProviderHealth
 from app.memory.models import DailyReviewRun, DecisionMemory
@@ -19,14 +20,17 @@ from app.operations.dashboard import build_daily_dashboard
 from app.operations.models import DailyOperationalCheckpoint, DailyOperationalRun, OperatingNotification
 from app.operations.notifications import (
     OperatingNotificationEvent,
+    collect_material_events,
     dispatch_material_events,
     dispatch_operating_event,
     list_operating_notifications,
     mark_operating_notification_read,
 )
+from app.portfolio_models import PortfolioRiskSnapshot
 from app.routers.operations_v3 import _portfolio
+from app.services import scheduler as scheduler_service
 from app.services.trading_calendar import CHINA_TZ
-from app.v2_models import AnalysisJob, AnalysisRun, NotificationChannel, Portfolio, PortfolioSnapshot, User
+from app.v2_models import AnalysisJob, AnalysisRun, NotificationChannel, Portfolio, PortfolioSnapshot, Schedule, User
 
 
 def _db() -> Session:
@@ -269,6 +273,54 @@ def test_checkpoint_claim_survives_restart_without_duplicate_job(monkeypatch):
         restarted.close()
 
 
+def test_stale_analysis_claim_reclaims_same_queued_job_after_restart(monkeypatch):
+    db = _db()
+    bind = db.bind
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        portfolio_id = portfolio.id
+        _FakeThread.starts = []
+        monkeypatch.setattr(workflow.threading, "Thread", _FakeThread)
+        first = workflow.run_due_checkpoints(
+            db,
+            portfolio=portfolio,
+            now=_local(date(2026, 8, 20), 9, 40),
+        )
+        job_id = first["started_jobs"][0]
+        claim = db.query(DailyOperationalCheckpoint).filter_by(
+            portfolio_id=portfolio.id,
+            trade_date=date(2026, 8, 20),
+            checkpoint_name="09:35",
+        ).one()
+        claim.lease_expires_at = _utc_naive(_local(date(2026, 8, 20), 9, 39))
+        db.commit()
+        assert claim.completed_at is None
+    finally:
+        db.close()
+
+    restarted = Session(bind=bind)
+    try:
+        _FakeThread.starts = []
+        result = workflow.run_due_checkpoints(
+            restarted,
+            portfolio=restarted.get(Portfolio, portfolio_id),
+            now=_local(date(2026, 8, 20), 9, 49),
+        )
+        claim = restarted.query(DailyOperationalCheckpoint).filter_by(
+            portfolio_id=portfolio_id,
+            trade_date=date(2026, 8, 20),
+            checkpoint_name="09:35",
+        ).one()
+        assert result["started_jobs"] == [job_id]
+        assert _FakeThread.starts == [(job_id,)]
+        assert restarted.query(AnalysisJob).count() == 1
+        assert claim.job_id == job_id
+        assert claim.attempt_count == 2
+        assert claim.completed_at is None
+    finally:
+        restarted.close()
+
+
 def test_monitor_lifecycle_recovers_then_pauses_for_lunch_and_stops_at_close(monkeypatch):
     class Monitor:
         def __init__(self):
@@ -507,6 +559,63 @@ def test_notification_is_deduped_without_webhook_delivery():
         second = dispatch_operating_event(db, event, now=_local(date(2026, 8, 20), 10, 1))
         assert first["status"] == "DASHBOARD_ONLY"
         assert second["status"] == "DEDUPED"
+    finally:
+        db.close()
+
+
+def test_stale_notification_dispatching_claim_is_reclaimed(monkeypatch):
+    db = _db()
+    try:
+        user, portfolio, _snapshot = _portfolio_fixture(db)
+        db.add(NotificationChannel(
+            user_id=user.id,
+            type="dingtalk",
+            name="phase-h1-channel",
+            encrypted_webhook="https://example.invalid/webhook",
+            enabled=True,
+        ))
+        event = OperatingNotificationEvent(
+            title="重要触发",
+            summary="测试 crash recovery。",
+            severity="IMPORTANT",
+            portfolio_id=portfolio.id,
+            user_id=user.id,
+            event_type="trigger_confirmed",
+            entity_type="trigger",
+            entity_id="stale-claim",
+            occurred_at=_local(date(2026, 8, 20), 10, 0),
+            deep_link=f"/dashboard?portfolio={portfolio.id}#triggers",
+            dedupe_key=f"trigger_confirmed:{portfolio.id}:stale-claim",
+        )
+        stale_at = _utc_naive(_local(date(2026, 8, 20), 9, 0))
+        db.add(OperatingNotification(
+            notification_id="opn_stale_claim",
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            trade_date=date(2026, 8, 20),
+            dedupe_key=event.dedupe_key,
+            event_type=event.event_type,
+            severity=event.severity,
+            status="DISPATCHING",
+            occurred_at=_utc_naive(event.occurred_at),
+            last_attempt_at=stale_at,
+            lease_expires_at=stale_at,
+            attempt_count=1,
+        ))
+        db.commit()
+        monkeypatch.setattr("app.operations.notifications._post_channel", lambda *_args, **_kwargs: (200, "ok"))
+
+        result = dispatch_operating_event(
+            db,
+            event,
+            now=_local(date(2026, 8, 20), 10, 0),
+        )
+
+        row = db.query(OperatingNotification).one()
+        assert result["status"] == "SENT"
+        assert row.status == "SENT"
+        assert row.attempt_count == 2
+        assert row.lease_expires_at is None
     finally:
         db.close()
 
@@ -792,6 +901,250 @@ def test_provider_outage_episode_and_recovery_notifications_are_deduped(monkeypa
         info = dispatch_operating_event(db, info_event, now=_local(date(2026, 8, 20), 10, 6))
         assert info["status"] == "DASHBOARD_ONLY"
         assert info["deliveries"] == []
+    finally:
+        db.close()
+
+
+def test_primary_outage_without_fallback_is_blocked(monkeypatch):
+    db = _db()
+    try:
+        user, portfolio, _snapshot = _portfolio_fixture(db)
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS", ())
+        db.add(ProviderHealth(
+            provider_name=settings.MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER,
+            data_type="quote",
+            status="CIRCUIT_OPEN",
+            last_failure_at=_utc_naive(_local(date(2026, 8, 20), 9, 40)),
+        ))
+        db.commit()
+
+        events = collect_material_events(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            as_of=_local(date(2026, 8, 20), 10, 0),
+        )
+        outage = next(item for item in events if item.event_type == "data_health")
+        assert outage.severity == "CRITICAL"
+        assert "暂停增加新风险" in outage.summary
+    finally:
+        db.close()
+
+
+def test_dashboard_uses_authoritative_reserve_assets_formula():
+    db = _db()
+    try:
+        user, portfolio, snapshot = _portfolio_fixture(db)
+        snapshot.repo_or_standard_bond_value = 30000
+        db.add(PortfolioRiskSnapshot(
+            calculation_key="phase-h1-reserve",
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            portfolio_snapshot_id=snapshot.id,
+            as_of=snapshot.snapshot_time,
+            total_assets=100000,
+            market_value=50000,
+            cash_ratio=0.20,
+            quality_status="VALID",
+        ))
+        db.commit()
+
+        dashboard = build_daily_dashboard(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            as_of=_local(date(2026, 8, 20), 10, 0),
+        )
+
+        assert dashboard["portfolio"]["cash_ratio"] == pytest.approx(0.20)
+        assert dashboard["portfolio"]["reserve_assets"] == pytest.approx(50000)
+        assert dashboard["portfolio"]["reserve_ratio"] == pytest.approx(0.50)
+    finally:
+        db.close()
+
+
+def test_dashboard_delta_15m_uses_matching_same_day_baseline():
+    db = _db()
+    try:
+        _user, _portfolio, _snapshot = _portfolio_fixture(db)
+        day = date(2026, 8, 20)
+        for minute, score in ((15, 60), (20, 65), (25, 68), (30, 70)):
+            db.add(MarketScoreSnapshot(
+                snapshot_id=f"phase-h1-score-{minute}",
+                market="CN",
+                trade_date=day,
+                captured_at=_utc_naive(_local(day, 10, minute)),
+                display_score=score,
+                raw_score=score,
+                quality_status="VALID",
+                is_frozen=False,
+            ))
+        db.commit()
+
+        from app.operations import dashboard as dashboard_module
+
+        section = dashboard_module._market_section(
+            db,
+            cutoff=_utc_naive(_local(day, 10, 30)),
+        )
+        assert section["delta_15m"] == pytest.approx(10)
+    finally:
+        db.close()
+
+
+def test_snapshot_hooks_are_not_success_without_persisted_snapshot(monkeypatch):
+    db = _db()
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        monkeypatch.setattr(workflow, "_run_monitor_lifecycle", lambda _local: {"status": "STOPPED", "running": False})
+
+        morning = workflow.run_due_checkpoints(
+            db,
+            portfolio=portfolio,
+            now=_local(date(2026, 8, 20), 11, 30),
+        )
+        close = workflow.run_due_checkpoints(
+            db,
+            portfolio=portfolio,
+            now=_local(date(2026, 8, 20), 15, 0),
+        )
+
+        assert morning["checkpoints"]["morning_snapshot"]["status"] == "NOT_AVAILABLE"
+        assert morning["checkpoints"]["morning_snapshot"]["reason"] == "HOOK_ONLY"
+        assert close["checkpoints"]["market_close"]["status"] == "NOT_AVAILABLE"
+        assert close["checkpoints"]["market_close"]["reason"] == "HOOK_ONLY"
+    finally:
+        db.close()
+
+
+def test_persisted_snapshot_hook_reports_success_and_snapshot_id(monkeypatch):
+    db = _db()
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        day = date(2026, 8, 20)
+        db.add_all([
+            MarketScoreSnapshot(
+                snapshot_id="phase-h1-morning-snapshot",
+                market="CN",
+                trade_date=day,
+                captured_at=_utc_naive(_local(day, 11, 29)),
+                display_score=66,
+                raw_score=66,
+                quality_status="VALID",
+                is_frozen=False,
+            ),
+            MarketScoreSnapshot(
+                snapshot_id="phase-h1-close-snapshot",
+                market="CN",
+                trade_date=day,
+                captured_at=_utc_naive(_local(day, 15, 1)),
+                display_score=64,
+                raw_score=64,
+                quality_status="VALID",
+                is_frozen=False,
+            ),
+        ])
+        db.commit()
+        monkeypatch.setattr(workflow, "_run_monitor_lifecycle", lambda _local: {"status": "STOPPED", "running": False})
+
+        morning = workflow.run_due_checkpoints(db, portfolio=portfolio, now=_local(day, 11, 30))
+        close = workflow.run_due_checkpoints(db, portfolio=portfolio, now=_local(day, 15, 5))
+
+        assert morning["checkpoints"]["morning_snapshot"]["status"] == "SUCCESS"
+        assert morning["checkpoints"]["morning_snapshot"]["snapshot_id"] == "phase-h1-morning-snapshot"
+        assert close["checkpoints"]["market_close"]["status"] == "SUCCESS"
+        assert close["checkpoints"]["market_close"]["snapshot_id"] == "phase-h1-close-snapshot"
+    finally:
+        db.close()
+
+
+def test_daily_review_stale_running_claim_is_reclaimed_after_restart(monkeypatch):
+    db = _db()
+    bind = db.bind
+    try:
+        _user, portfolio, _snapshot = _portfolio_fixture(db)
+        starts: list[dict[str, object]] = []
+
+        class FakeReviewThread:
+            def __init__(self, *, target, kwargs, daemon):
+                assert target is scheduler_service.run_scheduled_daily_review
+                assert daemon is True
+                starts.append(kwargs)
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(scheduler_service.threading, "Thread", FakeReviewThread)
+        now = _local(date(2026, 8, 20), 15, 31).astimezone(UTC)
+        scheduler_service._enqueue_memory_reviews(db, trade_date=date(2026, 8, 20), now_utc=now)
+        review = db.query(DailyReviewRun).one()
+        review.lease_expires_at = _utc_naive(_local(date(2026, 8, 20), 15, 30))
+        db.commit()
+        review_id = review.id
+    finally:
+        db.close()
+
+    restarted = Session(bind=bind)
+    try:
+        starts.clear()
+        scheduler_service._enqueue_memory_reviews(
+            restarted,
+            trade_date=date(2026, 8, 20),
+            now_utc=_local(date(2026, 8, 20), 15, 40).astimezone(UTC),
+        )
+        review = restarted.query(DailyReviewRun).one()
+        assert review.id == review_id
+        assert review.status == "RUNNING"
+        assert review.attempt_count == 2
+        assert starts == [{"user_id": review.user_id, "portfolio_id": review.portfolio_id, "trade_date": date(2026, 8, 20)}]
+    finally:
+        restarted.close()
+
+
+def test_legacy_scheduler_reuses_phase_h_checkpoint_job(monkeypatch):
+    db = _db()
+    try:
+        user, portfolio, snapshot = _portfolio_fixture(db)
+        day = date(2026, 8, 20)
+        schedule = Schedule(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            name="09:35",
+            checkpoint="09:35",
+            mode="standard",
+            hour=9,
+            minute=35,
+        )
+        db.add(schedule)
+        db.flush()
+        existing = AnalysisJob(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            snapshot_id=snapshot.id,
+            trigger_type="scheduled",
+            checkpoint="09:35",
+            mode="standard",
+            status="succeeded",
+            current_stage="completed",
+            idempotency_key=f"phase-h:{portfolio.id}:{day.isoformat()}:09:35",
+            created_at=_utc_naive(_local(day, 9, 42)),
+        )
+        db.add(existing)
+        db.commit()
+
+        admission = scheduler_service.create_scheduled_job(
+            db,
+            schedule,
+            with_admission=True,
+            now=_local(day, 9, 45),
+        )
+
+        assert admission.job.id == existing.id
+        assert admission.should_start is False
+        assert admission.source == "existing_checkpoint"
+        assert db.query(AnalysisJob).count() == 1
     finally:
         db.close()
 

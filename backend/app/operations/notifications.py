@@ -21,7 +21,7 @@ from ..services.trading_calendar import CHINA_TZ
 from ..trigger_models import TriggerEvent
 from ..v2_models import AnalysisJob, AnalysisRun, NotificationChannel, PortfolioSnapshot
 from ..memory.models import DailyReviewRun
-from .config import NOTIFICATION_COOLDOWNS_MINUTES
+from .config import NOTIFICATION_COOLDOWNS_MINUTES, NOTIFICATION_DISPATCH_LEASE
 from .models import DailyOperationalRun, OperatingNotification
 from .workflow import ensure_operational_run
 
@@ -177,6 +177,7 @@ def _claim_notification(
             status="DISPATCHING",
             occurred_at=_naive_utc(event.occurred_at),
             last_attempt_at=_naive_utc(moment),
+            lease_expires_at=_naive_utc(moment) + NOTIFICATION_DISPATCH_LEASE,
             attempt_count=1,
         )
         try:
@@ -195,6 +196,45 @@ def _claim_notification(
     if status in {"SENT", "DASHBOARD_ONLY"}:
         return existing, False, "DEDUPED"
     if status == "DISPATCHING":
+        moment_naive = _naive_utc(moment)
+        expires_at = _naive_utc(existing.lease_expires_at)
+        stale_condition = (
+            (OperatingNotification.lease_expires_at.is_not(None) & (OperatingNotification.lease_expires_at <= moment_naive))
+            | (
+                OperatingNotification.lease_expires_at.is_(None)
+                & (
+                    OperatingNotification.last_attempt_at.is_(None)
+                    | (OperatingNotification.last_attempt_at <= moment_naive - NOTIFICATION_DISPATCH_LEASE)
+                )
+            )
+        )
+        last_attempt = _parse_time(existing.last_attempt_at)
+        stale = (
+            expires_at <= moment_naive
+            if expires_at is not None
+            else last_attempt is None or moment - last_attempt >= NOTIFICATION_DISPATCH_LEASE
+        )
+        if stale:
+            result = db.execute(
+                update(OperatingNotification)
+                .where(
+                    OperatingNotification.id == existing.id,
+                    OperatingNotification.status == "DISPATCHING",
+                    stale_condition,
+                )
+                .values(
+                    last_attempt_at=moment_naive,
+                    lease_expires_at=moment_naive + NOTIFICATION_DISPATCH_LEASE,
+                    attempt_count=OperatingNotification.attempt_count + 1,
+                    last_error=None,
+                )
+            )
+            db.commit()
+            if result.rowcount:
+                refreshed = db.execute(select(OperatingNotification).where(OperatingNotification.id == existing.id)).scalar_one()
+                return refreshed, True, "RECLAIMED"
+            refreshed = db.execute(select(OperatingNotification).where(OperatingNotification.id == existing.id)).scalar_one()
+            return refreshed, False, "ALREADY_CLAIMED"
         return existing, False, "ALREADY_CLAIMED"
     if status == "FAILED":
         last_attempt = _parse_time(existing.last_attempt_at)
@@ -211,7 +251,9 @@ def _claim_notification(
             .values(
                 status="DISPATCHING",
                 last_attempt_at=_naive_utc(moment),
+                lease_expires_at=_naive_utc(moment) + NOTIFICATION_DISPATCH_LEASE,
                 attempt_count=OperatingNotification.attempt_count + 1,
+                last_error=None,
             )
         )
         db.commit()
@@ -257,6 +299,7 @@ def dispatch_operating_event(db: Session, event: OperatingNotificationEvent, *, 
         durable.status = str(legacy.get("status") or "DASHBOARD_ONLY").upper()
         durable.sent_at = _naive_utc(_parse_time(legacy.get("sent_at")))
         durable.payload_json = dict(legacy)
+        durable.lease_expires_at = None
         db.commit()
         return {"status": "DEDUPED", "notification_id": durable.notification_id, "dedupe_key": event.dedupe_key, "sent_at": legacy.get("sent_at")}
     state = dict(op_run.notification_state_json or {})
@@ -302,6 +345,7 @@ def dispatch_operating_event(db: Session, event: OperatingNotificationEvent, *, 
     durable.sent_at = _naive_utc(moment)
     durable.last_attempt_at = _naive_utc(moment)
     durable.last_error = next((str(item.get("error")) for item in deliveries if item.get("status") == "FAILED"), None)
+    durable.lease_expires_at = None
     db.commit()
     logger.info("notification_event type=%s dedupe=%s severity=%s result=%s", event.event_type, event.dedupe_key, event.severity, delivery_status)
     return payload
@@ -523,7 +567,7 @@ def collect_material_events(db: Session, *, user_id: int, portfolio_id: int, as_
         healthy = lambda row: row is not None and str(row.status).upper() == "HEALTHY"
         if not healthy(primary) and any(healthy(row) for row in fallbacks):
             semantic, severity, summary = "DEGRADED", "IMPORTANT", "行情主源不可用，备用源仍健康；系统处于 DEGRADED，提醒已去重。"
-        elif not healthy(primary) and fallbacks and not any(healthy(row) for row in fallbacks):
+        elif not healthy(primary) and not any(healthy(row) for row in fallbacks):
             semantic, severity, summary = "BLOCKED", "CRITICAL", "主、备用行情源均不可可靠使用，暂停增加新风险；不会自动卖出现有持仓。"
         else:
             semantic = "OK"

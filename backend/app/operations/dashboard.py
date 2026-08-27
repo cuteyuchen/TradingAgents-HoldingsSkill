@@ -16,6 +16,7 @@ from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import ProviderHealth
 from ..memory.models import DailyReviewRun, DecisionMemory, DecisionOutcome
 from ..portfolio_models import PortfolioRiskSnapshot, TradeLedgerEntry
+from ..portfolio.snapshot_diff import snapshot_reserve_assets
 from ..services.realtime_monitor import get_realtime_monitor
 from ..services import scheduler as scheduler_service
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
@@ -185,10 +186,31 @@ def _market_section(db: Session, *, cutoff: datetime) -> dict[str, Any]:
     metric = None
     if row.metric_snapshot_id:
         metric = db.execute(select(MarketMetricSnapshot).where(MarketMetricSnapshot.snapshot_id == row.metric_snapshot_id)).scalar_one_or_none()
-    previous = db.execute(select(MarketScoreSnapshot).where(
-        MarketScoreSnapshot.market == "CN",
-        MarketScoreSnapshot.captured_at < row.captured_at,
-    ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc()).limit(1)).scalar_one_or_none()
+    # ``delta_15m`` is a fixed-time comparison, not a comparison with the
+    # previous polling row.  Keep the baseline on the same trading date and
+    # exclude frozen/invalid observations from the read model.
+    current_captured_at = _utc_naive(row.captured_at)
+    baseline = None
+    if current_captured_at is not None:
+        target_at = current_captured_at - timedelta(minutes=15)
+        tolerance = timedelta(minutes=max(1, settings.TRIGGER_MARKET_SCORE_BASELINE_TOLERANCE_MINUTES))
+        baseline_rows = db.execute(select(MarketScoreSnapshot).where(
+            MarketScoreSnapshot.market == row.market,
+            MarketScoreSnapshot.trade_date == row.trade_date,
+            MarketScoreSnapshot.captured_at >= target_at - tolerance,
+            MarketScoreSnapshot.captured_at <= min(target_at + tolerance, current_captured_at),
+            MarketScoreSnapshot.quality_status.in_(("VALID", "DEGRADED")),
+            MarketScoreSnapshot.is_frozen.is_(False),
+            MarketScoreSnapshot.display_score.is_not(None),
+        ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc())).scalars().all()
+        baseline = min(
+            baseline_rows,
+            key=lambda candidate: (
+                abs((_utc_naive(candidate.captured_at) - target_at).total_seconds()),
+                -_utc_naive(candidate.captured_at).timestamp(),
+            ),
+            default=None,
+        )
     open_row = db.execute(select(MarketScoreSnapshot).where(
         MarketScoreSnapshot.market == "CN",
         MarketScoreSnapshot.trade_date == row.trade_date,
@@ -221,7 +243,7 @@ def _market_section(db: Session, *, cutoff: datetime) -> dict[str, Any]:
         "market_score_source": "PREVIOUS_CLOSE" if is_previous_close else "PERSISTED_SNAPSHOT",
         "health_status": _health_status(freshness, mandatory=True, market_open=not is_pre_market),
         "source_lineage_status": str(metadata.get("source_lineage_status") or metadata.get("lineage_status") or "AVAILABLE").upper(),
-        "delta_15m": (row.display_score - previous.display_score) if row.display_score is not None and previous and previous.display_score is not None else None,
+        "delta_15m": (row.display_score - baseline.display_score) if row.display_score is not None and baseline and baseline.display_score is not None else None,
         "delta_from_open": (row.display_score - open_row.display_score) if row.display_score is not None and open_row and open_row.display_score is not None else None,
         "components": {
             "breadth": row.breadth_score,
@@ -276,7 +298,7 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
     holdings = db.execute(select(HoldingItem).where(HoldingItem.snapshot_id == snapshot.id).order_by(HoldingItem.weight.desc().nullslast(), HoldingItem.id.asc())).scalars().all()
     risk_flags = list(risk.risk_flags_json or []) if risk else []
     total_assets = snapshot.total_assets
-    reserve_assets = snapshot.repo_or_standard_bond_value
+    reserve_assets = snapshot_reserve_assets(snapshot)
     position_count = len(holdings)
     return {
         "status": str(risk.quality_status if risk else "DEGRADED").upper(),
