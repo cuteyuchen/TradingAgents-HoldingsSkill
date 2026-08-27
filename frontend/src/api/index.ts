@@ -3,6 +3,8 @@ import type {
   AnalysisMode,
   AnalysisRunDetail,
   AnalysisRunSummary,
+  BacktestRun,
+  CalibrationReport,
   DailyDashboard,
   DashboardDiagnostics,
   DashboardHealth,
@@ -15,6 +17,9 @@ import type {
   ParsedHoldings,
   Portfolio,
   PortfolioSnapshot,
+  ReplayAvailabilityManifest,
+  ResearchScope,
+  ReplayMode,
   Schedule,
   TokenPair,
   User,
@@ -148,6 +153,43 @@ export const api = {
   getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
+  getReplayAvailability: (params: { start_date?: string; end_date?: string; portfolio_id?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.start_date) query.set('start_date', params.start_date)
+    if (params.end_date) query.set('end_date', params.end_date)
+    if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<ReplayAvailabilityManifest>(`/api/v3/research/replay-availability${suffix}`)
+  },
+  listBacktests: (portfolioId?: number) => request<BacktestRun[]>(`/api/v3/research/backtests${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`),
+  getBacktest: (id: number) => request<BacktestRun>(`/api/v3/research/backtests/${id}`),
+  createBacktest: (payload: {
+    scope: ResearchScope
+    replay_mode: ReplayMode
+    start_date: string
+    end_date: string
+    portfolio_id?: number | null
+    horizons?: number[]
+    experiment?: Record<string, unknown> | null
+    random_seed?: number
+    bootstrap_iterations?: number
+  }) => request<BacktestRun>('/api/v3/research/backtests', { method: 'POST', body: payload }),
+  cancelBacktest: (id: number) => request<BacktestRun>(`/api/v3/research/backtests/${id}/cancel`, { method: 'POST' }),
+  heartbeatBacktest: (id: number) => request<BacktestRun>(`/api/v3/research/backtests/${id}/heartbeat`, { method: 'POST' }),
+  listCalibrations: (portfolioId?: number) => request<CalibrationReport[]>(`/api/v3/research/calibrations${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`),
+  getCalibration: (id: number) => request<CalibrationReport>(`/api/v3/research/calibrations/${id}`),
+  createCalibration: (payload: {
+    start_date: string
+    end_date: string
+    target_parameter: string
+    replay_mode?: ReplayMode
+    scope?: ResearchScope | null
+    portfolio_id?: number | null
+    horizons?: number[]
+    parameter_grid?: Array<number | string>
+    random_seed?: number
+    bootstrap_iterations?: number
+  }) => request<CalibrationReport>('/api/v3/research/calibrations', { method: 'POST', body: payload }),
   reconcileToday: (portfolioId: number) => request<Record<string, unknown>>(`/api/v3/portfolios/${portfolioId}/operations/reconcile-today`, { method: 'POST' }),
   listOperatingNotifications: (portfolioId?: number, unreadOnly = false) => request<OperatingNotificationList>(`/api/v3/notifications${portfolioId || unreadOnly ? `?${[
     portfolioId ? `portfolio_id=${portfolioId}` : '',

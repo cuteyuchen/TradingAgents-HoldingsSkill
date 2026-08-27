@@ -10,6 +10,7 @@ const router = createRouter({
     { path: '/dashboard', name: 'dashboard', component: () => import('./views/DashboardView.vue') },
     { path: '/upload', name: 'upload', component: () => import('./views/UploadView.vue') },
     { path: '/reports', name: 'reports', component: () => import('./views/ReportsView.vue') },
+    { path: '/research', name: 'research', component: () => import('./views/ResearchView.vue') },
     { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],

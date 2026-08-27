@@ -242,6 +242,108 @@ export interface NotificationChannel {
   updated_at: string
 }
 
+export type ResearchScope = 'MARKET' | 'CANDIDATE' | 'PORTFOLIO_DECISION' | 'MEMORY_DECISION' | 'BAR_FACTOR'
+export type ReplayMode = 'PRODUCTION_REPLAY' | 'DETERMINISTIC_RECOMPUTE' | 'BAR_ONLY_DIAGNOSTIC'
+export type CalibrationRecommendation = 'KEEP_CURRENT' | 'CONSIDER_CHANGE' | 'INSUFFICIENT_EVIDENCE' | 'REJECT_CHANGE'
+
+export interface ReplayAvailabilityItem {
+  name?: string
+  status: string
+  row_count?: number
+  distinct_trade_dates?: number
+  earliest_supported_at?: string | null
+  latest_supported_at?: string | null
+  coverage?: number | null
+  reason?: string
+  capabilities?: Record<string, string>
+  [key: string]: any
+}
+
+export interface ReplayAvailabilityManifest {
+  manifest_version: string
+  generated_at: string
+  requested_range: { start_date?: string | null; end_date?: string | null }
+  data_hash: string
+  known_limitations?: string[]
+  [key: string]: ReplayAvailabilityItem | Record<string, any> | string | string[] | undefined
+}
+
+export interface BacktestMetricSlice {
+  id: number
+  metric_family: string
+  security_type?: string | null
+  market_regime?: string | null
+  stage?: string | null
+  score_bucket?: string | null
+  horizon?: number | null
+  parameter_variant?: string | null
+  sample_count: number
+  trade_date_count: number
+  coverage?: number | null
+  metrics?: Record<string, any> | null
+  confidence_interval?: Record<string, any> | null
+  quality_status: string
+  limitations?: string[] | null
+}
+
+export interface BacktestRun {
+  id: number
+  user_id?: number | null
+  portfolio_id?: number | null
+  scope: ResearchScope
+  replay_mode: ReplayMode
+  start_date: string
+  end_date: string
+  status: string
+  progress_percent: number
+  current_stage: string
+  config_version: string
+  engine_version: string
+  data_hash: string
+  data_manifest?: Record<string, any> | null
+  sample_count: number
+  unique_trade_dates: number
+  quality_status: string
+  leakage_status: string
+  result_summary?: Record<string, any> | null
+  failure_counts?: Record<string, number> | null
+  horizons?: number[] | null
+  known_limitations?: string[] | null
+  error_code?: string | null
+  error_message?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  created_at?: string | null
+  lease_expires_at?: string | null
+  last_heartbeat_at?: string | null
+  attempt_count: number
+  cancel_requested: boolean
+  metric_slices: BacktestMetricSlice[]
+}
+
+export interface CalibrationReport {
+  id: number
+  backtest_run_id: number
+  user_id?: number | null
+  portfolio_id?: number | null
+  status: string
+  target_parameter: string
+  current_value?: any
+  challenger_value?: any
+  recommendation: CalibrationRecommendation
+  train?: Record<string, any> | null
+  validation?: Record<string, any> | null
+  test?: Record<string, any> | null
+  robustness?: Record<string, any> | null
+  sample_counts?: Record<string, any> | null
+  risk_notes?: string[] | null
+  proposal?: Record<string, any> | null
+  report?: Record<string, any> | null
+  calibration_version: string
+  created_at?: string | null
+  no_auto_apply: boolean
+}
+
 // Legacy archive types remain for migration/debug views.
 export interface ScreenshotPayload {
   filename?: string | null

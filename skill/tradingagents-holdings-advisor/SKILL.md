@@ -69,6 +69,16 @@ The Dashboard APIs are read-only projections of persisted Market, Portfolio, Can
 
 Daily Review is idempotent. Late mature Outcomes, revised Outcome sources, or Ledger revisions mark the same ReviewRun stale; an in-place refresh clears `review_stale` and increments `refresh_count`. Material notifications use explicit `INFO`/`IMPORTANT`/`ACTION_REQUIRED`/`CRITICAL` severity, dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and explicit `NO_ACTION` resolutions may notify; unchanged observations do not. A total quote-provider outage blocks adding new risk and does not automatically sell existing holdings.
 
+## Offline Historical Research (Phase I)
+
+Historical Research is a separate offline evaluation workflow. It distinguishes Historical Replay, Backtest, and Calibration: replay reconstructs only facts visible at the historical point, backtest evaluates a fixed version of persisted rules against later outcomes, and calibration produces evidence for human review.
+
+Use only persisted, server-owned facts and the Replay Availability Manifest. Enforce point-in-time visibility, trading-calendar horizons, price-basis compatibility, explicit survivorship limitations, and visible sample counts. Treat FULL, PARTIAL, DIAGNOSTIC_ONLY, UNSUPPORTED, DATA_GAP, and LEAKAGE_BLOCKED as meaningful outcomes; do not fill missing history with current SecurityMaster, current fundamentals, current valuation, or current ETF constituents.
+
+PRODUCTION_REPLAY, DETERMINISTIC_RECOMPUTE, and BAR_ONLY_DIAGNOSTIC remain separate modes. A next-open execution proxy is simulated evidence, not a confirmed fill. Backtest output is not Alpha Memory, not TradeLedger evidence, and not PortfolioSnapshot state.
+
+Calibration may return KEEP_CURRENT, CONSIDER_CHANGE, INSUFFICIENT_EVIDENCE, or REJECT_CHANGE only. It must use chronological train/validation/test separation, never select from the test set, and never automatically apply a threshold, factor weight, runtime prompt, risk rule, or production configuration. Do not inject backtest metrics or historical best parameters into live Decision context.
+
 ## Quality-First Workflow
 
 Target routine execution time is about 10 minutes, but this is a progress

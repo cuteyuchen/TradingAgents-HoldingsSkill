@@ -58,6 +58,18 @@
 
 当前默认是适合个人自托管的模块化单体：FastAPI 进程内执行分析任务并运行 APScheduler。任务和接口已经抽象为独立模型，后续可迁移到 PostgreSQL、Redis 和独立 Worker。
 
+## 历史研究与参数校准（Phase I）
+
+历史研究位于独立的 Research namespace，使用已持久化事实执行 Point-in-Time Replay、Backtest、Robustness Analysis 和 Calibration Evidence。它不会调用实时行情或 LLM，不写入 DecisionMemory、TradeLedger、PortfolioSnapshot，也不会自动修改任何生产配置。当前 Alembic head 为 20260827_0017，迁移链保持 0014 → 0015 → 0016 → 0017。
+
+支持三种明确分离的模式：
+
+- PRODUCTION_REPLAY：重放历史上已经保存的 Market、Candidate、Portfolio、Memory 事实。
+- DETERMINISTIC_RECOMPUTE：只有完整 PIT 数据集存在时才启用；当前缺少该数据集会 fail-close。
+- BAR_ONLY_DIAGNOSTIC：仅研究价格因子，不宣称完整 Candidate Engine 回测。
+
+研究页面位于 /research，包含 Data Availability、Backtest Evidence 和 Calibration Report。校准结果只生成 KEEP_CURRENT、CONSIDER_CHANGE、INSUFFICIENT_EVIDENCE 或 REJECT_CHANGE，没有 Apply 按钮；NEXT_OPEN_PROXY 只是模拟执行，不是真实成交。详细验收边界见 docs/PHASE_I_ACCEPTANCE.md。
+
 ## 核心数据链路
 
 ```text
@@ -200,6 +212,22 @@ POST   /api/v2/schedules/{id}/run-now
 /api/v2/notifications
 POST   /api/v2/notifications/{id}/test
 ```
+
+### Phase I Research
+
+```text
+GET    /api/v3/research/replay-availability
+GET    /api/v3/research/backtests
+POST   /api/v3/research/backtests
+GET    /api/v3/research/backtests/{id}
+POST   /api/v3/research/backtests/{id}/heartbeat
+POST   /api/v3/research/backtests/{id}/cancel
+GET    /api/v3/research/calibrations
+POST   /api/v3/research/calibrations
+GET    /api/v3/research/calibrations/{id}
+```
+
+Research API 只接受研究范围、日期、模式和受限参数网格；Outcome、Return、Score、Source ID 和历史事实等 server-owned 字段不能由客户端提交。Research Run、Calibration Report 与 Portfolio 均按当前用户隔离。
 
 ### V1 兼容
 

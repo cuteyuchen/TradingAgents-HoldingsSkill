@@ -44,6 +44,7 @@ def init_db() -> None:
         memory,
         models,
         operations,
+        research,
         candidates,
         portfolio_models,
         trigger_models,

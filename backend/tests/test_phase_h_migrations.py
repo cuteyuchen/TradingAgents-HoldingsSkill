@@ -22,7 +22,7 @@ def _upgrade(backend_dir: Path, database_path: Path, revision: str) -> None:
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
 
-def test_deployed_phase_h_0015_upgrades_to_0016(tmp_path):
+def test_deployed_phase_h_0015_upgrades_to_current_head(tmp_path):
     backend_dir = Path(__file__).resolve().parents[1]
     database_path = tmp_path / "phase_h_deployed.db"
 
@@ -45,7 +45,7 @@ def test_deployed_phase_h_0015_upgrades_to_0016(tmp_path):
     _upgrade(backend_dir, database_path, "head")
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260827_0016",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260827_0017",)
         for table, columns in {
             "daily_review_runs": {"lease_expires_at", "attempt_count"},
             "daily_operational_checkpoints": {"lease_expires_at"},
