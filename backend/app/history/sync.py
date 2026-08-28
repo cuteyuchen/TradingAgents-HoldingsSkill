@@ -171,6 +171,14 @@ def _normalise_row(
         payload["code"] = normalize_security_code(payload["code"])
     if data_type in _REQUIRE_AVAILABILITY_TYPES and not payload.get("source_available_at"):
         raise ValueError("source_available_at_required_for_pit_fact")
+    if data_type == "fundamentals" and not payload.get("published_at"):
+        raise ValueError("published_at_required_for_fundamental_report")
+    if (
+        data_type == "fundamentals"
+        and int(payload.get("revision_number") or 0) > 0
+        and not payload.get("source_available_at")
+    ):
+        raise ValueError("fundamental_revision_requires_source_available_at")
     payload.setdefault("source", source)
     payload["source"] = str(payload["source"] or source)
     payload.setdefault("quality_status", "VALID")
@@ -299,6 +307,8 @@ def import_historical_facts(
             )
             revised["revision_number"] = int(revised.get("revision_number") or 0) or max_revision + 1
             if int(revised["revision_number"]) > 0:
+                if not revised.get("source_available_at"):
+                    raise ValueError("fundamental_revision_requires_source_available_at")
                 revised["is_restatement"] = True
         revision_filters = dict(filters)
         revision_filters["source_ref"] = derived_ref

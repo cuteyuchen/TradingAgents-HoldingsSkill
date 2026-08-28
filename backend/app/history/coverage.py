@@ -9,9 +9,8 @@ date with a single row is never FULL for a 5000-security universe.
 
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -30,7 +29,11 @@ from .models import (
     SecurityTradingStatusDaily,
     SecurityValuationDaily,
 )
-from .time import shanghai_end_of_day_to_utc_naive, visible
+from .time import (
+    fundamental_visible_at,
+    shanghai_end_of_day_to_utc_naive,
+    visible,
+)
 
 HISTORY_DATA_TYPES = (
     "security_lifecycle",
@@ -95,26 +98,6 @@ def _normalise_code(value: Any) -> str | None:
     return normalize_security_code(value)
 
 
-def _add_interval(
-    start: date,
-    end: date,
-    code: str,
-    security_type: str | None,
-    calendar_dates: list[date],
-    expected_all: dict[date, set[str]],
-    expected_stock: dict[date, set[str]],
-) -> None:
-    if start > end:
-        return
-    left = bisect_left(calendar_dates, start)
-    right = bisect_right(calendar_dates, end)
-    for index in range(left, right):
-        day = calendar_dates[index]
-        expected_all[day].add(code)
-        if security_type == "STOCK":
-            expected_stock[day].add(code)
-
-
 def _expected_universe_by_date(
     db: Session,
     *,
@@ -139,50 +122,28 @@ def _expected_universe_by_date(
             by_code[code].append(row)
     expected_all: dict[date, set[str]] = defaultdict(set)
     expected_stock: dict[date, set[str]] = defaultdict(set)
+    cutoffs = [shanghai_end_of_day_to_utc_naive(day) for day in calendar_dates]
     for code, events in by_code.items():
-        active = False
-        interval_start: date | None = None
-        security_type: str | None = None
-        for event in events:
-            event_type = str(event.event_type or "").upper()
-            if event.security_type:
-                security_type = str(event.security_type).upper()
-            if event_type in _ACTIVE_EVENTS:
-                if active and interval_start is not None:
-                    _add_interval(
-                        interval_start,
-                        event.effective_date - timedelta(days=1),
-                        code,
-                        security_type,
-                        calendar_dates,
-                        expected_all,
-                        expected_stock,
-                    )
-                active = True
-                interval_start = event.effective_date
-            elif event_type in _INACTIVE_EVENTS:
-                if active and interval_start is not None:
-                    _add_interval(
-                        interval_start,
-                        event.effective_date - timedelta(days=1),
-                        code,
-                        security_type,
-                        calendar_dates,
-                        expected_all,
-                        expected_stock,
-                    )
-                active = False
-                interval_start = None
-        if active and interval_start is not None:
-            _add_interval(
-                interval_start,
-                end_date,
-                code,
-                security_type,
-                calendar_dates,
-                expected_all,
-                expected_stock,
-            )
+        for day_index, day in enumerate(calendar_dates):
+            cutoff = cutoffs[day_index]
+            active = False
+            security_type: str | None = None
+            for event in events:
+                if event.effective_date > day:
+                    break
+                if not visible(event.source_available_at, cutoff):
+                    continue
+                event_type = str(event.event_type or "").upper()
+                if event.security_type:
+                    security_type = str(event.security_type).upper()
+                if event_type in _ACTIVE_EVENTS:
+                    active = True
+                elif event_type in _INACTIVE_EVENTS:
+                    active = False
+            if active:
+                expected_all[day].add(code)
+                if security_type == "STOCK":
+                    expected_stock[day].add(code)
     return expected_all, expected_stock
 
 
@@ -243,8 +204,18 @@ def _daily_item(
         market=market,
     )
     expected_total = sum(len(expected_by_date.get(day, set())) for day in calendar_dates)
-    known_total = sum(len(known.get(day, set())) for day in calendar_dates)
-    known_dates = sorted(day for day in calendar_dates if known.get(day))
+    known_total = 0
+    unexpected_rows = 0
+    for day in calendar_dates:
+        expected = expected_by_date.get(day, set())
+        known_day = known.get(day, set())
+        known_total += len(known_day & expected)
+        unexpected_rows += len(known_day - expected)
+    known_dates = sorted(
+        day
+        for day in calendar_dates
+        if known.get(day, set()) & expected_by_date.get(day, set())
+    )
     coverage = (known_total / expected_total) if expected_total else None
     if row_count == 0:
         status = "DATA_GAP"
@@ -275,6 +246,7 @@ def _daily_item(
         "expected_dates": len(calendar_dates),
         "expected_security_dates": expected_total,
         "known_security_dates": known_total,
+        "unexpected_rows": unexpected_rows,
         "known_dates": [_iso(day) for day in known_dates],
         "coverage": round(min(1.0, coverage), 6) if coverage is not None else None,
         "earliest_supported_at": _iso(known_dates[0] if known_dates else None),
@@ -381,24 +353,30 @@ def _publication_item(
             FundamentalReport.published_at
             <= shanghai_end_of_day_to_utc_naive(end_date)
         )
-    rows = db.execute(
-        select(FundamentalReport.code, FundamentalReport.published_at).where(*clauses)
-    ).all()
+    rows = list(db.execute(select(FundamentalReport).where(*clauses)).scalars())
     row_count = len(rows)
-    missing_publications = sum(1 for _, published_at in rows if published_at is None)
-    published_by_code: dict[str, list[datetime]] = defaultdict(list)
-    for code, published_at in rows:
-        normalized = _normalise_code(code)
-        if normalized and published_at is not None:
-            published_by_code[normalized].append(published_at)
-    for values in published_by_code.values():
+    missing_publications = 0
+    missing_revision_availability = 0
+    visible_by_code: dict[str, list[datetime]] = defaultdict(list)
+    for row in rows:
+        normalized = _normalise_code(row.code)
+        if row.published_at is None:
+            missing_publications += 1
+            continue
+        visible_at = fundamental_visible_at(row)
+        if visible_at is None:
+            missing_revision_availability += 1
+            continue
+        if normalized:
+            visible_by_code[normalized].append(visible_at)
+    for values in visible_by_code.values():
         values.sort()
     expected_total = sum(len(expected_by_date.get(day, set())) for day in calendar_dates)
     known_total = 0
     for day in calendar_dates:
         cutoff = shanghai_end_of_day_to_utc_naive(day)
         for code in expected_by_date.get(day, set()):
-            times = published_by_code.get(code)
+            times = visible_by_code.get(code)
             if times and times[0] <= cutoff:
                 known_total += 1
     coverage = (known_total / expected_total) if expected_total else None
@@ -417,6 +395,9 @@ def _publication_item(
     elif missing_publications:
         status = "PARTIAL"
         reason = "MISSING_PUBLICATION_TIME"
+    elif missing_revision_availability:
+        status = "PARTIAL"
+        reason = "MISSING_REVISION_AVAILABILITY"
     elif known_total < expected_total:
         status = "PARTIAL"
         reason = "security_level_coverage_incomplete"
@@ -438,6 +419,7 @@ def _publication_item(
             ).scalar() or 0
         ),
         "missing_publications": missing_publications,
+        "missing_revision_availability": missing_revision_availability,
         "expected_dates": len(calendar_dates),
         "expected_security_dates": expected_total,
         "known_security_dates": known_total,

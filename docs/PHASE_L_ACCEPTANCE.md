@@ -20,6 +20,20 @@ Phase L.1 不新增 migration、不新增表、不开始 Phase M，只封堵会�
 附带修复：`SecurityTradingStatusDaily` / `SecurityClassificationDaily` 改为
 `trade_date == as_of` 精确匹配；当日缺失不会 forward-fill 前一天状态。
 
+## 0.1 Phase L Final Integrity Patch
+
+Phase L Final Integrity Patch 不新增 migration、不新增表，只收口三个仍然存在的
+PIT correctness blocker：
+
+1. `resolve_historical_holdings()` 只读取 as-of 前最近一份 confirmed
+   PortfolioSnapshot，不再把“历史上曾持有过的股票并集”当成当时持仓。
+2. Daily coverage 改用 `known ∩ expected` 计算 security × date 覆盖；错证券不能
+   凑成 FULL。expected universe 与正式 PIT resolver 使用相同的
+   `source_available_at` visibility cutoff。
+3. Fundamental revision 统一使用 `visible_at = max(published_at,
+   source_available_at)`；restatement 缺少 `source_available_at` 时 fail-close，
+  未来修订不能倒灌旧 as-of。
+
 ## 1. Migration / Schema
 
 新增 migration：`20260828_0019_historical_data_foundation`（`0018 -> head`）。
@@ -60,11 +74,15 @@ Phase L 不创建虚假历史 provider。lifecycle / trading status / ST / valua
   （`2026-01-02 23:59:59 Asia/Shanghai == 2026-01-02 15:59:59 UTC`）。
 - `published_at <= as_of` 是基本面/估值可见性硬门槛；`published_at` 缺失 → `MISSING_PUBLICATION_TIME`，不得视为 0 或 FULL。
 - restatement/revision 保留历史版本，as-of 查询只看到当时已发布版本。
+- Fundamental `visible_at` 是版本真正可用的 PIT 时间；同 `published_at` 的修订必须
+  提供更晚的 `source_available_at`，否则 resolver/coverage 都不可见。
 - 当前 SecurityMaster 状态不参与历史 lifecycle truth；历史缺失为 `UNKNOWN`/`DATA_GAP`。
 - ETF 历史 category 不做 current-backfill。
 - Price basis 记录 provider basis/version，RAW/QFQ mismatch 继续 fail-close。
 - `SecurityTradingStatusDaily` / `SecurityClassificationDaily` 只读取 `trade_date == as_of`
   的当日事实；当日无 row 即为 `UNKNOWN`，不继承昨日状态。
+- 历史持仓只来自 as-of 前最近一份 confirmed snapshot；更早 snapshot 中已卖出的
+  股票不得继续排除 Candidate Universe。
 
 ## 4. PIT Universe Resolver
 
@@ -93,10 +111,13 @@ Universe 规则：
 - `historical_data_coverage(db, start_date, end_date, data_type)` 对 daily 表使用
   security × date 覆盖率；分母来自 historical lifecycle 重建的预期 Universe
   （trading_status 为全部证券、ST/valuation/fundamentals 为股票 Universe、
-  price_basis 为已有 DailyBarCache 证券集合）。5000 只证券只有 1 行状态时只能
-  PARTIAL，不能 FULL。
+  price_basis 为已有 DailyBarCache 证券集合）。known 与 expected 必须按证券集合
+  交集计算；5000 只证券只有 1 行状态、或 expected={A} 而只有 B 的 row 时都不能
+  FULL。
 - event 表不因行存在就声称 FULL；lifecycle 持续保持 PARTIAL/LEAKAGE_BLOCKED，
   这是“不知道事件缺失”的保守语义。
+- expected Universe 的 lifecycle 事件必须同时满足 `effective_date` 与当日
+  `source_available_at` cutoff；未来才可见的 DELISTED 不能在可见前移出分母。
 - 事件表在区间前生效的事实仍可在区间内使用，`effective_date <= end_date` 即可计数。
 - `python -m app.history.cli sync ...` / `POST /api/v3/history/sync` 提供幂等导入：同一 `source_ref` 重复导入不翻倍，修订新增 `source_ref` 保留历史版本。
 - 非 fundamental 的 PIT-required 导入缺少 `source_available_at` 时直接拒绝；
@@ -128,6 +149,10 @@ Universe 规则：
   5000 只证券单行状态 != FULL、全市场 fundamental coverage 按股票 Universe 统计、
   lifecycle PARTIAL 阻止 PIT gate 达 FULL、same `source_ref` 修订保留旧 row、
   当日 trading status 缺失返回 UNKNOWN。
+- Final Integrity Patch 专项：快照 1 持有 A、快照 2 已卖 A 持 B，as-of 快照 2 只返回
+  {B}；expected={A} 只有 B row 时 coverage 非 FULL；DELISTED effective=1/10、
+  available=1/20 时 1/15 denominator 仍含该证券；两版 fundamental 同为 3/20
+  published_at 时，4/1 只看到旧版、5/2 才看到新版。
 - `backend/tests/test_history_api.py`：History API surface。
 - 既有 Research / System / Backup / Migration 测试同步到 head `20260828_0019`。
 

@@ -16,6 +16,16 @@ Phase L.1 对 PIT 规则做了三项收紧：
   lifecycle event 本身无法证明 absence，因此只能 PARTIAL；daily 表按
   security × date 统计，单行无法让 5000 只证券的交易日变成 FULL。
 
+### Final Integrity Patch 补充
+
+- 历史持仓 = as-of 前最近 confirmed snapshot 的 holdings，不是历史 union。
+- coverage known 必须与 expected 按证券集合取交集；unexpected rows 单独统计，
+  错证券不能把缺失证券的日期凑成 FULL。
+- expected Universe 与 PIT resolver 共用 `source_available_at` cutoff；晚于可见日的
+  lifecycle 事件不会提前改分母。
+- Fundamental 使用 `visible_at = max(published_at, source_available_at)`；
+  restatement 无 `source_available_at` 时不可见并 fail-close。
+
 ## 1. 审计范围
 
 实际读取：
@@ -138,6 +148,10 @@ Phase L.1 对 PIT 规则做了三项收紧：
 - `ingested_at` 是写入数据库时间。
 - `source_available_at = NULL` 时事实不可见；PIT-required 导入直接拒绝该 row。
 - `published_at <= as_of` 是基本面/估值可见性的硬门槛。
+- Fundamental revision 的可见性使用 `visible_at = max(published_at,
+  source_available_at)`；`published_at` 不变但 `source_available_at` 更晚的修订，
+  在 `source_available_at` 之前不可见。
+- restatement 缺少 `source_available_at` 时导入 fail-close，resolver 不返回该版本。
 - 缺失历史状态必须是 `UNKNOWN`/`DATA_GAP`，不能当作 `NORMAL`/`0`。
 - Trading/Classification 是当日状态：`trade_date == as_of`，当日缺失不 forward-fill。
 - 同一 `source_ref` 的内容修订追加 revision row，旧 as-of 继续读取旧版本。

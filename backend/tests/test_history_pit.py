@@ -360,6 +360,7 @@ def test_restatement_keeps_historical_versions() -> None:
                 published_at=published_at,
                 revision_number=revision,
                 is_restatement=revision > 0,
+                source_available_at=published_at,
                 source="operator-import",
                 source_ref=ref,
                 net_profit=net_profit,
@@ -530,6 +531,52 @@ def test_candidate_universe_uses_historical_holdings() -> None:
             db, portfolio_id=portfolio.id, as_of=days[-1], user_id=user.id
         )
         assert "600001" in held_set
+    finally:
+        db.close()
+
+
+def test_historical_holdings_uses_latest_confirmed_snapshot() -> None:
+    db = _db()
+    try:
+        user = User(email="holdings-latest@example.com", password_hash="x", timezone="Asia/Shanghai")
+        portfolio = Portfolio(user=user, name="PIT-LATEST")
+        db.add(user)
+        db.flush()
+        db.add(portfolio)
+        db.flush()
+        january = PortfolioSnapshot(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            snapshot_time=datetime(2024, 1, 15, 12, 0),
+            status="confirmed",
+        )
+        february = PortfolioSnapshot(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            snapshot_time=datetime(2024, 2, 15, 12, 0),
+            status="confirmed",
+        )
+        db.add_all([january, february])
+        db.flush()
+        db.add_all([
+            HoldingItem(snapshot_id=january.id, code="600001", name="A"),
+            HoldingItem(snapshot_id=february.id, code="000001", name="B"),
+        ])
+        db.commit()
+        january_held = resolve_historical_holdings(
+            db,
+            portfolio_id=portfolio.id,
+            as_of=date(2024, 1, 20),
+            user_id=user.id,
+        )
+        assert january_held == {"600001"}
+        february_held = resolve_historical_holdings(
+            db,
+            portfolio_id=portfolio.id,
+            as_of=date(2024, 2, 20),
+            user_id=user.id,
+        )
+        assert february_held == {"000001"}
     finally:
         db.close()
 
@@ -955,6 +1002,59 @@ def test_fundamental_coverage_requires_stock_universe() -> None:
         db.close()
 
 
+def test_coverage_unexpected_security_does_not_fill_expected() -> None:
+    db = _db()
+    try:
+        day = date(2025, 6, 2)
+        _calendar(db, [day])
+        _lifecycle(db, "600001", "LISTED", day - timedelta(days=500), exchange="SSE")
+        _trading_status(db, "600002", day, "TRADING")
+        db.commit()
+        coverage = historical_data_coverage(
+            db, start_date=day, end_date=day, data_type="trading_status"
+        )
+        item = coverage["items"][0]
+        assert item["expected_security_dates"] == 1
+        assert item["known_security_dates"] == 0
+        assert item["unexpected_rows"] == 1
+        assert item["status"] != "FULL"
+    finally:
+        db.close()
+
+
+def test_coverage_expected_universe_respects_lifecycle_visibility() -> None:
+    db = _db()
+    try:
+        first = date(2025, 1, 2)
+        mid = date(2025, 1, 15)
+        later = date(2025, 1, 20)
+        _calendar(db, [first, mid, later])
+        _lifecycle(db, "600001", "LISTED", first, exchange="SSE")
+        db.add(SecurityLifecycleEvent(
+            market="CN",
+            exchange="SSE",
+            code="600001",
+            security_type="STOCK",
+            event_type="DELISTED",
+            effective_date=date(2025, 1, 10),
+            source="operator-import",
+            source_ref="lifecycle-600001-delist-late-availability",
+            source_available_at=datetime(2025, 1, 20, 9, 0),
+            quality_status="VALID",
+        ))
+        _trading_status(db, "600001", mid, "TRADING")
+        db.commit()
+        coverage = historical_data_coverage(
+            db, start_date=mid, end_date=mid, data_type="trading_status"
+        )
+        item = coverage["items"][0]
+        assert item["expected_security_dates"] == 1
+        assert item["known_security_dates"] == 1
+        assert item["status"] == "FULL"
+    finally:
+        db.close()
+
+
 def test_same_source_ref_revision_preserves_old_row() -> None:
     db = _db()
     try:
@@ -990,6 +1090,7 @@ def test_same_source_ref_revision_preserves_old_row() -> None:
             rows=[{
                 **base,
                 "published_at": "2025-05-01T08:00:00+08:00",
+                "source_available_at": "2025-05-01T08:00:00+08:00",
                 "net_profit": 20.0,
             }],
         )
@@ -1012,11 +1113,76 @@ def test_same_source_ref_revision_preserves_old_row() -> None:
             rows=[{
                 **base,
                 "published_at": "2025-05-01T08:00:00+08:00",
+                "source_available_at": "2025-05-01T08:00:00+08:00",
                 "net_profit": 20.0,
             }],
         )
         assert third["skipped_count"] == 1
         assert db.query(FundamentalReport).count() == 2
+    finally:
+        db.close()
+
+
+def test_fundamental_revision_uses_visible_at_not_published_at() -> None:
+    db = _db()
+    try:
+        base = {
+            "market": "CN",
+            "code": "600001",
+            "report_period": "2024-12-31",
+            "report_type": "ANNUAL",
+            "source": "operator-import",
+            "source_ref": "fund-same-published-ref",
+        }
+        first = run_history_sync(
+            db,
+            data_type="fundamentals",
+            start_date=date(2025, 6, 2),
+            end_date=date(2025, 6, 2),
+            source="operator-import",
+            rows=[{
+                **base,
+                "published_at": "2025-03-20T08:00:00+08:00",
+                "net_profit": 10.0,
+            }],
+        )
+        assert first["inserted_count"] == 1
+        second = run_history_sync(
+            db,
+            data_type="fundamentals",
+            start_date=date(2025, 6, 2),
+            end_date=date(2025, 6, 2),
+            source="operator-import",
+            rows=[{
+                **base,
+                "published_at": "2025-03-20T08:00:00+08:00",
+                "source_available_at": "2025-05-01T08:00:00+08:00",
+                "net_profit": 20.0,
+            }],
+        )
+        assert second["inserted_count"] == 1
+        old = resolve_fundamental(db, "600001", as_of=date(2025, 4, 1))
+        assert old["available"] is True
+        assert old["net_profit"] == pytest.approx(10.0)
+        assert old["revision_number"] == 0
+        new = resolve_fundamental(db, "600001", as_of=date(2025, 5, 2))
+        assert new["available"] is True
+        assert new["net_profit"] == pytest.approx(20.0)
+        assert new["revision_number"] == 1
+        with pytest.raises(
+            ValueError,
+            match="fundamental_revision_requires_source_available_at",
+        ):
+            import_historical_facts(
+                db,
+                data_type="fundamentals",
+                rows=[{
+                    **base,
+                    "published_at": "2025-03-20T08:00:00+08:00",
+                    "net_profit": 30.0,
+                }],
+                source="operator-import",
+            )
     finally:
         db.close()
 

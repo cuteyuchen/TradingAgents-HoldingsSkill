@@ -20,7 +20,11 @@ from sqlalchemy.orm import Session
 from ..market.codes import exchange_for_code, normalize_security_code
 from ..market_models import TradingCalendar
 from ..v2_models import HoldingItem, PortfolioSnapshot
-from .time import shanghai_end_of_day_to_utc_naive, visible
+from .time import (
+    fundamental_visible_at,
+    shanghai_end_of_day_to_utc_naive,
+    visible,
+)
 from .models import (
     EtfMetadataHistory,
     FundamentalReport,
@@ -381,39 +385,46 @@ def resolve_fundamental(
     *,
     market: str = "CN",
 ) -> dict[str, Any]:
-    """Return the latest report version whose published_at is <= as_of."""
+    """Return the latest report version visible at the as-of cutoff."""
 
     day = _date(as_of)
     if day is None:
         raise ValueError("as_of_required")
     cutoff = _end_of_day(day)
     normalized = _code(code)
-    rows = list(db.execute(select(FundamentalReport).where(
-        FundamentalReport.market == str(market or "CN").upper(),
-        FundamentalReport.code == normalized,
-        FundamentalReport.published_at.is_not(None),
-        FundamentalReport.published_at <= cutoff,
-    ).order_by(
-        FundamentalReport.published_at.asc(),
-        FundamentalReport.revision_number.asc(),
-        FundamentalReport.id.asc(),
-    )).scalars())
-    if not rows:
+    rows = list(db.execute(
+        select(FundamentalReport).where(
+            FundamentalReport.market == str(market or "CN").upper(),
+            FundamentalReport.code == normalized,
+        )
+    ).scalars())
+    visible_rows: list[tuple[datetime, FundamentalReport]] = []
+    for row in rows:
+        visible_at = fundamental_visible_at(row)
+        if visible_at is not None and visible_at <= cutoff:
+            visible_rows.append((visible_at, row))
+    if not visible_rows:
+        missing_publication = any(row.published_at is None for row in rows)
+        missing_revision_availability = any(
+            int(row.revision_number or 0) > 0 and row.source_available_at is None
+            for row in rows
+        )
         return {
             "code": normalized,
             "as_of": day.isoformat(),
             "available": False,
-            "reason": "MISSING_PUBLICATION_TIME" if db.execute(
-                select(FundamentalReport.id).where(
-                    FundamentalReport.market == str(market or "CN").upper(),
-                    FundamentalReport.code == normalized,
-                    FundamentalReport.published_at.is_(None),
-                ).limit(1)
-            ).scalar_one_or_none() else "NO_PUBLISHED_FUNDAMENTAL",
+            "reason": (
+                "MISSING_PUBLICATION_TIME"
+                if missing_publication
+                else "MISSING_REVISION_AVAILABILITY"
+                if missing_revision_availability
+                else "NO_PUBLISHED_FUNDAMENTAL"
+            ),
             "report_period": None,
             "revision_number": None,
         }
-    row = rows[-1]
+    visible_rows.sort(key=lambda item: (item[0], item[1].revision_number or 0, item[1].id))
+    visible_at, row = visible_rows[-1]
     return {
         "code": normalized,
         "as_of": day.isoformat(),
@@ -421,6 +432,7 @@ def resolve_fundamental(
         "report_period": row.report_period.isoformat(),
         "report_type": row.report_type,
         "published_at": row.published_at.isoformat() if row.published_at else None,
+        "visible_at": visible_at.isoformat(),
         "revision_number": row.revision_number,
         "is_restatement": row.is_restatement,
         "roe": row.roe,
@@ -499,19 +511,23 @@ def resolve_historical_holdings(
     if day is None:
         return set()
     cutoff = _end_of_day(day)
-    query = (
-        select(HoldingItem.code)
-        .join(PortfolioSnapshot, PortfolioSnapshot.id == HoldingItem.snapshot_id)
-        .where(
-            PortfolioSnapshot.portfolio_id == portfolio_id,
-            PortfolioSnapshot.snapshot_time <= cutoff,
-            PortfolioSnapshot.status.in_(("confirmed", "CONFIRMED")),
-        )
+    snapshot_query = select(PortfolioSnapshot).where(
+        PortfolioSnapshot.portfolio_id == portfolio_id,
+        PortfolioSnapshot.snapshot_time <= cutoff,
+        PortfolioSnapshot.status.in_(("confirmed", "CONFIRMED")),
     )
     if user_id is not None:
-        query = query.where(PortfolioSnapshot.user_id == user_id)
+        snapshot_query = snapshot_query.where(PortfolioSnapshot.user_id == user_id)
+    snapshot = db.execute(
+        snapshot_query.order_by(
+            PortfolioSnapshot.snapshot_time.desc(),
+            PortfolioSnapshot.id.desc(),
+        ).limit(1)
+    ).scalar_one_or_none()
+    if snapshot is None:
+        return set()
     rows = db.execute(
-        query.order_by(PortfolioSnapshot.snapshot_time.desc(), HoldingItem.id.desc())
+        select(HoldingItem.code).where(HoldingItem.snapshot_id == snapshot.id)
     ).scalars().all()
     return {normalize_security_code(value) for value in rows if normalize_security_code(value)}
 
