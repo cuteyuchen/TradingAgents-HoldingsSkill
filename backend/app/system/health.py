@@ -83,6 +83,7 @@ def _cached_quick_check() -> dict[str, Any] | None:
 def disk_status() -> dict[str, Any]:
     directory = Path(settings.BACKUP_DIR).expanduser().resolve()
     try:
+        directory.mkdir(parents=True, exist_ok=True)
         usage = shutil.disk_usage(directory)
         free_ratio = usage.free / usage.total if usage.total else 0.0
     except OSError as exc:
