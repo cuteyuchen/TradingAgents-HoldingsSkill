@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -124,7 +125,7 @@ def _classification(
         classification=classification,
         source="operator-import",
         source_ref=source_ref or f"class-{code}-{trade_date}-{classification}",
-        source_available_at=datetime(trade_date.year, trade_date.month, trade_date.day, 18, 0),
+        source_available_at=datetime(trade_date.year, trade_date.month, trade_date.day, 9, 0),
         quality_status="VALID",
     ))
     db.flush()
@@ -145,7 +146,7 @@ def _trading_status(
         status=status,
         source="operator-import",
         source_ref=source_ref or f"status-{code}-{trade_date}-{status}",
-        source_available_at=datetime(trade_date.year, trade_date.month, trade_date.day, 18, 0),
+        source_available_at=datetime(trade_date.year, trade_date.month, trade_date.day, 9, 0),
         quality_status="VALID",
     ))
     db.flush()
@@ -600,6 +601,7 @@ def test_sync_idempotent_and_revision_preserved() -> None:
                 "exchange": "SSE",
                 "source": "operator-import",
                 "source_ref": "lifecycle-v1",
+                "source_available_at": f"{day}T09:00:00+08:00",
             }
         ]
         first = run_history_sync(
@@ -625,7 +627,12 @@ def test_sync_idempotent_and_revision_preserved() -> None:
         assert second["skipped_count"] == 1
         assert db.query(SecurityLifecycleEvent).count() == 1
         # A revised source row keeps the historical version and adds a revision.
-        revised = dict(rows[0], source_ref="lifecycle-v2", security_name="Revised")
+        revised = dict(
+            rows[0],
+            source_ref="lifecycle-v2",
+            security_name="Revised",
+            source_available_at=f"{day}T10:00:00+08:00",
+        )
         third = run_history_sync(
             db,
             data_type="security_lifecycle",
@@ -732,21 +739,33 @@ def test_deterministic_recompute_fails_without_pit_data() -> None:
         db.close()
 
 
-def test_deterministic_recompute_unlocks_with_complete_history() -> None:
+def test_deterministic_recompute_requires_engine_before_claiming_success() -> None:
     db = _db()
     try:
         day = date(2025, 1, 2)
         _calendar(db, [day])
         _seed_stock(db, code="600001", day=day, listed_date=day - timedelta(days=400))
+        from app.market_engine_models import DailyBarCache
+
+        db.add(DailyBarCache(
+            market="CN",
+            code="600001",
+            trade_date=day,
+            adjustment="QFQ",
+            close=100,
+            high=101,
+            low=99,
+            available_at=datetime(2025, 1, 2, 16, 0),
+        ))
         db.add(SecurityValuationDaily(
             market="CN", code="600001", trade_date=day, pe_ttm=15.0,
             source="operator-import", source_ref="val-1",
-            source_available_at=datetime(2025, 1, 2, 18, 0), quality_status="VALID",
+            source_available_at=datetime(2025, 1, 2, 9, 0), quality_status="VALID",
         ))
         db.add(PriceBasisMetadata(
             market="CN", code="600001", trade_date=day, basis="QFQ",
             source="operator-import", source_ref="basis-1",
-            source_available_at=datetime(2025, 1, 2, 18, 0), quality_status="VALID",
+            source_available_at=datetime(2025, 1, 2, 9, 0), quality_status="VALID",
         ))
         db.add(FundamentalReport(
             market="CN", code="600001", report_period=date(2024, 12, 31),
@@ -758,15 +777,265 @@ def test_deterministic_recompute_unlocks_with_complete_history() -> None:
         gate = pit_recompute_gate(
             db, scope="CANDIDATE", start_date=day, end_date=day
         )
-        assert gate["status"] == "FULL"
-        facts = load_replay_facts(
+        # Lifecycle is an event table and can never prove FULL by itself, so
+        # the gate must stay PARTIAL even when every daily table is complete.
+        assert gate["status"] != "PIT_INPUTS_READY"
+        assert "historical_security_state" in gate["partial_inputs"]
+        with pytest.raises(
+            ReplayDataQualityError,
+            match="DETERMINISTIC_RECOMPUTE_ENGINE_NOT_IMPLEMENTED",
+        ):
+            load_replay_facts(
+                db,
+                scope="CANDIDATE",
+                replay_mode="DETERMINISTIC_RECOMPUTE",
+                start_date=day,
+                end_date=day,
+            )
+    finally:
+        db.close()
+
+
+def test_missing_availability_time_is_not_visible() -> None:
+    db = _db()
+    try:
+        day = date(2025, 1, 2)
+        _calendar(db, [day])
+        db.add(SecurityLifecycleEvent(
+            market="CN",
+            exchange="SSE",
+            code="600001",
+            security_type="STOCK",
+            event_type="LISTED",
+            effective_date=day,
+            source="operator-import",
+            source_ref="lifecycle-no-availability",
+            source_available_at=None,
+            quality_status="VALID",
+        ))
+        db.add(SecurityClassificationDaily(
+            market="CN",
+            code="600001",
+            trade_date=day,
+            classification="NORMAL",
+            source="operator-import",
+            source_ref="class-no-availability",
+            source_available_at=None,
+            quality_status="VALID",
+        ))
+        db.add(SecurityTradingStatusDaily(
+            market="CN",
+            code="600001",
+            trade_date=day,
+            status="TRADING",
+            source="operator-import",
+            source_ref="status-no-availability",
+            source_available_at=None,
+            quality_status="VALID",
+        ))
+        db.commit()
+        state = resolve_security_state(db, "600001", as_of=day)
+        assert state["status"] == "UNKNOWN"
+        assert state["classification"] == "UNKNOWN"
+        assert state["trading_status"] == "UNKNOWN"
+        assert "UNKNOWN_LIFECYCLE" in state["reason_codes"]
+    finally:
+        db.close()
+
+
+def test_shanghai_next_day_availability_not_visible_previous_day() -> None:
+    db = _db()
+    try:
+        first = date(2025, 1, 2)
+        second = date(2025, 1, 3)
+        _calendar(db, [first, second])
+        available_utc_naive = (
+            datetime(2025, 1, 3, 1, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            .astimezone(UTC)
+            .replace(tzinfo=None)
+        )
+        db.add(SecurityLifecycleEvent(
+            market="CN",
+            exchange="SSE",
+            code="600001",
+            security_type="STOCK",
+            event_type="LISTED",
+            effective_date=first,
+            source="operator-import",
+            source_ref="lifecycle-sh-0103",
+            source_available_at=available_utc_naive,
+            quality_status="VALID",
+        ))
+        db.commit()
+        before = resolve_security_state(db, "600001", as_of=first)
+        assert before["status"] == "UNKNOWN"
+        after = resolve_security_state(db, "600001", as_of=second)
+        assert after["status"] == "ACTIVE"
+    finally:
+        db.close()
+
+
+def test_coverage_one_status_for_many_securities_is_not_full() -> None:
+    db = _db()
+    try:
+        day = date(2025, 6, 2)
+        _calendar(db, [day])
+        events = []
+        for index in range(5000):
+            code = f"{600000 + index:06d}"
+            events.append(SecurityLifecycleEvent(
+                market="CN",
+                exchange="SSE",
+                code=code,
+                security_type="STOCK",
+                event_type="LISTED",
+                effective_date=day - timedelta(days=500),
+                source="operator-import",
+                source_ref=f"lifecycle-{code}",
+                source_available_at=datetime(2025, 1, 1, 9, 0),
+                quality_status="VALID",
+            ))
+        db.add_all(events)
+        _trading_status(db, "600000", day, "TRADING")
+        db.commit()
+        coverage = historical_data_coverage(
+            db, start_date=day, end_date=day, data_type="trading_status"
+        )
+        item = coverage["items"][0]
+        assert item["status"] != "FULL"
+        assert item["expected_security_dates"] == 5000
+        assert item["known_security_dates"] == 1
+        assert item["coverage"] == pytest.approx(0.0002)
+    finally:
+        db.close()
+
+
+def test_fundamental_coverage_requires_stock_universe() -> None:
+    db = _db()
+    try:
+        day = date(2025, 6, 2)
+        _calendar(db, [day])
+        events = []
+        for index in range(100):
+            code = f"{600000 + index:06d}"
+            events.append(SecurityLifecycleEvent(
+                market="CN",
+                exchange="SSE",
+                code=code,
+                security_type="STOCK",
+                event_type="LISTED",
+                effective_date=day - timedelta(days=500),
+                source="operator-import",
+                source_ref=f"lifecycle-{code}",
+                source_available_at=datetime(2025, 1, 1, 9, 0),
+                quality_status="VALID",
+            ))
+        db.add_all(events)
+        db.add(FundamentalReport(
+            market="CN",
+            code="600000",
+            report_period=date(2024, 12, 31),
+            report_type="ANNUAL",
+            published_at=datetime(2025, 3, 1, 8, 0),
+            revision_number=0,
+            source="operator-import",
+            source_ref="fund-1",
+            net_profit=10.0,
+            quality_status="VALID",
+        ))
+        db.commit()
+        coverage = historical_data_coverage(
+            db, start_date=day, end_date=day, data_type="fundamentals"
+        )
+        item = coverage["items"][0]
+        assert item["status"] != "FULL"
+        assert item["expected_security_dates"] == 100
+        assert item["known_security_dates"] == 1
+    finally:
+        db.close()
+
+
+def test_same_source_ref_revision_preserves_old_row() -> None:
+    db = _db()
+    try:
+        day = date(2025, 6, 2)
+        _calendar(db, [day])
+        base = {
+            "market": "CN",
+            "code": "600001",
+            "report_period": "2024-12-31",
+            "report_type": "ANNUAL",
+            "source": "operator-import",
+            "source_ref": "fund-same-ref",
+        }
+        first = run_history_sync(
             db,
-            scope="CANDIDATE",
-            replay_mode="DETERMINISTIC_RECOMPUTE",
+            data_type="fundamentals",
             start_date=day,
             end_date=day,
+            source="operator-import",
+            rows=[{
+                **base,
+                "published_at": "2025-03-20T08:00:00+08:00",
+                "net_profit": 10.0,
+            }],
         )
-        assert "candidate_runs" in facts
+        assert first["inserted_count"] == 1
+        second = run_history_sync(
+            db,
+            data_type="fundamentals",
+            start_date=day,
+            end_date=day,
+            source="operator-import",
+            rows=[{
+                **base,
+                "published_at": "2025-05-01T08:00:00+08:00",
+                "net_profit": 20.0,
+            }],
+        )
+        assert second["inserted_count"] == 1
+        assert db.query(FundamentalReport).count() == 2
+        old = resolve_fundamental(db, "600001", as_of=date(2025, 4, 1))
+        assert old["available"] is True
+        assert old["net_profit"] == pytest.approx(10.0)
+        assert old["revision_number"] == 0
+        new = resolve_fundamental(db, "600001", as_of=date(2025, 5, 2))
+        assert new["available"] is True
+        assert new["net_profit"] == pytest.approx(20.0)
+        assert new["revision_number"] == 1
+        third = run_history_sync(
+            db,
+            data_type="fundamentals",
+            start_date=day,
+            end_date=day,
+            source="operator-import",
+            rows=[{
+                **base,
+                "published_at": "2025-05-01T08:00:00+08:00",
+                "net_profit": 20.0,
+            }],
+        )
+        assert third["skipped_count"] == 1
+        assert db.query(FundamentalReport).count() == 2
+    finally:
+        db.close()
+
+
+def test_trading_status_missing_today_is_unknown_not_forward_filled() -> None:
+    db = _db()
+    try:
+        first = date(2025, 1, 2)
+        second = date(2025, 1, 3)
+        _calendar(db, [first, second])
+        _lifecycle(db, "600001", "LISTED", first - timedelta(days=400), exchange="SSE")
+        _classification(db, "600001", first, "NORMAL")
+        _classification(db, "600001", second, "NORMAL")
+        _trading_status(db, "600001", first, "TRADING")
+        db.commit()
+        day1 = resolve_security_state(db, "600001", as_of=first)
+        assert day1["trading_status"] == "TRADING"
+        day2 = resolve_security_state(db, "600001", as_of=second)
+        assert day2["trading_status"] == "UNKNOWN"
     finally:
         db.close()
 

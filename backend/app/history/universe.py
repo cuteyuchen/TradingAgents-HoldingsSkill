@@ -11,9 +11,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -21,6 +20,7 @@ from sqlalchemy.orm import Session
 from ..market.codes import exchange_for_code, normalize_security_code
 from ..market_models import TradingCalendar
 from ..v2_models import HoldingItem, PortfolioSnapshot
+from .time import shanghai_end_of_day_to_utc_naive, visible
 from .models import (
     EtfMetadataHistory,
     FundamentalReport,
@@ -29,8 +29,6 @@ from .models import (
     SecurityTradingStatusDaily,
     SecurityValuationDaily,
 )
-
-CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 UNIVERSE_VERSION = "pit-universe-v1"
 ACTIVE_EVENTS = {"LISTED", "RELISTED"}
@@ -53,22 +51,9 @@ def _date(value: Any) -> date | None:
         return None
 
 
-def _naive_utc(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(UTC).replace(tzinfo=None)
-
-
-def _visible(value: datetime | None, cutoff: datetime) -> bool:
-    parsed = _naive_utc(value)
-    return parsed is None or parsed <= cutoff
-
-
 def _end_of_day(value: date | datetime) -> datetime:
     day = _date(value) or date.today()
-    return datetime.combine(day, time(23, 59, 59)).replace(tzinfo=None)
+    return shanghai_end_of_day_to_utc_naive(day)
 
 
 def _code(value: Any) -> str:
@@ -113,7 +98,7 @@ def _lifecycle_states(
     )).scalars())
     states: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if not _visible(row.source_available_at, cutoff):
+        if not visible(row.source_available_at, cutoff):
             continue
         code = _code(row.code)
         if not code:
@@ -168,11 +153,17 @@ def _latest_by_code(
     date_column: str,
     status_column: str,
     market: str = "CN",
+    exact_date: bool = False,
 ) -> dict[str, Any]:
+    date_filter = (
+        getattr(model, date_column) == as_of
+        if exact_date
+        else getattr(model, date_column) <= as_of
+    )
     rows = list(db.execute(
         select(model).where(
             getattr(model, "market") == str(market or "CN").upper(),
-            getattr(model, date_column) <= as_of,
+            date_filter,
         ).order_by(
             getattr(model, date_column).asc(),
             getattr(model, "id").asc(),
@@ -180,7 +171,7 @@ def _latest_by_code(
     ).scalars())
     grouped: dict[str, list[Any]] = defaultdict(list)
     for row in rows:
-        if not _visible(row.source_available_at, cutoff):
+        if not visible(row.source_available_at, cutoff):
             continue
         code = _code(row.code)
         if code:
@@ -218,6 +209,7 @@ def _classification_by_code(
         date_column="trade_date",
         status_column="classification",
         market=market,
+        exact_date=True,
     )
 
 
@@ -236,6 +228,7 @@ def _trading_status_by_code(
         date_column="trade_date",
         status_column="status",
         market=market,
+        exact_date=True,
     )
 
 
@@ -348,8 +341,8 @@ def resolve_valuation(
         SecurityValuationDaily.trade_date.asc(),
         SecurityValuationDaily.id.asc(),
     )).scalars())
-    visible = [row for row in rows if _visible(row.source_available_at, cutoff)]
-    if not visible:
+    visible_rows = [row for row in rows if visible(row.source_available_at, cutoff)]
+    if not visible_rows:
         return {
             "code": normalized,
             "as_of": day.isoformat(),
@@ -362,7 +355,7 @@ def resolve_valuation(
             "market_cap": None,
             "float_market_cap": None,
         }
-    row = visible[-1]
+    row = visible_rows[-1]
     return {
         "code": normalized,
         "as_of": day.isoformat(),
@@ -468,15 +461,15 @@ def resolve_etf_metadata(
         EtfMetadataHistory.effective_date.asc(),
         EtfMetadataHistory.id.asc(),
     )).scalars())
-    visible = [row for row in rows if _visible(row.source_available_at, cutoff)]
-    if not visible:
+    visible_rows = [row for row in rows if visible(row.source_available_at, cutoff)]
+    if not visible_rows:
         return {
             "code": normalized,
             "as_of": day.isoformat(),
             "available": False,
             "reason": "NO_HISTORICAL_ETF_METADATA",
         }
-    row = visible[-1]
+    row = visible_rows[-1]
     return {
         "code": normalized,
         "as_of": day.isoformat(),

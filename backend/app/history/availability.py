@@ -94,8 +94,11 @@ def pit_recompute_gate(
                 missing.append(key)
             else:
                 partial.append(key)
-        elif requirement == "ROWS" and status == "DATA_GAP":
-            missing.append(key)
+        elif requirement == "ROWS":
+            if status in {"DATA_GAP", "LEAKAGE_BLOCKED", "UNSUPPORTED"}:
+                missing.append(key)
+            elif status == "PARTIAL":
+                partial.append(key)
         elif requirement == "PUBLICATION" and status != "FULL":
             if status in {"DATA_GAP", "LEAKAGE_BLOCKED", "UNSUPPORTED"}:
                 missing.append(key)
@@ -119,7 +122,7 @@ def pit_recompute_gate(
             "partial_inputs": partial,
         }
     return {
-        "status": "FULL",
+        "status": "PIT_INPUTS_READY",
         "reason": "required_pit_inputs_available",
         "missing_inputs": [],
         "partial_inputs": [],
@@ -441,6 +444,7 @@ def history_manifest_items(
                 "point_in_time_universe": _capability(universe_status),
                 "DETERMINISTIC_RECOMPUTE": _capability(universe_status),
             },
+            "deterministic_recompute_engine": "NOT_IMPLEMENTED",
         },
         "survivorship": {
             "status": universe_status,
@@ -462,6 +466,7 @@ def history_manifest_items(
                 else "historical state unavailable for requested range"
             ),
             "capabilities": {"DETERMINISTIC_RECOMPUTE": _capability(universe_status)},
+            "deterministic_recompute_engine": "NOT_IMPLEMENTED",
         },
         "factor_point_in_time": {
             "production_snapshots": "PARTIAL",

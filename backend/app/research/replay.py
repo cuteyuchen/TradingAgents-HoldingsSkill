@@ -253,9 +253,10 @@ def load_replay_facts(
         else _as_of(None)
     )
     if mode == "DETERMINISTIC_RECOMPUTE":
-        # Recompute is permitted only when the explicit PIT dataset is
-        # complete for the requested range.  The historical data preparation
-        # step is separate from replay and never performs live network IO.
+        # Phase L builds the PIT foundation only.  The historical data
+        # preparation step is separate from replay and never performs live
+        # network IO; the deterministic recompute engine arrives in a later
+        # phase, so DETERMINISTIC_RECOMPUTE remains fail-closed today.
         from ..history.availability import pit_recompute_gate
 
         gate = pit_recompute_gate(
@@ -265,12 +266,16 @@ def load_replay_facts(
             end_date=end_date,
             market="CN",
         )
-        if gate["status"] != "FULL":
+        if gate["status"] in {"DATA_GAP", "LEAKAGE_BLOCKED"}:
             raise ReplayDataQualityError(
                 "DETERMINISTIC_RECOMPUTE_"
                 f"{gate['status']}:{gate.get('reason')}:"
                 + ",".join(gate.get("missing_inputs") or [])
             )
+        raise ReplayDataQualityError(
+            "DETERMINISTIC_RECOMPUTE_ENGINE_NOT_IMPLEMENTED:"
+            f"{gate['status']}:{gate.get('reason')}"
+        )
 
     result: dict[str, list[Any]] = {}
     if scope == "MARKET":

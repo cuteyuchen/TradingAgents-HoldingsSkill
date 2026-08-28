@@ -533,7 +533,7 @@ export interface HistoryCoverageItem {
   reason?: string | null
   row_count: number
   expected_dates?: number | null
-  known_dates?: number | null
+  known_dates?: string[] | null
   coverage?: number | null
   earliest_supported_at?: string | null
   latest_supported_at?: string | null

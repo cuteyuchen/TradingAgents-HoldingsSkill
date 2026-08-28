@@ -86,6 +86,7 @@ def test_history_api_coverage_availability_sync_and_state() -> None:
                         "exchange": "SSE",
                         "source": "operator-import",
                         "source_ref": "api-lifecycle-1",
+                        "source_available_at": f"{day}T09:00:00+08:00",
                     }
                 ],
             },

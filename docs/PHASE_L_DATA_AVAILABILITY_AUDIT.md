@@ -4,6 +4,18 @@
 
 本文档在写 Schema 之前完成，依据真实代码审计，不假设 Provider 能力。结论是 Phase L 只建立可验证的 PIT 基础层，不虚构历史数据源。
 
+## 0. Phase L.1 PIT 语义更新
+
+Phase L.1 对 PIT 规则做了三项收紧：
+
+- `source_available_at` 缺失 = 不可见。非 fundamental 的 PIT-required 导入缺少该字段
+  时直接拒绝；resolver 对缺失事实返回 `UNKNOWN` / `DATA_GAP`，绝不按 visible 处理。
+- A 股日末统一为 `shanghai_end_of_day_to_utc_naive(day)`。SQLAlchemy DateTime 是
+  UTC-naive，因此上海日末必须先转 UTC，再与 `source_available_at` 比较。
+- Coverage 的 denominator 从“日期有没有一行”改为“该日期应该覆盖的证券状态”。
+  lifecycle event 本身无法证明 absence，因此只能 PARTIAL；daily 表按
+  security × date 统计，单行无法让 5000 只证券的交易日变成 FULL。
+
 ## 1. 审计范围
 
 实际读取：
@@ -124,13 +136,18 @@
 - `source_available_at` 是数据源角度可用时间。
 - `captured_at` 是系统抓取时间。
 - `ingested_at` 是写入数据库时间。
+- `source_available_at = NULL` 时事实不可见；PIT-required 导入直接拒绝该 row。
 - `published_at <= as_of` 是基本面/估值可见性的硬门槛。
 - 缺失历史状态必须是 `UNKNOWN`/`DATA_GAP`，不能当作 `NORMAL`/`0`。
+- Trading/Classification 是当日状态：`trade_date == as_of`，当日缺失不 forward-fill。
+- 同一 `source_ref` 的内容修订追加 revision row，旧 as-of 继续读取旧版本。
+- A 股日末使用 Asia/Shanghai 转 UTC-naive；禁止用本地 23:59:59 直接比较 UTC 字段。
 
 ## 5. Phase L 后的能力
 
 - 历史 lifecycle / trading status / ST / valuation / fundamental publication / ETF metadata / price basis 有独立表。
 - `resolve_equity_universe` 只使用历史事实构建 as-of universe。
-- `historical_data_coverage` 报告真实 coverage，不把 `KNOWN/TOTAL` 写为 1.0。
-- Research Manifest 只对完整/部分 PIT 输入开放 `DETERMINISTIC_RECOMPUTE`；缺失日期继续 `LEAKAGE_BLOCKED` / `DATA_GAP`。
+- `historical_data_coverage` 报告 security × date coverage，不把“日期有一行”写为 1.0。
+- `pit_recompute_gate()` 在输入就绪时返回 `PIT_INPUTS_READY`；
+  `DETERMINISTIC_RECOMPUTE` 在 recompute engine 实现前固定 fail-close。
 - Candidate 全市场 full-equivalence 仍未完成，明确标 `PARTIAL_PIT_RECOMPUTE`。

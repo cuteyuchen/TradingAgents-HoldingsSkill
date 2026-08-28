@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..market.codes import normalize_security_code
@@ -49,6 +49,18 @@ UNSUPPORTED_PROVIDERS = {
     "EASTMONEY",
     "TENCENT",
     "MOOTDX",
+}
+
+# Non-fundamental PIT facts are only usable when the source made them
+# available at a known time.  Fundamentals use published_at as their PIT
+# availability field and are validated separately.
+_REQUIRE_AVAILABILITY_TYPES = {
+    "security_lifecycle",
+    "trading_status",
+    "st_classification",
+    "valuation",
+    "etf_metadata",
+    "price_basis",
 }
 
 _KEY_FIELDS = {
@@ -157,6 +169,8 @@ def _normalise_row(
     payload["market"] = str(payload["market"] or market or "CN").upper()
     if "code" in payload:
         payload["code"] = normalize_security_code(payload["code"])
+    if data_type in _REQUIRE_AVAILABILITY_TYPES and not payload.get("source_available_at"):
+        raise ValueError("source_available_at_required_for_pit_fact")
     payload.setdefault("source", source)
     payload["source"] = str(payload["source"] or source)
     payload.setdefault("quality_status", "VALID")
@@ -257,10 +271,50 @@ def import_historical_facts(
         if not changes:
             counters["skipped"] += 1
             continue
-        counters["updated"] += 1
-        for key, value in changes.items():
-            setattr(existing, key, value)
-        existing.ingested_at = _now()
+        revised = dict(payload)
+        base_ref = str(existing.source_ref or payload.get("source_ref") or "auto")
+        content = {
+            key: value
+            for key, value in payload.items()
+            if key not in _GENERATED_FIELDS
+            and key not in {"source_ref", "revision_number", "is_restatement"}
+        }
+        derived_ref = f"{base_ref}#{_content_hash(content)[:16]}"
+        revised["source_ref"] = derived_ref
+        if data_type == "fundamentals":
+            revision_filters = {
+                key: value
+                for key, value in filters.items()
+                if key != "source_ref"
+            }
+            max_revision = int(
+                db.execute(
+                    select(func.max(FundamentalReport.revision_number)).where(
+                        *(
+                            getattr(FundamentalReport, key) == value
+                            for key, value in revision_filters.items()
+                        )
+                    )
+                ).scalar() or 0
+            )
+            revised["revision_number"] = int(revised.get("revision_number") or 0) or max_revision + 1
+            if int(revised["revision_number"]) > 0:
+                revised["is_restatement"] = True
+        revision_filters = dict(filters)
+        revision_filters["source_ref"] = derived_ref
+        revision_exists = db.execute(
+            select(model).where(
+                *(
+                    getattr(model, key) == value
+                    for key, value in revision_filters.items()
+                )
+            )
+        ).scalar_one_or_none()
+        if revision_exists is not None:
+            counters["skipped"] += 1
+            continue
+        counters["inserted"] += 1
+        db.add(model(**revised))
         _batch_flush(db, counters)
     if not dry_run:
         db.flush()
