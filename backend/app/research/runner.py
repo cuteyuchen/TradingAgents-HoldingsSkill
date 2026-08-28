@@ -186,7 +186,11 @@ def create_backtest_run(
         raise ValueError("invalid_bootstrap_iterations")
     if scope == "PORTFOLIO_DECISION" and portfolio_id is None:
         raise ValueError("portfolio_id_required_for_portfolio_scope")
-    config = current_production_config()
+    from ..governance.service import lineage_fields, resolve_production_parameters
+
+    governance_context = resolve_production_parameters(db)
+    governance_lineage = lineage_fields(governance_context)
+    config = governance_context["snapshot"]
     transaction_cost_model = current_transaction_cost_model()
     experiment_payload = {
         "horizons": list(horizon_values),
@@ -269,6 +273,10 @@ def create_backtest_run(
         known_limitations_json=manifest.get("known_limitations", []),
         lease_expires_at=None,
         attempt_count=1,
+        parameter_set_version_id=governance_lineage["parameter_set_version_id"],
+        parameter_set_version=governance_lineage["parameter_set_version"],
+        parameter_set_hash=governance_lineage["parameter_set_hash"],
+        governance_lineage_json=governance_lineage["governance_lineage_json"],
     )
     db.add(row)
     try:

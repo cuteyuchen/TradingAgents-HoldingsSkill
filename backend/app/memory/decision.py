@@ -609,6 +609,10 @@ def capture_decision_memory(
         decision_features_json=features,
         source_refs_json=refs,
         calculation_version=DECISION_MEMORY_VERSION,
+        parameter_set_version_id=getattr(run, "parameter_set_version_id", None),
+        parameter_set_version=getattr(run, "parameter_set_version", None) or "LEGACY_PRE_GOVERNANCE",
+        parameter_set_hash=getattr(run, "parameter_set_hash", None),
+        governance_lineage_json=getattr(run, "governance_lineage_json", None),
     )
     db.add(memory)
     db.flush()

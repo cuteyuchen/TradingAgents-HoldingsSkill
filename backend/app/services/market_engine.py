@@ -517,6 +517,12 @@ class MarketEngine:
     def __init__(self, db: Session, *, history_provider: Any | None = None) -> None:
         self.db = db
         self.history_provider = history_provider
+        from ..governance.service import lineage_fields, resolve_production_parameters
+        from ..governance.registry import market_regime_settings
+
+        self.parameter_context = resolve_production_parameters(db)
+        self.parameter_lineage = lineage_fields(self.parameter_context)
+        self.market_regime = market_regime_settings(self.parameter_context["snapshot"])
 
     def calculate(
         self,
@@ -694,6 +700,7 @@ class MarketEngine:
                 confidence * SNAPSHOT_CAPTURE_SPAN_FULL_CONFIDENCE_SECONDS / capture_span_seconds,
                 2,
             )
+        lower_bounds, hysteresis = self.market_regime
         score = build_market_score_snapshot(
             components,
             trade_date=day,
@@ -703,6 +710,8 @@ class MarketEngine:
             quality_status=quality,
             confidence=confidence,
             last_reliable_score=last_reliable_score,
+            lower_bounds=lower_bounds,
+            hysteresis=hysteresis,
         )
         raw_score = _round_score(score.raw_score)
         display_score = _round_score(score.display_score)
@@ -822,6 +831,10 @@ class MarketEngine:
                 calculation_version=MARKET_ENGINE_VERSION,
                 score_config_version=SCORE_CONFIG_VERSION,
                 universe_rule_version=UNIVERSE_RULE_VERSION,
+                parameter_set_version_id=self.parameter_lineage["parameter_set_version_id"],
+                parameter_set_version=self.parameter_lineage["parameter_set_version"],
+                parameter_set_hash=self.parameter_lineage["parameter_set_hash"],
+                governance_lineage_json=self.parameter_lineage["governance_lineage_json"],
             )
             if existing_metric is None:
                 self.db.add(metric_row)
@@ -874,6 +887,10 @@ class MarketEngine:
             "calculation_version": MARKET_ENGINE_VERSION,
             "score_config_version": SCORE_CONFIG_VERSION,
             "universe_rule_version": UNIVERSE_RULE_VERSION,
+            "parameter_set_version_id": self.parameter_lineage["parameter_set_version_id"],
+            "parameter_set_version": self.parameter_lineage["parameter_set_version"],
+            "parameter_set_hash": self.parameter_lineage["parameter_set_hash"],
+            "governance_lineage": self.parameter_lineage["governance_lineage_json"],
         }
 
 

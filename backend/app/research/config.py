@@ -162,8 +162,8 @@ def validate_horizons(values: list[int] | tuple[int, ...] | None, *, market: boo
     return horizons
 
 
-def current_production_config() -> dict[str, Any]:
-    """Return a JSON-safe snapshot without changing any live configuration."""
+def _code_default_production_config() -> dict[str, Any]:
+    """Return the JSON-safe snapshot built from the current code constants."""
 
     from ..candidates.config import DEFAULT_CONFIG as candidate_config
     from ..decision_contract import CONTRACT_VERSION
@@ -198,6 +198,27 @@ def current_production_config() -> dict[str, Any]:
         "runtime_contract_version": CONTRACT_VERSION,
         "decision_contract_version": CONTRACT_VERSION,
     }
+
+
+def current_production_config() -> dict[str, Any]:
+    """Return the active immutable parameter snapshot when governance is online.
+
+    Without a governance table (unit tests and first boot), the code defaults are
+    returned unchanged so existing deterministic tests keep their baseline.
+    """
+
+    try:
+        from ..governance.service import resolve_production_parameters
+        from ..governance.service import GovernanceBlockedError
+
+        context = resolve_production_parameters()
+        if context.get("version_id") is not None:
+            return context["snapshot"]
+    except GovernanceBlockedError:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
+    return _code_default_production_config()
 
 
 def current_config_version() -> str:

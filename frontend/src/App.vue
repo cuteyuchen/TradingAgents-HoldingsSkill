@@ -9,6 +9,7 @@ import {
   LogOut,
   Moon,
   Settings,
+  ShieldCheck,
   Sun,
   Upload,
 } from 'lucide-vue-next'
@@ -42,6 +43,7 @@ const navigation = [
   { name: 'upload', label: '今日持仓', icon: Upload },
   { name: 'reports', label: '分析报告', icon: BarChart3 },
   { name: 'research', label: '历史研究', icon: FlaskConical },
+  { name: 'governance', label: '参数治理', icon: ShieldCheck },
   { name: 'settings', label: '系统设置', icon: Settings },
 ]
 

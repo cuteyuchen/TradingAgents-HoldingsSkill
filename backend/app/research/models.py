@@ -71,6 +71,10 @@ class BacktestRun(Base):
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=1)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    parameter_set_version_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    parameter_set_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    parameter_set_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    governance_lineage_json: Mapped[dict | None] = mapped_column(JSON)
 
     metric_slices: Mapped[list["BacktestMetricSlice"]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="BacktestMetricSlice.id"

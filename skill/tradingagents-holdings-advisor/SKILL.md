@@ -79,6 +79,19 @@ PRODUCTION_REPLAY, DETERMINISTIC_RECOMPUTE, and BAR_ONLY_DIAGNOSTIC remain separ
 
 Calibration may return KEEP_CURRENT, CONSIDER_CHANGE, INSUFFICIENT_EVIDENCE, or REJECT_CHANGE only. It must use chronological train/validation/test separation, never select from the test set, and never automatically apply a threshold, factor weight, runtime prompt, risk rule, or production configuration. Do not inject backtest metrics or historical best parameters into live Decision context.
 
+## Parameter Governance (Phase J)
+
+Phase J makes parameter changes a versioned, human-reviewed operation. Research proposes, humans approve, governance versions, production consumes, and rollback stays possible. There is no auto-apply and no auto-trade path in governance.
+
+- Calibration is evidence only. `CONSIDER_CHANGE` creates a `ParameterChangeProposal`; it never changes the ACTIVE `ParameterSetVersion`.
+- Approval creates an immutable `APPROVED` version. Activation is a separate explicit step and the only operation that changes what future production runs consume.
+- The model cannot approve, activate, or roll back parameter versions. Governance actions require an authenticated human actor and are recorded in an append-only audit timeline.
+- Each production Market, Candidate, Analysis, Decision Memory, and Backtest run records the `ParameterSetVersion` it started with. A version activated mid-run never changes that run.
+- Backtests freeze the ACTIVE parameter snapshot, version, and config hash at creation time, even if a newer version is activated later.
+- Rollback creates a new version whose snapshot equals the target version; old rows are never reactivated. Rollback is explicit and audited, never automatic from PnL.
+- Protected invariants such as stock 20% / sector-theme ETF 30% hard caps, ACTION max 3, data-quality fail-close, and no-auto-trade cannot be changed by standard calibration. A manual exception requires explicit risk acknowledgement.
+- Trading-session activation is blocked by default. Emergency activation requires an authenticated actor, a reason, and an audit event.
+
 ## Quality-First Workflow
 
 Target routine execution time is about 10 minutes, but this is a progress

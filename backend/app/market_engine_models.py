@@ -86,6 +86,10 @@ class MarketScoreSnapshot(Base):
     calculation_version: Mapped[str] = mapped_column(String(64), default="market-engine-v1")
     score_config_version: Mapped[str] = mapped_column(String(64), default="market-score-config-v1")
     universe_rule_version: Mapped[str] = mapped_column(String(64), default="market-universe-v1")
+    parameter_set_version_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    parameter_set_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    parameter_set_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    governance_lineage_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 

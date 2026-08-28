@@ -42,6 +42,7 @@ def init_db() -> None:
         market_models,
         market_runtime_models,
         memory,
+        governance,
         models,
         operations,
         research,
@@ -53,7 +54,27 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
+    _bootstrap_parameter_governance()
     _repair_historical_pnl_values()
+
+
+def _bootstrap_parameter_governance() -> None:
+    """Create ACTIVE v1 exactly once when no governance history exists."""
+
+    from .governance import GovernanceBlockedError, bootstrap_parameter_set
+
+    if not inspect(engine).has_table("parameter_set_versions"):
+        return
+    db = SessionLocal()
+    try:
+        bootstrap_parameter_set(db)
+    except GovernanceBlockedError:
+        # A deployment with governance history but no ACTIVE version is an
+        # operator intervention point.  Health remains BLOCKED and new
+        # risk-increasing candidate work fails closed instead of guessing.
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _apply_lightweight_migrations() -> None:

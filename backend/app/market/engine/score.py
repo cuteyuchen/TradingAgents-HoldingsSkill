@@ -374,9 +374,15 @@ def build_market_score_snapshot(
     quality_status: str | None = None,
     confidence: float | None = None,
     last_reliable_score: float | None = None,
+    lower_bounds: Mapping[str, float] | None = None,
+    hysteresis: Mapping[str, Mapping[str, float]] | None = None,
+    regime_order: Iterable[str] = REGIME_ORDER,
 ) -> MarketScoreSnapshot:
     """Assemble a score result with deterministic degraded/frozen behavior."""
 
+    lower_bounds = lower_bounds if lower_bounds is not None else REGIME_LOWER_BOUNDS
+    hysteresis = hysteresis if hysteresis is not None else REGIME_HYSTERESIS
+    order = tuple(dict.fromkeys(regime_order))
     aggregation = aggregate_component_scores(components)
     gate = coverage_gate(coverage) if coverage is not None else CoverageDecision(1.0, "VALID", False)
     source_quality = str(getattr(quality_status, "value", quality_status) or "").upper()
@@ -391,11 +397,27 @@ def build_market_score_snapshot(
     if gate.is_frozen:
         raw_score = None
         display_score = _number(last_reliable_score)
-        regime = apply_regime_hysteresis(display_score, previous_regime) if display_score is not None else previous_regime
+        regime = (
+            apply_regime_hysteresis_with_bounds(
+                display_score,
+                previous_regime,
+                lower_bounds=lower_bounds,
+                hysteresis=hysteresis,
+                order=order,
+            )
+            if display_score is not None
+            else previous_regime
+        )
     else:
         raw_score = aggregation.score
         display_score = smooth_score(previous_display_score, raw_score)
-        regime = apply_regime_hysteresis(display_score, previous_regime)
+        regime = apply_regime_hysteresis_with_bounds(
+            display_score,
+            previous_regime,
+            lower_bounds=lower_bounds,
+            hysteresis=hysteresis,
+            order=order,
+        )
     component_values = {
         component_name: value if isinstance(value, ComponentScore) else ComponentScore(
             name=component_name,

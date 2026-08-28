@@ -53,6 +53,10 @@ class CandidateRun(Base):
     decision_edge_version: Mapped[str] = mapped_column(String(64), default="decision-edge-v1")
     exclusion_counts_json: Mapped[dict | None] = mapped_column(JSON)
     metadata_json: Mapped[dict | None] = mapped_column(JSON)
+    parameter_set_version_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    parameter_set_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    parameter_set_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    governance_lineage_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
     scores: Mapped[list["CandidateScore"]] = relationship(

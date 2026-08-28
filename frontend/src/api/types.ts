@@ -344,6 +344,109 @@ export interface CalibrationReport {
   no_auto_apply: boolean
 }
 
+export type GovernanceParameterClassification = 'CALIBRATABLE' | 'PROTECTED' | 'OPERATIONAL' | 'EXTERNAL' | 'DERIVED'
+export type GovernanceParameterValue = string | number | boolean | Record<string, any> | null
+
+export interface GovernanceParameter {
+  display_name: string
+  domain: string
+  classification: GovernanceParameterClassification
+  value_type: string
+  min_value?: number | null
+  max_value?: number | null
+  allowed_values?: Array<string | number> | null
+  calibration_supported: boolean
+  requires_calibration_report: boolean
+  protected: boolean
+  restart_required: boolean
+  runtime_contract_relevant: boolean
+  description: string
+  current_value?: GovernanceParameterValue
+}
+
+export interface ParameterSetVersion {
+  id: number
+  version: number
+  status: string
+  parent_version_id?: number | null
+  created_by_user_id?: number | null
+  approved_by_user_id?: number | null
+  source_proposal_id?: number | null
+  snapshot?: Record<string, any> | null
+  diff?: Record<string, any> | null
+  config_hash: string
+  runtime_contract_version: string
+  decision_contract_version: string
+  validation?: Record<string, any> | null
+  validation_status?: string | null
+  created_at?: string | null
+  approved_at?: string | null
+  activated_at?: string | null
+  deactivated_at?: string | null
+  activation_reason?: string | null
+  rollback_from_version_id?: number | null
+  rollback_reason?: string | null
+}
+
+export interface ParameterChangeProposal {
+  id: number
+  user_id?: number | null
+  source_type: string
+  source_calibration_report_id?: number | null
+  base_parameter_set_version_id?: number | null
+  target_parameter: string
+  current_value?: any
+  proposed_value?: any
+  proposed_snapshot?: Record<string, any> | null
+  proposal_type: string
+  status: string
+  evidence?: Record<string, any> | null
+  risk_summary?: Record<string, any> | null
+  validation_summary?: Record<string, any> | null
+  reason?: string | null
+  risk_acknowledged: boolean
+  created_at?: string | null
+  submitted_at?: string | null
+  reviewed_at?: string | null
+  reviewed_by_user_id?: number | null
+  review_comment?: string | null
+  approved_version_id?: number | null
+}
+
+export interface ParameterGovernanceEvent {
+  id: number
+  actor_user_id?: number | null
+  event_type: string
+  proposal_id?: number | null
+  parameter_set_version_id?: number | null
+  occurred_at?: string | null
+  metadata?: Record<string, any> | null
+}
+
+export interface GovernanceRegistryResponse {
+  registry: Record<string, GovernanceParameter>
+  active_version_id?: number | null
+  active_version?: number | null
+}
+
+export interface ParameterSetListResponse {
+  versions: ParameterSetVersion[]
+}
+
+export interface ProposalListResponse {
+  proposals: ParameterChangeProposal[]
+}
+
+export interface GovernanceEventListResponse {
+  events: ParameterGovernanceEvent[]
+}
+
+export interface GovernanceHealth {
+  status: 'OK' | 'DEGRADED' | 'BLOCKED'
+  reasons: string[]
+  active: ParameterSetVersion | null
+}
+
 // Legacy archive types remain for migration/debug views.
 export interface ScreenshotPayload {
   filename?: string | null

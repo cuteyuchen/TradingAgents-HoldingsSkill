@@ -570,10 +570,17 @@ def _candidate_context_for_analysis(
     job: AnalysisJob,
     analysis_mode: str,
     quote_rows: Any = None,
+    parameter_context: dict[str, Any] | None = None,
+    parameter_lineage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load deterministic candidates without allowing analysis to invent them."""
 
     try:
+        candidate_config = None
+        if parameter_context is not None:
+            from ..governance.registry import candidate_config_from_snapshot
+
+            candidate_config = candidate_config_from_snapshot(parameter_context["snapshot"])
         if analysis_mode == "fast":
             return latest_candidate_context(
                 db,
@@ -590,10 +597,13 @@ def _candidate_context_for_analysis(
             snapshot_id=job.snapshot_id,
             mode=analysis_mode,
             persist=True,
+            config=candidate_config,
             # Standard/Deep own one fresh all-market bulk quote snapshot inside
             # Candidate Engine.  The initial market snapshot only covers held
             # positions and must not be reused as candidate provenance.
             quote_rows=None,
+            parameter_context=parameter_context,
+            parameter_lineage=parameter_lineage,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Candidate Engine unavailable for analysis job %s", job.id)
@@ -1283,6 +1293,11 @@ def run_analysis_job(job_id: int) -> None:
         if heartbeat is not None:
             heartbeat.start()
 
+        from ..governance.service import lineage_fields, resolve_production_parameters
+
+        parameter_context = resolve_production_parameters(db)
+        parameter_lineage = lineage_fields(parameter_context)
+
         snapshot_row = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == job.snapshot_id).first()
         if snapshot_row is None or snapshot_row.status != "confirmed":
             raise RuntimeError("confirmed_snapshot_not_found")
@@ -1343,6 +1358,8 @@ def run_analysis_job(job_id: int) -> None:
             job=job,
             analysis_mode=analysis_mode,
             quote_rows=market.get("quotes") if isinstance(market, dict) else None,
+            parameter_context=parameter_context,
+            parameter_lineage=parameter_lineage,
         )
         workflow["candidate_context"] = candidate_context
         memory_context = memory_context_for_analysis(
@@ -1760,6 +1777,10 @@ def run_analysis_job(job_id: int) -> None:
                 },
             },
             markdown_text=markdown,
+            parameter_set_version_id=parameter_lineage["parameter_set_version_id"],
+            parameter_set_version=parameter_lineage["parameter_set_version"],
+            parameter_set_hash=parameter_lineage["parameter_set_hash"],
+            governance_lineage_json=parameter_lineage["governance_lineage_json"],
         )
         db.add(run)
         job.status = "succeeded"

@@ -728,6 +728,12 @@ def _health_section(
     ) if daily_bar else "MISSING"
     review = memory.get("review") or {}
     review_raw_status = "DEGRADED" if review.get("review_stale") else review.get("status", "MISSING")
+    try:
+        from ..governance.service import governance_health
+
+        governance = governance_health(db)
+    except Exception:  # noqa: BLE001
+        governance = {"status": "BLOCKED", "reasons": ["GOVERNANCE_HEALTH_UNAVAILABLE"], "active": None}
     components = [
         {
             "name": "TradingCalendar",
@@ -765,6 +771,7 @@ def _health_section(
         {"name": "Realtime Monitor", "status": _health_status(monitor_status, mandatory=False), "mandatory": False, "detail": {**monitor, "expected_in_session": in_session}},
         {"name": "Daily Review", "status": _health_status(review_raw_status, mandatory=False), "mandatory": False, "detail": {"id": review.get("id"), "review_stale": review.get("review_stale", False), "refresh_count": review.get("refresh_count", 0)}},
         {"name": "DailyBar", "status": _health_status(daily_bar_freshness, mandatory=False), "mandatory": False, "detail": {"trade_date": daily_bar.trade_date if daily_bar else None, "available_at": daily_bar.available_at if daily_bar else None}},
+        {"name": "Parameter Governance", "status": _health_status(governance.get("status"), mandatory=False), "mandatory": False, "detail": {"reasons": governance.get("reasons") or [], "active_version": (governance.get("active") or {}).get("version"), "active_version_id": (governance.get("active") or {}).get("id")}},
     ]
     overall = _overall(components)
     return {

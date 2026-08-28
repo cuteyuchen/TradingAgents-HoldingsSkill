@@ -800,10 +800,21 @@ def scan_candidates(
     quote_rows: Any = None,
     snapshot_id: int | None = None,
     config: CandidateConfig = DEFAULT_CONFIG,
+    parameter_context: dict[str, Any] | None = None,
+    parameter_lineage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one local-cache Candidate scan without provider/network fan-out."""
 
     started = time.perf_counter()
+    from ..governance.registry import candidate_config_from_snapshot
+    from ..governance.service import lineage_fields, resolve_production_parameters
+
+    if parameter_context is None:
+        parameter_context = resolve_production_parameters(db)
+    if parameter_lineage is None:
+        parameter_lineage = lineage_fields(parameter_context)
+    if config is DEFAULT_CONFIG:
+        config = candidate_config_from_snapshot(parameter_context["snapshot"])
     live_scan = as_of is None
     moment = _as_of(as_of)
     mode = str(mode or "standard").lower()
@@ -1147,6 +1158,10 @@ def scan_candidates(
                 "entry_score_version": config.entry_score_version,
                 "portfolio_fit_version": config.portfolio_fit_version,
                 "decision_edge_version": config.decision_edge_version,
+                "parameter_set_version_id": parameter_lineage["parameter_set_version_id"],
+                "parameter_set_version": parameter_lineage["parameter_set_version"],
+                "parameter_set_hash": parameter_lineage["parameter_set_hash"],
+                "governance_lineage": parameter_lineage["governance_lineage_json"],
                 "exclusion_counts": dict(exclusion_counts),
                 "metadata": metadata,
             },
@@ -1202,6 +1217,10 @@ def scan_candidates(
         entry_score_version=config.entry_score_version,
         portfolio_fit_version=config.portfolio_fit_version,
         decision_edge_version=config.decision_edge_version,
+        parameter_set_version_id=parameter_lineage["parameter_set_version_id"],
+        parameter_set_version=parameter_lineage["parameter_set_version"],
+        parameter_set_hash=parameter_lineage["parameter_set_hash"],
+        governance_lineage_json=parameter_lineage["governance_lineage_json"],
         exclusion_counts_json=dict(exclusion_counts),
         metadata_json=metadata,
     )
