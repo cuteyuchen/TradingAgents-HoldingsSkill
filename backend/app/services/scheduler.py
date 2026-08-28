@@ -438,6 +438,9 @@ def create_scheduled_job(
         raise RuntimeError(f"snapshot_stale:{age_days}d")
     if existing and force:
         key = key + f":manual:{int(local_now.timestamp())}"
+    from ..system.health import require_runtime_ready_for_risk_work
+
+    require_runtime_ready_for_risk_work(db)
     job = AnalysisJob(
         user_id=schedule.user_id,
         portfolio_id=schedule.portfolio_id,
@@ -461,6 +464,8 @@ def create_scheduled_job(
 def tick_schedules() -> None:
     db = SessionLocal()
     try:
+        from ..system.health import RuntimeNotReadyError
+
         rows = db.query(Schedule).filter(Schedule.enabled.is_(True)).all()
         now_utc = datetime.now(UTC)
         local = now_utc.astimezone(CHINA_TZ)
@@ -515,6 +520,14 @@ def tick_schedules() -> None:
                 db.commit()
                 if should_start:
                     threading.Thread(target=run_scheduled_job, args=(job.id, schedule.id), daemon=True).start()
+            except RuntimeNotReadyError as exc:
+                logger.warning(
+                    "Schedule %s blocked by readiness authority: %s",
+                    schedule.id,
+                    exc,
+                )
+                schedule.next_run_at = next_run(schedule, now_utc, db=db)
+                db.commit()
             except Exception as exc:
                 logger.exception("Schedule %s failed to enqueue", schedule.id)
                 schedule.consecutive_failures += 1

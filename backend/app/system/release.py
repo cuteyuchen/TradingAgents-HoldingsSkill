@@ -8,12 +8,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..governance.service import GovernanceBlockedError, resolve_production_parameters
 from ..services.skill_runtime import runtime_metadata
+from .tables import table_exists
 
 STARTED_AT = datetime.now(UTC)
 
@@ -50,7 +51,7 @@ def code_head_revision() -> str | None:
 
 def alembic_db_revision(db: Session) -> str | None:
     try:
-        if not inspect(db.get_bind()).has_table("alembic_version"):
+        if not table_exists(db, "alembic_version"):
             return None
         row = db.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).scalar_one_or_none()
         return str(row) if row else None

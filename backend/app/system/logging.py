@@ -36,10 +36,15 @@ SECRET_FIELD_NAMES = (
     "webhook",
     "encrypted_webhook",
 )
-_KEY_PATTERN = re.compile(
+_QUOTED_KEY_PATTERN = re.compile(
     r"(?i)([\"']?(?:"
     + "|".join(re.escape(item) for item in SECRET_FIELD_NAMES)
     + r")[\"']?\s*[:=]\s*[\"'])([^\"']{4,})([\"'])"
+)
+_BARE_KEY_PATTERN = re.compile(
+    r"(?i)([\"']?(?:"
+    + "|".join(re.escape(item) for item in SECRET_FIELD_NAMES)
+    + r")[\"']?\s*[:=]\s*)([A-Za-z0-9._~+/=-]{4,})(?=[,\s}\]]|$)"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*")
 
@@ -55,7 +60,8 @@ def _known_secret_values() -> list[str]:
 
 def redact_text(value: str) -> str:
     redacted = _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
-    redacted = _KEY_PATTERN.sub(r"\1[REDACTED]\3", redacted)
+    redacted = _QUOTED_KEY_PATTERN.sub(r"\1[REDACTED]\3", redacted)
+    redacted = _BARE_KEY_PATTERN.sub(r"\1[REDACTED]", redacted)
     for secret in _known_secret_values():
         redacted = redacted.replace(secret, "[REDACTED]")
     return redacted
@@ -71,6 +77,45 @@ def redact_object(value: Any) -> Any:
     return value
 
 
+class RedactingFormatter(logging.Formatter):
+    """Format records with correlation fields and redact every rendered line."""
+
+    _DEFAULT_FORMAT = (
+        "%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s "
+        "analysis_job_id=%(analysis_job_id)s backtest_run_id=%(backtest_run_id)s "
+        "parameter_set_version=%(parameter_set_version)s %(message)s"
+    )
+
+    def __init__(self, fmt: str | None = None) -> None:
+        super().__init__(fmt or self._DEFAULT_FORMAT)
+
+    def format(self, record: logging.LogRecord) -> str:
+        correlation = correlation_fields()
+        record.request_id = str(
+            record.__dict__.get("request_id")
+            or correlation.get("request_id")
+            or get_request_id()
+            or "-"
+        )
+        record.analysis_job_id = str(
+            record.__dict__.get("analysis_job_id")
+            or correlation.get("analysis_job_id")
+            or "-"
+        )
+        record.backtest_run_id = str(
+            record.__dict__.get("backtest_run_id")
+            or correlation.get("backtest_run_id")
+            or "-"
+        )
+        record.parameter_set_version = str(
+            record.__dict__.get("parameter_set_version")
+            or correlation.get("parameter_set_version")
+            or "-"
+        )
+        rendered = super().format(record)
+        return redact_text(rendered)
+
+
 class MemoryLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
@@ -83,16 +128,19 @@ _HANDLER_INSTALLED = False
 
 def configure_logging() -> None:
     global _HANDLER_INSTALLED
-    if _HANDLER_INSTALLED:
-        return
-    handler = MemoryLogHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
-    handler.setLevel(logging.INFO)
     root = logging.getLogger()
-    root.addHandler(handler)
+    if not _HANDLER_INSTALLED:
+        handler = MemoryLogHandler()
+        handler.setFormatter(RedactingFormatter())
+        handler.setLevel(logging.INFO)
+        root.addHandler(handler)
     _HANDLER_INSTALLED = True
+    # basicConfig may install a plain console handler before this module is
+    # configured. Replace every non-redacting formatter so stdout/stderr logs
+    # carry the same redaction and correlation fields as the memory handler.
+    for handler in list(root.handlers):
+        if not isinstance(handler.formatter, RedactingFormatter):
+            handler.setFormatter(RedactingFormatter())
 
 
 def tail_logs(limit: int = 2000) -> list[str]:
@@ -137,6 +185,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 __all__ = [
     "MemoryLogHandler",
+    "RedactingFormatter",
     "RequestIDMiddleware",
     "bind_worker_context",
     "configure_logging",

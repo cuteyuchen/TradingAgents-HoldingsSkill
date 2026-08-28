@@ -23,6 +23,7 @@ from ..services.analysis_engine import run_analysis_job
 from ..services.analysis_lease import reclaim_running_analysis_job
 from ..services.realtime_monitor import get_realtime_monitor
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
+from ..system.health import RuntimeNotReadyError
 from ..v2_models import AnalysisJob, AnalysisRun, Portfolio, PortfolioSnapshot
 from .config import (
     ANALYSIS_CHECKPOINTS,
@@ -360,6 +361,9 @@ def _admit_checkpoint_job(
     snapshot = latest_snapshot(db, user_id=portfolio.user_id, portfolio_id=portfolio.id, as_of=now)
     if snapshot is None:
         return None
+    from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk_work
+
+    require_runtime_ready_for_risk_work(db)
     job = AnalysisJob(
         user_id=portfolio.user_id,
         portfolio_id=portfolio.id,
@@ -740,15 +744,29 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
             state[checkpoint.key] = {"status": "MISSED", "scheduled_at": checkpoint.at.strftime("%H:%M"), "updated_at": local.isoformat()}
             _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
             continue
-        admission = _admit_checkpoint_job(
-            db,
-            portfolio=portfolio,
-            trade_date=trade_date,
-            checkpoint=checkpoint.key,
-            mode=checkpoint.mode or "standard",
-            now=local,
-            reclaim=reclaimed,
-        )
+        try:
+            admission = _admit_checkpoint_job(
+                db,
+                portfolio=portfolio,
+                trade_date=trade_date,
+                checkpoint=checkpoint.key,
+                mode=checkpoint.mode or "standard",
+                now=local,
+                reclaim=reclaimed,
+            )
+        except RuntimeNotReadyError as exc:
+            state[checkpoint.key] = {
+                "status": "BLOCKED",
+                "reason": f"RUNTIME_NOT_READY:{exc}",
+                "updated_at": local.isoformat(),
+            }
+            _finish_checkpoint_claim(
+                claim,
+                status="BLOCKED",
+                local=local,
+                reason=f"RUNTIME_NOT_READY:{exc}",
+            )
+            continue
         if admission is None:
             state[checkpoint.key] = {"status": "BLOCKED", "reason": "confirmed_snapshot_not_found", "updated_at": local.isoformat()}
             _finish_checkpoint_claim(claim, status="BLOCKED", local=local, reason="confirmed_snapshot_not_found")

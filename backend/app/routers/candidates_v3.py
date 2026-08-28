@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..candidates.schemas import CandidateScanRequest
 from ..candidates.service import get_candidate_run, latest_candidate_context, list_candidate_runs, scan_candidates
 from ..database import get_db
+from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk_work
 from ..v2_dependencies import get_current_user
 from ..v2_models import Portfolio, User
 
@@ -35,6 +36,16 @@ def _service_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=code)
 
 
+def _require_ready(db: Session) -> None:
+    try:
+        require_runtime_ready_for_risk_work(db)
+    except RuntimeNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
 @router.post("/portfolios/{portfolio_id}/candidates/scan")
 def scan(
     portfolio_id: int,
@@ -43,6 +54,7 @@ def scan(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    _require_ready(db)
     try:
         result = scan_candidates(
             db,

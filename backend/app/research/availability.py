@@ -12,7 +12,7 @@ import json
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,7 @@ from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import MarketSnapshot, SourceLineage
 from ..memory.models import DecisionMemory, DecisionOutcome
 from ..portfolio_models import PortfolioRiskSnapshot, TradeLedgerEntry
+from ..system.tables import table_exists as _session_table_exists
 from ..v2_models import PortfolioSnapshot
 from .config import REPLAY_AVAILABILITY_STATUSES
 
@@ -39,10 +40,7 @@ def _utc_naive(value: datetime | None) -> datetime | None:
 
 
 def _table_exists(db: Session, model: type) -> bool:
-    try:
-        return bool(inspect(db.get_bind()).has_table(model.__tablename__))
-    except SQLAlchemyError:
-        return False
+    return _session_table_exists(db, model.__tablename__)
 
 
 def _date_filter(column, start_date: date | None, end_date: date | None):

@@ -131,12 +131,14 @@ class AnalysisLeaseHeartbeat:
         attempt_count: int,
         interval_seconds: float | None = None,
         session_factory=SessionLocal,
+        external_stop: threading.Event | None = None,
     ) -> None:
         self.job_id = job_id
         self.attempt_count = attempt_count
         self.interval_seconds = interval_seconds or max(1.0, ANALYSIS_CLAIM_LEASE.total_seconds() / 3)
         self._session_factory = session_factory
         self._stop = threading.Event()
+        self._external_stop = external_stop
         self._thread: threading.Thread | None = None
         self._lost = False
 
@@ -148,6 +150,7 @@ class AnalysisLeaseHeartbeat:
         job_id: int,
         interval_seconds: float | None = None,
         session_factory=SessionLocal,
+        external_stop: threading.Event | None = None,
     ) -> "AnalysisLeaseHeartbeat | None":
         attempt_count = checkpoint_attempt_for_job(db, job_id=job_id)
         if attempt_count is None:
@@ -157,6 +160,7 @@ class AnalysisLeaseHeartbeat:
             attempt_count=attempt_count,
             interval_seconds=interval_seconds,
             session_factory=session_factory,
+            external_stop=external_stop,
         )
 
     @property
@@ -205,7 +209,12 @@ class AnalysisLeaseHeartbeat:
     def _run(self) -> None:
         if not self.beat():
             return
-        while not self._stop.wait(self.interval_seconds):
+        while not self._stop.is_set():
+            if self._external_stop is not None and self._external_stop.is_set():
+                self._stop.set()
+                return
+            if self._stop.wait(self.interval_seconds):
+                return
             if not self.beat():
                 return
 

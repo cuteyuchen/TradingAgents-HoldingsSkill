@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -19,6 +19,7 @@ from .health import operational_health, readiness
 from .logging import redact_object, tail_logs
 from .release import build_release_metadata
 from .startup import collect_startup_recovery_report
+from .tables import table_exists
 
 
 def diagnostic_directory() -> Path:
@@ -28,7 +29,6 @@ def diagnostic_directory() -> Path:
 
 
 def _jobs_payload(db: Session) -> dict[str, Any]:
-    inspector = inspect(db.get_bind())
     payload: dict[str, Any] = {
         "startup_recovery": collect_startup_recovery_report(db),
         "recent": {},
@@ -43,28 +43,28 @@ def _jobs_payload(db: Session) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             return []
 
-    if inspector.has_table("analysis_jobs"):
+    if table_exists(db, "analysis_jobs"):
         payload["recent"]["analysis_jobs"] = query_rows(
             "analysis_jobs",
             "id, portfolio_id, mode, checkpoint, status, current_stage, progress_percent, "
             "error_code, attempt_count, created_at",
             "id",
         )
-    if inspector.has_table("backtest_runs"):
+    if table_exists(db, "backtest_runs"):
         payload["recent"]["backtest_runs"] = query_rows(
             "backtest_runs",
             "id, portfolio_id, scope, replay_mode, status, current_stage, progress_percent, "
             "quality_status, leakage_status, error_code, attempt_count, created_at",
             "id",
         )
-    if inspector.has_table("daily_operational_checkpoints"):
+    if table_exists(db, "daily_operational_checkpoints"):
         payload["recent"]["checkpoints"] = query_rows(
             "daily_operational_checkpoints",
             "id, portfolio_id, trade_date, checkpoint_name, status, job_id, "
             "attempt_count, lease_expires_at, last_error",
             "id",
         )
-    if inspector.has_table("operating_notifications"):
+    if table_exists(db, "operating_notifications"):
         payload["recent"]["notifications"] = query_rows(
             "operating_notifications",
             "notification_id, portfolio_id, event_type, severity, status, "

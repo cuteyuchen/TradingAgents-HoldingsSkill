@@ -3,20 +3,81 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from .backup import backup_freshness
 from .release import alembic_db_revision, schema_state
+from .tables import table_exists
+
+_QUICK_CHECK_TTL_SECONDS = 6 * 3600
+_QUICK_CHECK_CACHE: dict[str, Any] = {
+    "checked_at": None,
+    "source_path": None,
+    "source_size": None,
+    "source_mtime": None,
+    "result": None,
+}
+
+
+class RuntimeNotReadyError(RuntimeError):
+    """Raised when readiness hard blockers forbid new risk-increasing work."""
 
 
 def liveness() -> dict[str, Any]:
     return {"status": "ok", "time": datetime.now(UTC).isoformat()}
+
+
+def run_quick_check(db: Session) -> dict[str, Any]:
+    """Run one heavy PRAGMA quick_check and cache it by DB file identity."""
+
+    try:
+        quick = db.execute(text("PRAGMA quick_check")).scalar()
+    except Exception as exc:  # noqa: BLE001
+        result = {"ok": False, "result": f"error:{exc}"}
+    else:
+        result = {"ok": str(quick or "").lower() == "ok", "result": str(quick or "error")}
+    path = Path(settings.DB_PATH).expanduser().resolve()
+    try:
+        stat = path.stat()
+        size, mtime = stat.st_size, stat.st_mtime
+    except OSError:
+        size = mtime = None
+    _QUICK_CHECK_CACHE.update(
+        {
+            "checked_at": datetime.now(UTC),
+            "source_path": str(path),
+            "source_size": size,
+            "source_mtime": mtime,
+            "result": result,
+        }
+    )
+    return result
+
+
+def _cached_quick_check() -> dict[str, Any] | None:
+    path = Path(settings.DB_PATH).expanduser().resolve()
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    cache = _QUICK_CHECK_CACHE
+    checked_at = cache.get("checked_at")
+    if (
+        checked_at is None
+        or cache.get("source_path") != str(path)
+        or cache.get("source_size") != stat.st_size
+        or cache.get("source_mtime") != stat.st_mtime
+        or (datetime.now(UTC) - checked_at).total_seconds() > _QUICK_CHECK_TTL_SECONDS
+    ):
+        return None
+    return dict(cache["result"]) if cache.get("result") is not None else None
 
 
 def disk_status() -> dict[str, Any]:
@@ -47,21 +108,23 @@ def disk_status() -> dict[str, Any]:
     }
 
 
-def database_status(db: Session) -> dict[str, Any]:
+def database_status(db: Session, *, check_writable: bool = True) -> dict[str, Any]:
     path = Path(settings.DB_PATH).expanduser().resolve()
     try:
-        quick = db.execute(text("PRAGMA quick_check")).scalar()
+        db.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001
         return {"status": "BLOCKED", "reason": f"db_unavailable:{exc}", "quick_check": None}
-    quick_ok = str(quick or "").lower() == "ok"
-    writable = False
-    try:
-        db.execute(text("CREATE TEMP TABLE advisor_write_probe(id INTEGER)"))
-        db.execute(text("DROP TABLE advisor_write_probe"))
-        writable = True
-    except Exception:  # noqa: BLE001
-        writable = False
-    inspector = inspect(db.get_bind())
+    quick = _cached_quick_check()
+    quick_ok = bool(quick is not None and quick["ok"])
+    writable = None
+    if check_writable and path.is_file():
+        try:
+            with sqlite3.connect(str(path), timeout=5) as probe_conn:
+                probe_conn.execute("CREATE TABLE advisor_write_probe_tmp(id INTEGER)")
+                probe_conn.execute("DROP TABLE advisor_write_probe_tmp")
+            writable = True
+        except Exception:  # noqa: BLE001
+            writable = False
     required = (
         "users",
         "portfolios",
@@ -72,15 +135,15 @@ def database_status(db: Session) -> dict[str, Any]:
         "decision_memories",
         "daily_operational_runs",
     )
-    present = {name for name in required if inspector.has_table(name)}
+    present = {name for name in required if table_exists(db, name)}
     missing = sorted(set(required) - present)
     status = "OK"
     reason = None
-    if not quick_ok:
+    if quick is not None and not quick_ok:
         status, reason = "BLOCKED", "DB_QUICK_CHECK_FAILED"
     elif missing:
         status, reason = "BLOCKED", f"MISSING_TABLES:{','.join(missing)}"
-    elif not writable:
+    elif writable is False:
         status, reason = "BLOCKED", "DB_NOT_WRITABLE"
     size = wal_size = shm_size = None
     try:
@@ -94,7 +157,8 @@ def database_status(db: Session) -> dict[str, Any]:
     return {
         "status": status,
         "reason": reason,
-        "quick_check": str(quick or "error"),
+        "quick_check": str(quick["result"] if quick is not None else "not_recently_checked"),
+        "quick_check_source": "cache" if quick is not None else "deferred",
         "writable": writable,
         "required_tables_present": not missing,
         "missing_tables": missing,
@@ -108,7 +172,7 @@ def schema_status(db: Session) -> dict[str, Any]:
     state = schema_state(db_revision=alembic_db_revision(db))
     state_map = {
         "CURRENT": "OK",
-        "BEHIND": "DEGRADED",
+        "BEHIND": "BLOCKED",
         "AHEAD": "BLOCKED",
         "BROKEN": "BLOCKED",
         "UNKNOWN": "UNKNOWN",
@@ -126,6 +190,13 @@ def governance_status(db: Session) -> dict[str, Any]:
     from ..governance.service import governance_health
 
     try:
+        if not table_exists(db, "parameter_set_versions"):
+            return {
+                "status": "DEGRADED",
+                "reasons": ["LEGACY_PRE_GOVERNANCE"],
+                "active_version": None,
+                "active_version_id": None,
+            }
         health = governance_health(db)
         return {
             "status": health["status"],
@@ -188,6 +259,40 @@ def backup_status() -> dict[str, Any]:
         "age_hours": freshness["age_hours"],
         "backup_count": freshness["backup_count"],
     }
+
+
+def require_runtime_ready_for_risk_work(db: Session | None = None) -> dict[str, Any]:
+    """Fail closed before creating new risk-increasing analysis or candidate work."""
+
+    owns_session = db is None
+    if owns_session:
+        from ..database import SessionLocal
+
+        session = SessionLocal()
+    else:
+        session = db
+    try:
+        checks = {
+            "schema": schema_status(session),
+            "governance": governance_status(session),
+            "database": database_status(session, check_writable=False),
+            "storage": disk_status(),
+        }
+        blocked = {
+            key: value
+            for key, value in checks.items()
+            if str(value.get("status") or "").upper() == "BLOCKED"
+        }
+        if blocked:
+            reasons = ", ".join(
+                f"{key}={value.get('reason') or value.get('reasons') or value.get('state') or value.get('status')}"
+                for key, value in sorted(blocked.items())
+            )
+            raise RuntimeNotReadyError(f"RUNTIME_NOT_READY:{reasons}")
+        return checks
+    finally:
+        if owns_session:
+            session.close()
 
 
 def readiness(db: Session | None = None, *, detailed: bool = False) -> dict[str, Any]:

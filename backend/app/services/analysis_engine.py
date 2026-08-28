@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -1280,6 +1281,12 @@ def run_analysis_job(job_id: int) -> None:
     db = SessionLocal()
     job: AnalysisJob | None = None
     heartbeat: AnalysisLeaseHeartbeat | None = None
+    stop_event = threading.Event()
+    from ..system.logging import bind_worker_context
+    from ..system.workers import register_worker, unregister_worker
+
+    register_worker("analysis", job_id, stop_event)
+    bind_worker_context(analysis_job_id=job_id)
     try:
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
         if job is None or job.status not in {"queued", "retrying"}:
@@ -1289,7 +1296,11 @@ def run_analysis_job(job_id: int) -> None:
         job.error_code = None
         job.error_message = None
         db.commit()
-        heartbeat = AnalysisLeaseHeartbeat.for_job(db, job_id=job.id)
+        heartbeat = AnalysisLeaseHeartbeat.for_job(
+            db,
+            job_id=job.id,
+            external_stop=stop_event,
+        )
         if heartbeat is not None:
             heartbeat.start()
 
@@ -1297,6 +1308,10 @@ def run_analysis_job(job_id: int) -> None:
 
         parameter_context = resolve_production_parameters(db)
         parameter_lineage = lineage_fields(parameter_context)
+        bind_worker_context(
+            analysis_job_id=job_id,
+            parameter_set_version=parameter_lineage.get("parameter_set_version"),
+        )
 
         snapshot_row = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == job.snapshot_id).first()
         if snapshot_row is None or snapshot_row.status != "confirmed":
@@ -1874,4 +1889,5 @@ def run_analysis_job(job_id: int) -> None:
     finally:
         if heartbeat is not None:
             heartbeat.stop()
+        unregister_worker("analysis", job_id)
         db.close()

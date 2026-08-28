@@ -1232,10 +1232,14 @@ def run_backtest_worker(run_id: int) -> None:
     """Execute one already claimed run in a server-owned session."""
 
     from ..database import SessionLocal
+    from ..system.logging import bind_worker_context
+    from ..system.workers import register_worker, unregister_worker
 
     db = SessionLocal()
     stop_event = threading.Event()
     heartbeat_thread: threading.Thread | None = None
+    register_worker("backtest", run_id, stop_event)
+    bind_worker_context(backtest_run_id=run_id)
     try:
         run = db.get(BacktestRun, run_id)
         if run is None:
@@ -1245,6 +1249,10 @@ def run_backtest_worker(run_id: int) -> None:
         if run is None or run.status != "RUNNING":
             return
         generation = int(run.attempt_count or 1)
+        bind_worker_context(
+            backtest_run_id=run_id,
+            parameter_set_version=run.parameter_set_version,
+        )
         verified = heartbeat_backtest_run(db, run_id=run_id, generation=generation)
         if (
             verified is None
@@ -1269,6 +1277,7 @@ def run_backtest_worker(run_id: int) -> None:
         stop_event.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=1.0)
+        unregister_worker("backtest", run_id)
         db.close()
 
 

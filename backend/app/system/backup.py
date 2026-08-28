@@ -6,8 +6,11 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +18,7 @@ from typing import Any
 
 from ..config import settings
 from ..governance.service import GovernanceBlockedError, resolve_production_parameters
-from .release import alembic_db_revision, code_head_revision, schema_state
+from .release import alembic_db_revision, code_head_revision, known_migration_revisions, schema_state
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,10 @@ def backup_directory() -> Path:
         # volume private at the Docker/OS level.
         pass
     return path
+
+
+def _backend_directory() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _quick_check(path: Path) -> dict[str, Any]:
@@ -173,7 +180,7 @@ def create_backup(
             "backup_"
             + started.strftime("%Y%m%d_%H%M%S")
             + "_"
-            + hashlib.sha256(source.name.encode("utf-8")).hexdigest()[:6]
+            + secrets.token_hex(4)
         )
         candidate_id = _safe_backup_id(candidate_id)
         partial_db = directory / f"{candidate_id}.sqlite.partial"
@@ -202,7 +209,9 @@ def create_backup(
                 "filename": final_db.name,
                 "type": reason,
                 "reason": reason,
+                "status": "VERIFIED",
                 "created_at": started.isoformat(),
+                "verified_at": _utc_now().isoformat(),
                 "completed_at": _utc_now().isoformat(),
                 "source_db_revision": partial_revision,
                 "code_head_revision": code_head_revision(),
@@ -222,10 +231,8 @@ def create_backup(
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(partial_db, final_db)
-            os.replace(partial_manifest, final_manifest)
             try:
                 os.chmod(final_db, 0o600)
-                os.chmod(final_manifest, 0o600)
             except OSError:
                 pass
             final_quick = _quick_check(final_db)
@@ -233,6 +240,11 @@ def create_backup(
                 raise BackupError(f"final_backup_integrity_failed:{final_quick['result']}")
             if _sha256(final_db) != backup_sha:
                 raise BackupError("final_checksum_mismatch")
+            os.replace(partial_manifest, final_manifest)
+            try:
+                os.chmod(final_manifest, 0o600)
+            except OSError:
+                pass
             logger.info(
                 "backup_success id=%s type=%s bytes=%s sha256=%s",
                 candidate_id,
@@ -242,7 +254,7 @@ def create_backup(
             )
             return manifest
         except Exception:
-            for path in (partial_db, partial_manifest):
+            for path in (partial_db, partial_manifest, final_db, final_manifest):
                 try:
                     if path.exists():
                         path.unlink()
@@ -276,7 +288,11 @@ def list_backups(limit: int = 200) -> list[dict[str, Any]]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict) and payload.get("backup_id"):
+        if (
+            isinstance(payload, dict)
+            and payload.get("backup_id")
+            and str(payload.get("status") or "").upper() == "VERIFIED"
+        ):
             manifests.append(payload)
     manifests.sort(key=lambda item: str(item.get("completed_at") or item.get("created_at") or ""), reverse=True)
     return manifests[: max(1, min(int(limit), 1000))]
@@ -293,9 +309,9 @@ def verify_backup(backup_id: str) -> dict[str, Any]:
     tables = _required_tables_present(db_path)
     revision = _read_revision(db_path)
     verified = (
-        checksum_matches
+        str(manifest.get("status") or "").upper() == "VERIFIED"
+        and checksum_matches
         and quick["ok"]
-        and tables["ok"]
         and revision is not None
     )
     return {
@@ -320,12 +336,19 @@ def validate_backup_for_restore(
         raise RestoreError("backup_not_verified")
     backup_revision = verified["alembic_revision"]
     head = code_head or code_head_revision()
-    compatible = True
+    revisions = known_migration_revisions()
     note: str | None = None
-    if backup_revision and head and backup_revision > head:
-        raise RestoreError("BACKUP_REVISION_AHEAD")
-    if backup_revision and head and backup_revision != head:
+    if backup_revision is None:
+        raise RestoreError("BACKUP_REVISION_UNKNOWN")
+    if head and backup_revision == head:
+        compatible = True
+    elif backup_revision in revisions:
+        compatible = True
         note = "backup_revision_behind_code_head_upgrade_required"
+    elif head and backup_revision > head:
+        raise RestoreError("BACKUP_REVISION_AHEAD")
+    else:
+        raise RestoreError("BACKUP_REVISION_UNKNOWN")
     verified["restore_compatible"] = compatible
     verified["restore_note"] = note
     return verified
@@ -339,6 +362,8 @@ def restore_drill(backup_id: str, *, cleanup: bool = True) -> dict[str, Any]:
     directory.mkdir(parents=True, exist_ok=True)
     temp_path = directory / f"restore-drill-{backup_id}-{_utc_now().strftime('%H%M%S%f')}.sqlite"
     source_path = backup_directory() / verified["manifest"]["filename"]
+    head = code_head_revision()
+    upgrade_error: str | None = None
     try:
         src_conn = sqlite3.connect(str(source_path))
         dest_conn = sqlite3.connect(str(temp_path))
@@ -347,36 +372,94 @@ def restore_drill(backup_id: str, *, cleanup: bool = True) -> dict[str, Any]:
         finally:
             dest_conn.close()
             src_conn.close()
+        revision = _read_revision(temp_path)
+        if revision != head:
+            env = os.environ.copy()
+            env["ADVISOR_DB_PATH"] = str(temp_path)
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                cwd=str(_backend_directory()),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                upgrade_error = (result.stderr or result.stdout or "alembic_upgrade_failed")[-500:]
+            revision = _read_revision(temp_path)
         quick = _quick_check(temp_path)
         tables = _required_tables_present(temp_path)
-        revision = _read_revision(temp_path)
         smoke: dict[str, Any] = {}
+        governance: dict[str, Any] = {
+            "status": "UNKNOWN",
+            "reasons": [],
+            "active_count": 0,
+            "active": None,
+        }
+        from sqlalchemy import create_engine, func, select, table as sql_table
+        from sqlalchemy.orm import Session as SqlSession
+
+        engine = create_engine(f"sqlite:///{temp_path}")
         try:
-            conn = sqlite3.connect(str(temp_path))
-            try:
-                active_count = conn.execute(
-                    "SELECT COUNT(*) FROM parameter_set_versions WHERE status='ACTIVE'"
-                ).fetchone()[0]
-                smoke["active_parameter_set_count"] = int(active_count)
+            with SqlSession(engine) as session:
+                from ..governance.models import ParameterSetVersion
+                from ..governance.service import bootstrap_parameter_set, governance_health
+
+                bootstrap_parameter_set(session)
+                health = governance_health(session)
+                active_count = session.execute(
+                    select(func.count())
+                    .select_from(ParameterSetVersion)
+                    .where(ParameterSetVersion.status == "ACTIVE")
+                ).scalar_one()
+                governance = {
+                    "status": health["status"],
+                    "reasons": health.get("reasons") or [],
+                    "active_count": int(active_count),
+                    "active": health.get("active"),
+                }
                 for table, label in (
                     ("portfolio_snapshots", "portfolio_snapshot_count"),
                     ("market_score_snapshots", "market_score_snapshot_count"),
                     ("candidate_runs", "candidate_run_count"),
                 ):
                     try:
-                        smoke[label] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-                    except sqlite3.Error:
+                        smoke[label] = int(
+                            session.execute(select(func.count()).select_from(
+                                sql_table(table)
+                            )).scalar_one()
+                        )
+                    except Exception:  # noqa: BLE001
                         smoke[label] = None
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            smoke["error"] = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            governance = {
+                "status": "ERROR",
+                "reasons": [str(exc)],
+                "active_count": 0,
+                "active": None,
+            }
+        finally:
+            engine.dispose()
+        passed = (
+            upgrade_error is None
+            and quick["ok"]
+            and tables["ok"]
+            and revision == head
+            and governance["status"] not in {"BLOCKED", "ERROR"}
+            and governance["active_count"] == 1
+        )
         result = {
             "backup_id": backup_id,
-            "status": "PASS" if (quick["ok"] and tables["ok"] and revision is not None) else "FAILED",
+            "status": "PASS" if passed else "FAILED",
             "quick_check": quick,
             "required_tables": tables,
             "alembic_revision": revision,
+            "alembic_upgrade": (
+                "not_required"
+                if upgrade_error is None and revision == verified["alembic_revision"]
+                else "ok" if upgrade_error is None else f"FAILED:{upgrade_error}"
+            ),
+            "governance": governance,
             "smoke": smoke,
             "production_db_untouched": True,
         }
@@ -401,7 +484,24 @@ def backup_freshness() -> dict[str, Any]:
             "backup_count": 0,
             "latest": None,
         }
-    latest = backups[0]
+    latest: dict[str, Any] | None = None
+    for candidate in backups[:5]:
+        try:
+            check = verify_backup(str(candidate["backup_id"]))
+        except BackupError:
+            continue
+        if check["verified"]:
+            latest = candidate
+            break
+    if latest is None:
+        return {
+            "status": "BLOCKED",
+            "reason": "NO_VERIFIED_BACKUP",
+            "last_success_at": None,
+            "age_hours": None,
+            "backup_count": len(backups),
+            "latest": None,
+        }
     completed = latest.get("completed_at") or latest.get("created_at")
     try:
         age_hours = max(0.0, (_utc_now() - datetime.fromisoformat(completed)).total_seconds() / 3600)
@@ -436,20 +536,88 @@ def retention_cleanup() -> dict[str, Any]:
     }
     if not backups:
         return {"removed": removed, "remaining": 0}
+    candidates = list(backups)
+
+    def _delete(item: dict[str, Any]) -> None:
+        remaining = [row for row in candidates if str(row["backup_id"]) not in removed]
+        if len(remaining) <= 1:
+            return
+        backup_id = str(item["backup_id"])
+        try:
+            _database_path(backup_id).unlink(missing_ok=True)
+            _manifest_path(backup_id).unlink(missing_ok=True)
+            removed.append(backup_id)
+        except OSError as exc:
+            logger.warning("backup retention cleanup failed id=%s: %s", backup_id, exc)
+
+    def _date_key(item: dict[str, Any]) -> Any:
+        value = item.get("completed_at") or item.get("created_at") or ""
+        try:
+            return datetime.fromisoformat(value).date()
+        except (TypeError, ValueError):
+            return None
+
     for backup_type, limit in limits.items():
-        grouped = [item for item in backups if str(item.get("type") or "").upper() == backup_type]
-        if limit <= 0 or len(grouped) <= limit:
+        if limit <= 0:
+            continue
+        grouped = [item for item in candidates if str(item.get("type") or "").upper() == backup_type]
+        if len(grouped) <= limit:
             continue
         # Never remove the single newest verified backup.
         keep_until = max(1, min(limit, len(grouped) - 1))
         for item in grouped[keep_until:]:
-            backup_id = str(item["backup_id"])
-            try:
-                _database_path(backup_id).unlink(missing_ok=True)
-                _manifest_path(backup_id).unlink(missing_ok=True)
-                removed.append(backup_id)
-            except OSError as exc:
-                logger.warning("backup retention cleanup failed id=%s: %s", backup_id, exc)
+            _delete(item)
+
+    scheduled = [item for item in candidates if str(item.get("type") or "").upper() == "SCHEDULED"]
+    if scheduled and settings.BACKUP_RETENTION_DAILY > 0:
+        by_date: dict[Any, list[dict[str, Any]]] = {}
+        for item in scheduled:
+            by_date.setdefault(_date_key(item), []).append(item)
+        for items in by_date.values():
+            items.sort(key=lambda row: str(row.get("completed_at") or row.get("created_at") or ""), reverse=True)
+            for item in items[1:]:
+                _delete(item)
+        candidates = [row for row in backups if str(row["backup_id"]) not in removed]
+        dates = sorted(
+            {_date_key(row) for row in candidates if str(row.get("type") or "").upper() == "SCHEDULED"},
+            reverse=True,
+        )
+        keep_dates = set(dates[: max(1, min(settings.BACKUP_RETENTION_DAILY, len(dates) - 1))]) if dates else set()
+        for item in candidates:
+            if (
+                str(item.get("type") or "").upper() == "SCHEDULED"
+                and _date_key(item) not in keep_dates
+            ):
+                _delete(item)
+
+    scheduled = [row for row in backups if str(row.get("type") or "").upper() == "SCHEDULED" and str(row["backup_id"]) not in removed]
+    if scheduled and settings.BACKUP_RETENTION_WEEKLY > 0:
+        by_week: dict[Any, list[dict[str, Any]]] = {}
+        for item in scheduled:
+            day = _date_key(item)
+            by_week.setdefault(day.isocalendar()[:2] if day else None, []).append(item)
+        for items in by_week.values():
+            items.sort(key=lambda row: str(row.get("completed_at") or row.get("created_at") or ""), reverse=True)
+            for item in items[1:]:
+                _delete(item)
+        candidates = [row for row in backups if str(row["backup_id"]) not in removed]
+        week_values: list[Any] = []
+        for row in candidates:
+            if str(row.get("type") or "").upper() != "SCHEDULED":
+                continue
+            day = _date_key(row)
+            if day is not None:
+                week_values.append(day.isocalendar()[:2])
+        weeks = sorted(set(week_values), reverse=True)
+        keep_weeks = set(weeks[: max(1, min(settings.BACKUP_RETENTION_WEEKLY, len(weeks) - 1))]) if weeks else set()
+        for item in candidates:
+            day = _date_key(item)
+            if (
+                str(item.get("type") or "").upper() == "SCHEDULED"
+                and day is not None
+                and day.isocalendar()[:2] not in keep_weeks
+            ):
+                _delete(item)
     return {"removed": removed, "remaining": len(list_backups())}
 
 
@@ -485,7 +653,9 @@ def run_scheduled_system_maintenance() -> dict[str, Any]:
                 logger.error("scheduled backup failed: %s", exc)
                 result["backup"] = {"status": "FAILED", "reason": str(exc)}
         if settings.SYSTEM_MAINTENANCE_QUICK_CHECK_ENABLED:
-            result["quick_check"] = _quick_check(Path(settings.DB_PATH))
+            from .health import run_quick_check
+
+            result["quick_check"] = run_quick_check(db)
     result["retention"] = retention_cleanup()
     return result
 

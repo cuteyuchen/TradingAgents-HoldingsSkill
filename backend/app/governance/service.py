@@ -6,12 +6,13 @@ import time
 from datetime import UTC, datetime
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..decision_contract import CONTRACT_VERSION
 from ..research.models import BacktestRun, CalibrationReport
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
+from ..system.tables import table_exists
 from .models import (
     ParameterChangeProposal,
     ParameterGovernanceEvent,
@@ -113,7 +114,7 @@ def resolve_production_parameters(db: Session | None = None) -> dict[str, Any]:
 
     if db is not None:
         try:
-            if not inspect(db.get_bind()).has_table("parameter_set_versions"):
+            if not table_exists(db, "parameter_set_versions"):
                 return _legacy_context()
         except GovernanceBlockedError:
             raise
@@ -139,7 +140,7 @@ def resolve_production_parameters(db: Session | None = None) -> dict[str, Any]:
 
     try:
         with SessionLocal() as db_session:
-            if not inspect(db_session.get_bind()).has_table("parameter_set_versions"):
+            if not table_exists(db_session, "parameter_set_versions"):
                 payload = _legacy_context()
             else:
                 history_count = db_session.execute(

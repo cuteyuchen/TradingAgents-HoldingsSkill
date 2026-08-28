@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from .system.backup import BackupError, ensure_pre_upgrade_backup
 from .system.health import liveness, readiness
 from .system.logging import RequestIDMiddleware, configure_logging
 from .system.startup import run_startup_preflight
+from .system.workers import signal_workers
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("advisor")
@@ -45,7 +47,12 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("PRE_UPGRADE_BACKUP_FAILED") from exc
     init_db()
     with SessionLocal() as db:
-        run_startup_preflight(db)
+        preflight = run_startup_preflight(db)
+    if preflight["blocked"]:
+        blocked = ", ".join(
+            f"{key}={value.get('status')}" for key, value in sorted(preflight["checks"].items())
+        )
+        raise RuntimeError(f"STARTUP_PREFLIGHT_BLOCKED:{blocked}")
     # Prevent a process restart from forgetting an already-open provider
     # circuit while the durable health table still reports it as blocked.
     with SessionLocal() as db:
@@ -55,7 +62,8 @@ async def lifespan(app: FastAPI):
     if restored_provider_health:
         logger.info("Restored %s provider health states", len(restored_provider_health))
     token = auth.ensure_token()
-    logger.info("Legacy ADVISOR_TOKEN in use: %s", token[:12] + "...")
+    if token:
+        logger.info("Legacy ADVISOR_TOKEN configured")
     if settings.APP_SECRET_KEY == "dev-only-change-me":
         logger.warning("APP_SECRET_KEY uses the development default; set a stable secret in production.")
 
@@ -83,6 +91,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         stop_scheduler()
+        signal_workers(timeout=5.0)
+        time.sleep(0.5)
         stop_realtime_monitor()
         stop_remote_market_identity_sync()
 

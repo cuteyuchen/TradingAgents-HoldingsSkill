@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -20,6 +20,7 @@ from .backup import (
     run_scheduled_system_maintenance,
 )
 from .logging import configure_logging, tail_logs
+from .tables import table_exists
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ def run_startup_preflight(db: Session | None = None) -> dict[str, Any]:
     else:
         session = db
     try:
+        from .health import run_quick_check
+
+        run_quick_check(session)
         database = database_status(session)
         storage = disk_status()
         schema = schema_status(session)
@@ -82,11 +86,10 @@ def collect_startup_recovery_report(db: Session) -> dict[str, Any]:
     """Read stale durable-claim counts without mutating anything."""
 
     cutoff = datetime.now(UTC).replace(tzinfo=None)
-    inspector = inspect(db.get_bind())
     counts: dict[str, int] = {}
     errors: list[str] = []
     try:
-        if inspector.has_table("daily_operational_checkpoints"):
+        if table_exists(db, "daily_operational_checkpoints"):
             counts["stale_checkpoints"] = int(
                 db.execute(
                     text(
@@ -97,7 +100,7 @@ def collect_startup_recovery_report(db: Session) -> dict[str, Any]:
                     {"cutoff": cutoff},
                 ).scalar_one()
             )
-        if inspector.has_table("backtest_runs"):
+        if table_exists(db, "backtest_runs"):
             counts["stale_backtests"] = int(
                 db.execute(
                     text(
@@ -108,7 +111,7 @@ def collect_startup_recovery_report(db: Session) -> dict[str, Any]:
                     {"cutoff": cutoff},
                 ).scalar_one()
             )
-        if inspector.has_table("operating_notifications"):
+        if table_exists(db, "operating_notifications"):
             counts["stale_notifications"] = int(
                 db.execute(
                     text(
@@ -119,7 +122,7 @@ def collect_startup_recovery_report(db: Session) -> dict[str, Any]:
                     {"cutoff": cutoff},
                 ).scalar_one()
             )
-        if inspector.has_table("daily_review_runs"):
+        if table_exists(db, "daily_review_runs"):
             counts["stale_reviews"] = int(
                 db.execute(
                     text(
@@ -130,16 +133,31 @@ def collect_startup_recovery_report(db: Session) -> dict[str, Any]:
                     {"cutoff": cutoff},
                 ).scalar_one()
             )
-        if inspector.has_table("analysis_jobs"):
+        if table_exists(db, "analysis_jobs") and table_exists(db, "daily_operational_checkpoints"):
             counts["stale_analysis_jobs"] = int(
                 db.execute(
                     text(
-                        "SELECT COUNT(*) FROM analysis_jobs "
-                        "WHERE status IN ('running','retrying') "
-                        "AND (started_at IS NULL OR started_at <= :cutoff)"
+                        "SELECT COUNT(DISTINCT j.id) FROM analysis_jobs j "
+                        "JOIN daily_operational_checkpoints c ON c.job_id = j.id "
+                        "WHERE j.status = 'running' "
+                        "AND c.status IN ('CLAIMED','RUNNING') "
+                        "AND c.lease_expires_at IS NOT NULL "
+                        "AND c.lease_expires_at < :cutoff"
                     ),
                     {"cutoff": cutoff},
                 ).scalar_one()
+            )
+            running_or_retrying = int(
+                db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM analysis_jobs "
+                        "WHERE status IN ('running','retrying')"
+                    )
+                ).scalar_one()
+            )
+            counts["active_analysis_jobs"] = max(
+                0,
+                running_or_retrying - counts["stale_analysis_jobs"],
             )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"startup_recovery_collect_failed:{exc}")
