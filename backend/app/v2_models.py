@@ -199,6 +199,7 @@ class AnalysisJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    context_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     run: Mapped["AnalysisRun | None"] = relationship(back_populates="job", uselist=False, cascade="all, delete-orphan")
@@ -219,6 +220,10 @@ class AnalysisRun(Base):
     confidence: Mapped[str | None] = mapped_column(String(16))
     structured_result_json: Mapped[dict | None] = mapped_column(JSON)
     markdown_text: Mapped[str] = mapped_column(Text)
+    parameter_set_version_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    parameter_set_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    parameter_set_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    governance_lineage_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
     job: Mapped[AnalysisJob] = relationship(back_populates="run")

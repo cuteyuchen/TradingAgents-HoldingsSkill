@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -11,6 +11,7 @@ from ..decision_contract import canonicalize_analysis_mode
 from ..security import encrypt_secret
 from ..services.notifications import test_channel, validate_webhook
 from ..services.scheduler import create_scheduled_job, next_run, run_scheduled_job, validate_timezone
+from ..services.analysis_admission import AnalysisJobAdmission
 from ..v2_dependencies import get_current_user
 from ..v2_models import NotificationChannel, Portfolio, Schedule, User
 from ..v2_schemas import (
@@ -162,7 +163,7 @@ def update_schedule(
     return _schedule_response(row)
 
 
-@router.delete("/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/schedules/{schedule_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_schedule(
     schedule_id: int,
     db: Session = Depends(get_db),
@@ -181,13 +182,20 @@ def run_schedule_now(
 ) -> AnalysisJobResponse:
     row = _schedule(db, current_user.id, schedule_id)
     try:
-        job = create_scheduled_job(db, row, force=True)
+        admission = create_scheduled_job(db, row, force=True, with_admission=True)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(admission, AnalysisJobAdmission):
+        job = admission.job
+        should_start = admission.should_start
+    else:
+        job = admission
+        should_start = True
     row.last_run_at = datetime.now(UTC)
     row.next_run_at = next_run(row)
     db.commit()
-    background_tasks.add_task(run_scheduled_job, job.id, row.id)
+    if should_start:
+        background_tasks.add_task(run_scheduled_job, job.id, row.id)
     return _job_response(job)
 
 
@@ -263,7 +271,7 @@ def update_notification(
     return _channel_response(row)
 
 
-@router.delete("/notifications/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/notifications/{channel_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_notification(
     channel_id: int,
     db: Session = Depends(get_db),

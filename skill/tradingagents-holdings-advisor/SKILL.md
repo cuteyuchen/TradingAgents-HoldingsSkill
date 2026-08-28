@@ -31,6 +31,7 @@ Read these supporting files when needed:
 - `references/python-execution.md`: When and how to use Python scripts, dependency policy, Eastmoney concurrency control, multi-source routing strategy, centralized data prefetch pattern, dedup lock + TTL cache, VPA pre-computation code, script rules, standardized output contract.
 - `references/configuration.md`: **Single source of truth** for all tunable parameters — pipeline phases, debate rounds, quality-gate thresholds, trading rules, dual-horizon, trading memory, Eastmoney throttling, dedup TTL, persistence. Other files reference values here; when a value appears in two places, this file wins.
 - `references/persistence.md`: Current archive-only contract for the companion persistence system (`ADVISOR_API_URL` + `ADVISOR_TOKEN`), including Phase 0 `/archives/context` lookup and post-advice `/archives` upload.
+- `references/alpha-memory.md`: Phase G immutable decision memory, confirmed execution alignment, deterministic trading-day outcomes, Daily Review, and advisory-only analogue retrieval.
 
 ## Bundled Scripts
 
@@ -56,7 +57,68 @@ Advice quality is the first priority. Time pressure, repeated data failures, or 
 - When the persistence system is configured, record failure context in the visible evidence and archive payload so the dashboard can surface the issue. The active persistence contract remains archive-only.
 - If mandatory quote, holdings, risk, or quality-gate evidence is missing, stop before action advice and output: missing data, why it blocks the recommendation, and how to fetch/confirm it next. Do not replace this with a low-quality trading plan.
 
-A skill does not schedule itself. If automatic daily execution is requested, say an external scheduler/reminder must trigger the agent at those times.
+A skill does not schedule itself. If automatic daily execution is requested, say an external scheduler/reminder must trigger the agent at those times. The backend Daily Investment Workbench may orchestrate the existing deterministic engines at fixed Asia/Shanghai checkpoints, but this remains a read-oriented operating workflow, not auto-trading.
+
+## Daily Operating Workbench (Phase H)
+
+The backend reuses the existing scheduler, realtime monitor, analysis admission, Candidate Engine, Ledger, and Memory services. It derives these server-owned states in `Asia/Shanghai`: `PRE_MARKET_MAINTENANCE`, `PRE_MARKET_READY`, `AUCTION`, `MORNING_SESSION`, `LUNCH_BREAK`, `AFTERNOON_SESSION`, `LATE_SESSION`, `MARKET_CLOSED`, `POST_CLOSE_ANALYSIS`, `DAILY_REVIEW`, `DAY_COMPLETE`, and `NON_TRADING_DAY`.
+
+The frozen operating timeline is 08:45 maintenance, 09:20 pre-market snapshot, 09:25 auction observation, 09:30 monitor start, 09:35 Standard, 10:30 Fast, 11:30 morning snapshot/lunch pause, 13:05 Fast, 14:30 Standard, 14:55 late-session review-only caution, 15:00 monitor stop/close snapshot, 15:10 Deep, 15:30 Memory Maintenance + Daily Review, and an optional 20:30 critical-event hook. Fixed analysis checkpoints are idempotent, reuse an active portfolio analysis when admission says one is already running, and can catch up within the configured 15-minute window; expired checkpoints are visible as `MISSED`. Restart recovery resumes the monitor during an active session, pauses it for lunch, and stops it after 15:00. No checkpoint submits broker orders.
+
+The Dashboard APIs are read-only projections of persisted Market, Portfolio, Candidate, Trigger, Analysis, Decision Memory, Trade Ledger, and Review facts. Candidate Engine stages remain authoritative: `ACTION` is a candidate stage, not a final buy instruction; Trigger means “reanalyze,” not buy/sell. Freshness and partial failures remain visible. On non-trading days, the workbench shows the latest reliable close, portfolio snapshot, and completed Review without starting monitor, candidate scan, or analysis checkpoints.
+
+Daily Review is idempotent. Late mature Outcomes, revised Outcome sources, or Ledger revisions mark the same ReviewRun stale; an in-place refresh clears `review_stale` and increments `refresh_count`. Material notifications use explicit `INFO`/`IMPORTANT`/`ACTION_REQUIRED`/`CRITICAL` severity, dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and explicit `NO_ACTION` resolutions may notify; unchanged observations do not. A total quote-provider outage blocks adding new risk and does not automatically sell existing holdings.
+
+## Offline Historical Research (Phase I)
+
+Historical Research is a separate offline evaluation workflow. It distinguishes Historical Replay, Backtest, and Calibration: replay reconstructs only facts visible at the historical point, backtest evaluates a fixed version of persisted rules against later outcomes, and calibration produces evidence for human review.
+
+Use only persisted, server-owned facts and the Replay Availability Manifest. Enforce point-in-time visibility, trading-calendar horizons, price-basis compatibility, explicit survivorship limitations, and visible sample counts. Treat FULL, PARTIAL, DIAGNOSTIC_ONLY, UNSUPPORTED, DATA_GAP, and LEAKAGE_BLOCKED as meaningful outcomes; do not fill missing history with current SecurityMaster, current fundamentals, current valuation, or current ETF constituents.
+
+PRODUCTION_REPLAY, DETERMINISTIC_RECOMPUTE, and BAR_ONLY_DIAGNOSTIC remain separate modes. A next-open execution proxy is simulated evidence, not a confirmed fill. Backtest output is not Alpha Memory, not TradeLedger evidence, and not PortfolioSnapshot state.
+
+Calibration may return KEEP_CURRENT, CONSIDER_CHANGE, INSUFFICIENT_EVIDENCE, or REJECT_CHANGE only. It must use chronological train/validation/test separation, never select from the test set, and never automatically apply a threshold, factor weight, runtime prompt, risk rule, or production configuration. Do not inject backtest metrics or historical best parameters into live Decision context.
+
+## Historical Data Foundation (Phase L)
+
+Phase L provides point-in-time security lifecycle, trading status, ST state, valuation, fundamental publication, ETF metadata, price basis, and PIT universe reconstruction. Historical facts must be point-in-time: current SecurityMaster, current valuation, current fundamentals, and current ETF category can never be projected backward.
+
+- Missing historical state is `UNKNOWN` / `DATA_GAP`, never `NORMAL` or zero. Missing fundamentals publication time is `MISSING_PUBLICATION_TIME`; a report is only visible when `published_at <= as_of`.
+- Research cannot fetch live network data during replay. Historical data sync is an explicit operator step (`python -m app.history.cli sync ...`) that is separate from Backtest execution.
+- `DETERMINISTIC_RECOMPUTE` is fail-closed: it requires the requested range's PIT inputs to pass the availability gate; otherwise the run reports `DATA_GAP` / `LEAKAGE_BLOCKED`.
+- The PIT universe resolver uses historical lifecycle, trading status, classification, and historical PortfolioSnapshot holdings. Listing age is measured in trading days.
+- Do not hand the historical sync authority to the LLM; historical data preparation and import are operator actions.
+
+## Parameter Governance (Phase J)
+
+Phase J makes parameter changes a versioned, human-reviewed operation. Research proposes, humans approve, governance versions, production consumes, and rollback stays possible. There is no auto-apply and no auto-trade path in governance.
+
+- Calibration is evidence only. `CONSIDER_CHANGE` creates a `ParameterChangeProposal`; it never changes the ACTIVE `ParameterSetVersion`.
+- A standard proposal must bind to the current ACTIVE baseline: the report's
+  current/challenger values and its Backtest parameter version/hash must match
+  the live snapshot, or the proposal is rejected as stale or mismatched.
+- Manual proposals are always `MANUAL_EXCEPTION` and require explicit risk
+  acknowledgement; they cannot masquerade as standard calibration proposals.
+- Approval creates an immutable `APPROVED` version. Activation is a separate explicit step and the only operation that changes what future production runs consume.
+- The model cannot approve, activate, or roll back parameter versions. Governance actions require an authenticated human actor and are recorded in an append-only audit timeline.
+- Each production Market, Candidate, Analysis, Decision Memory, and Backtest run records the `ParameterSetVersion` it started with. A version activated mid-run never changes that run.
+- Backtests freeze the ACTIVE parameter snapshot, version, and config hash at creation time, even if a newer version is activated later.
+- Rollback creates a new version whose snapshot equals the target version; old rows are never reactivated. Rollback is explicit and audited, never automatic from PnL.
+- Protected invariants such as stock 20% / sector-theme ETF 30% hard caps, ACTION max 3, data-quality fail-close, and no-auto-trade cannot be changed by standard calibration. A manual exception requires explicit risk acknowledgement.
+- Trading-session activation is blocked by default. Emergency activation requires an authenticated actor, a reason, and an audit event.
+
+## Production Observability & Release Readiness (Phase K)
+
+Phase K makes the self-hosted deployment observable without changing investment semantics. Release metadata, schema state, verified backups, restore drills, readiness, diagnostics, and graceful shutdown are operational actions; they never call an LLM, never create or modify trading facts, and never execute broker orders.
+
+- Health is layered: liveness only proves the process is alive; readiness checks DB writability, schema compatibility, governance, storage, and startup preflight; operational health reports Release, Database, Backup, Storage, Governance, Scheduler, Monitor, and Worker Recovery states.
+- Schema status distinguishes CURRENT, BEHIND, AHEAD, UNKNOWN, and BROKEN. A DB revision ahead of the code head is `BLOCKED_SCHEMA_AHEAD`; production risk-increasing work must fail closed, and existing holdings are never auto-sold.
+- A verified backup uses the SQLite online backup API plus quick check, SHA-256, and a durable JSON manifest. `SUCCESS` is only claimed when the backup opens, quick check passes, checksum matches, and the manifest is durable. `.partial` files are never listed as verified.
+- Production restore is offline-only through `python -m app.system.restore`. The web UI offers Create Backup, Verify, and Restore Drill only; there is no production restore button and no automatic restore.
+- Pre-upgrade migration requires a verified `PRE_UPGRADE` backup; if backup creation or verification fails, the upgrade fails closed. A failed migration is never auto-downgraded.
+- Diagnostic bundles are sanitized and authenticated. They exclude the database, backups, API keys, tokens, cookies, passwords, raw screenshots, and raw model conversations. Request IDs are generated or reused across every HTTP response.
+- A system health `BLOCKED` state is not a sell signal. Provider outage is reflected in operational health, while liveness stays true so Docker does not restart-loop solely because a provider is temporarily unavailable.
+- All Phase H/I/J lease recovery, worker fencing, and governance fail-close behavior remains authoritative. Phase K only observes and reports recovery; it does not add a second scheduler or a second job queue.
 
 ## Quality-First Workflow
 
@@ -86,10 +148,11 @@ Default fast path:
 9. **Evaluate 0-3 new non-held opportunities**: First decide whether adding risk is better than keeping the current portfolio unchanged. Use the three-layer hot-sector scanner and transitional scoring system only for opportunities that pass evidence, quality, and risk gates. `candidates=[]` is a normal successful result; never fill a quota. Every emitted candidate must include a recommendation reason covering news/catalyst, capital flow, and current sector position/rotation stage. See `references/buy-candidate-selection.md`.
    - Candidates may include `新开仓` or `轮动观察`, but their codes must not exist in current holdings.
    - A current holding may still receive `加仓` or `条件加仓` in the holding action table; do not duplicate it in the new-candidate list.
+   - In the backend Phase F runtime, the deterministic Candidate Engine is authoritative for new-position candidates. It owns universe eligibility, quant score, entry, risk/reward, portfolio fit, decision edge, ranking, and WATCHLIST/READY/ACTION stages. The model may explain or veto supplied ACTION rows, but may not invent or promote candidates.
 10. **Print the detailed debate transcript**: Use claim-driven format with IDs, evidence, confidence, status. Investment claims must use `INV-` IDs; three-way risk claims must use `RISK-1/RISK-2/RISK-3` with aggressive/neutral/conservative speakers. Show unresolved claims explicitly. See `references/debate-reporting.md`.
 11. **Risk Manager review**: Check if Trader proposal needs revision. Apply hard/soft constraints. See `references/trading-rules.md` risk revision loop.
 12. **Final quote refresh + action-first advice**: Refresh quote fields immediately before output, then produce market read, portfolio conclusion, holding table, opportunity assessment, rebalance plan, and checkpoint-specific execution rules.
-13. **Trading memory reflection**: If past decisions exist in the conversation, user-provided archive content, or the configured `/archives/context` response, reference them and compute alpha vs CSI 300 when benchmark data is available. Do not invent or fetch history through removed/legacy persistence endpoints.
+13. **Trading memory reflection**: If persisted Alpha Memory is available, use it as auditable historical context: compare the saved market/portfolio/candidate state, execution evidence, and matured forward outcomes. Recommendation and confirmed user action remain separate. Historical memory is advisory only; it cannot invent candidates, promote WATCHLIST/READY rows, override Portfolio Gate, or change any factor/risk weight. If past decisions also exist in the conversation, user-provided archive content, or the configured `/archives/context` response, reference them and compute alpha vs CSI 300 when benchmark data is available. Do not invent or fetch history through removed/legacy persistence endpoints.
 14. **Display advice, then archive (Phase 6, if persistence configured)**: First show the final advice to the user. After the advice is visible, upload `advice.md`, `holdings.json`, and the original screenshot file via `references/persistence.md`. On failure, append `[未持久化: 原因]` without changing the already displayed advice. Skip silently if not configured.
 
 ## Output Format
@@ -157,6 +220,9 @@ Use Chinese display names first. In tables and prose, write instruments as `股�
 - Do not reverse same-day advice without material-change evidence. If an earlier same-day archive advised `买入` or `加仓`, a later `减仓` or `卖出` must cite a clear change such as price breaking the earlier trigger/stop, index or sector reversal, capital flow turning materially negative, major negative news, or a newly discovered critical quality-gate gap. Without that evidence, output `维持`/`观察`/`条件减仓`.
 - Do not repeat old reduction sizing. Before recommending any new reduce/sell, compare the last 5 archive context snapshots for `qty`, `available_qty`, cost, price, and prior advice. If current quantity has already fallen versus the recent timeline, treat that as a possible executed reduction and size any new action only from current `available_qty`.
 - Do not phrase any recommendation as guaranteed profit.
+- Do not treat historical analogue agreement as permission to raise a blocked action, and do not treat analogue disagreement as an automatic veto of a currently valid deterministic action.
+- Do not describe the user with psychological labels such as impulsive, timid, or risk-averse. Execution alignment is an observed fact only: FOLLOWED, PARTIAL, IGNORED, OPPOSITE, or UNRESOLVED.
+- Do not claim that the model learns or becomes more profitable from past trades. The system preserves immutable decisions, confirmed execution facts, deterministic Outcomes, and descriptive Daily Reviews for future audit and comparison.
 - Do not skip the quality gate; always state the data quality grade in the evidence pack.
 - Do not present resolved claims as still uncertain; update claim status explicitly.
 - Do not ignore unresolved claims in the final verdict; the Research Manager must address each one.

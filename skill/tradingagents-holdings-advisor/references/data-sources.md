@@ -7,7 +7,17 @@ Use this file when collecting data for intraday portfolio advice. The data archi
 - `TradingAgents` v0.3.0 emphasizes deterministic instrument identity, explicit provider chains, stale data rejection, and structured report output. Mirror this by keeping `source_chain`, `quote_time`, `market_session`, `missing_fields`, and `quality_gate` in every snapshot.
 - `TradingAgents-astock` v0.2.15 confirms Baidu PAE fund-flow endpoints are down. Use Baidu only for concept/industry classification; use Eastmoney push2 for individual and sector fund flow.
 - `TradingAgents-astock` also confirms public northbound historical APIs can return stale/empty values. Use real-time northbound data plus local CSV accumulation; do not infer a trend when local history is empty.
-- `TradingAgents-AShare` contributes the fetch-once/share-many pattern and failure-disable discipline. The skill itself still does not schedule jobs or read local project databases.
+- `TradingAgents-AShare` contributes the fetch-once/share-many pattern and failure-disable discipline. The Skill prompt itself does not schedule jobs or read local project databases. The self-hosted backend scheduler is a separate application concern: it uses the persisted `TradingCalendar` and fails closed when calendar data is missing.
+
+## Runtime Checkpoints And Candidate Contract
+
+The standard A-share checkpoints are `09:35`, `10:30`, `13:05`, `14:30`, and `15:10` (all in `Asia/Shanghai`). They are contract labels for reports and configured plans; the application does not create five schedules implicitly, and an operator must configure any plans to run. User timezone settings affect UI and notifications only.
+
+The structured candidate list is an **Action Candidate** list, not a watch pool:
+
+- Emit only new, non-held opportunities with `candidate_type=new_position`, numeric `score >= 7`, complete reason evidence, and passing quality/risk gates.
+- Keep `rotation_watch`, score 5–6, missing-evidence ideas, and rejected ideas in `candidate_blocked_reason`, observation triggers, or report text; never append them to `candidates`.
+- `candidates=[]` is valid. If the quality gate passes, all current holdings are `HOLD/WATCH`, and no action candidate survives, the deterministic portfolio result is `no_action`.
 
 ## Holdings Source Priority
 
@@ -44,7 +54,7 @@ Fetch all data once, share across all analyst roles. Never fetch the same data p
 **Recommended collection order:**
 1. Resolve all ticker symbols first (name → code mapping).
 2. Run `scripts/market_snapshot.py` to create the shared verified evidence JSON.
-3. Use the snapshot's quote fallback chain (Tencent → Sina → Eastmoney), major indices, sector heat, northbound snapshot, market news, fund flow, concept tags, quote-derived VPA, `missing_fields`, and `quality_gate`.
+3. Use the bundled Skill script's quote fallback chain (Tencent → Sina → Eastmoney), major indices, sector heat, northbound snapshot, market news, fund flow, concept tags, quote-derived VPA, `missing_fields`, and `quality_gate`. The Phase B backend Provider layer currently exposes configured Tencent and Eastmoney batch adapters (plus in-memory fixtures); the Skill script's Sina route is not an automatic V3 backend provider.
 4. Fetch any remaining per-holding slow evidence (deep fundamentals, announcements, lockup, dragon-tiger) only once and append it to the same evidence pack.
 5. Pre-compute technical indicators and VPA from K-line data before analysts need them when K-line routes are available; otherwise use snapshot quote-derived VPA and mark the missing OHLCV fields.
 6. Immediately before final advice, refresh quote fields with `market_snapshot.py --refresh-final`; do not refetch slower news/fundamental data unless the first pass marked a mandatory gap.
@@ -201,7 +211,7 @@ Inspired by `TradingAgents-astock`'s `data_vendors` configuration: each data typ
 - Eastmoney is used as **primary only** for data unique to it (fund flow, dragon-tiger, lockup); for everything else it is last-resort to protect the rate budget.
 - Any failed fetch records `[数据缺失: source/field]`. If the missing field is mandatory for the action decision, block the affected trading advice instead of lowering the evidence standard. Never retry endlessly (see `fallback_action` in `configuration.md`).
 - Quote collection is mandatory after codes are confirmed. During trading hours, use live quote fields; outside trading hours, use the latest completed trading session's open/high/low/close/turnover data and set `market_session` to `closed_latest_session`.
-- New non-held candidates require both sector/concept position and capital-flow evidence. If `market.hot_sectors`, `concept_blocks:*`, or fund-flow evidence is missing, keep the candidate list empty, preserve the blocker, and do not emit an executable new buy.
+- New non-held Action Candidates require both sector/concept position and capital-flow evidence. If `market.hot_sectors`, `concept_blocks:*`, or fund-flow evidence is missing, keep the candidate list empty, preserve the blocker, and do not emit an executable new buy. Observation triggers may remain outside the candidate list.
 
 ## Symbol Resolution
 
@@ -268,7 +278,7 @@ For concentrated or risky positions, collect as much of this as possible:
 | Policy | Recent policy list with date/source; supportive/restrictive/neutral; impact strength; time window; policy rating |
 | Hot money/capital | 5-day volume trend; northbound flow; individual main fund flow; concept blocks and sector move; hot-stock presence; capital-flow rating |
 | Lockup/reduction | 6-month insider/major-holder activity; top holder change; lockup/reduction news; reduction-pressure grade; next 90 days risk |
-| Buy candidates | Today's leading sectors/themes; candidate score; entry trigger; initial size; take-profit; stop-loss; invalidating condition |
+| Action candidates | Today's leading sectors/themes; `new_position` type; score ≥ 7; reason evidence; entry trigger; initial size; take-profit; stop-loss; invalidating condition |
 
 If a field is unavailable, mark `[数据缺失: field]`. If it is mandatory for an action decision, block that advice and state the next collection step.
 
