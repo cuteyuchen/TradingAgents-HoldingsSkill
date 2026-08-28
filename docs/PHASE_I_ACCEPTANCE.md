@@ -66,6 +66,8 @@ Chronological splits never shuffle dates. The final 63 trading dates are a singl
 
 Calibration supports Market Score/regime thresholds by replaying the production hysteresis state machine in date order (`previous regime -> today score -> production hysteresis transition -> simulated regime`), Candidate opportunity/entry/RR/Portfolio Fit/Decision Edge thresholds, factor ablation, one-factor weight perturbation, action frequency, robustness plateau, and baseline comparison. Market eligibility is never reduced to `score >= threshold`. Threshold variants rerun the complete production eligibility predicate with exactly one override; they are not single-field filters. Candidate selection reads train/validation only; the global holdout is evaluated after selection and cannot choose the challenger.
 
+Calibration rebuilds the completed Run's replay rows and compares the current source IDs plus source-set hash against `data_manifest_json.frozen_source_ids` and `result_summary_json.source_lineage.source_set_hash`. Any mismatch fails closed with `CALIBRATION_SOURCE_SET_CHANGED` and no CalibrationReport is created, so a Calibration cannot silently consume replay sources that arrived after the Backtest was frozen.
+
 Recommendations are limited to:
 
 - `KEEP_CURRENT`
@@ -79,7 +81,7 @@ Minimum sample and date requirements, validation/test degradation, tail risk, fo
 
 Research endpoints are under `/api/v3/research`: availability, backtest list/detail/create, cancel, calibration list/detail/create. There is no public heartbeat endpoint; client heartbeats cannot represent worker liveness. Calibration POST accepts only a `backtest_run_id` and requires that Run to be `COMPLETED`; it never starts a Backtest synchronously. Endpoints use current-user ownership checks for Runs, Reports, and Portfolios. Client-supplied outcomes, returns, scores, source IDs, and historical rows are rejected; all outcome and lineage fields are server-owned.
 
-Backtest POST creates a durable queued Run; a server-owned worker claims it with CAS, runs it outside the HTTP request, renews the lease with a server heartbeat tied to `attempt_count`, and persists completion/failure. Startup and scheduler ticks reclaim expired `RUNNING` Runs with `attempt_count` CAS fencing and redispatch the same Run without creating a second Run. A stale worker that lost its lease cannot renew the new generation's lease and stops at the next durable stage boundary.
+Backtest POST creates a durable queued Run; a server-owned worker claims it with CAS, runs it outside the HTTP request, renews the lease with a server heartbeat tied to `attempt_count`, and persists completion/failure. Startup and scheduler ticks reclaim expired `RUNNING` Runs with `attempt_count` CAS fencing and redispatch the same Run without creating a second Run. Every durable worker write (stage, data hash, invalidate, `COMPLETED`/`INSUFFICIENT_DATA`, and `FAILED`) uses `WHERE attempt_count = generation` CAS. A stale worker that lost its lease cannot renew the new generation's lease, cannot write stages or final states, and its exception handler cannot mark the reclaimed Run `FAILED`.
 
 ## 7. Frontend and Skill
 
@@ -89,8 +91,8 @@ The Skill keeps live analysis unchanged. Historical research is offline system e
 
 ## 8. Verification
 
-- Phase I + Phase I.1 + Final Seal research tests: `29 passed`.
-- Full backend suite: `288 passed`.
+- Phase I + Phase I.1 + Final Seal research tests: `32 passed`.
+- Full backend suite: `291 passed`.
 - `compileall`: passed.
 - Frontend `npm run typecheck`: passed.
 - Frontend `npm run build`: passed.

@@ -53,6 +53,10 @@ WORKER_HEARTBEAT_SECONDS = 30
 MAX_BACKTEST_WORKERS_PER_TICK = 4
 
 
+class LeaseLostError(RuntimeError):
+    """Raised when a worker generation can no longer own the run."""
+
+
 def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
@@ -278,13 +282,94 @@ def create_backtest_run(
     return row
 
 
-def _set_stage(db: Session, run: BacktestRun, stage: str, progress: int) -> None:
-    _allow_update(run)
-    run.current_stage = stage
-    run.progress_percent = max(0, min(100, progress))
-    run.last_heartbeat_at = _now()
-    run.lease_expires_at = _lease()
-    db.flush()
+def _cas_worker_write(
+    db: Session,
+    run: BacktestRun,
+    generation: int,
+    *,
+    values: dict[str, Any],
+) -> None:
+    """Atomically write only when the current worker generation still owns the row."""
+
+    updated = db.execute(
+        update(BacktestRun)
+        .where(
+            BacktestRun.id == run.id,
+            BacktestRun.status == "RUNNING",
+            BacktestRun.attempt_count == generation,
+        )
+        .values(**values)
+    ).rowcount
+    if not updated:
+        db.rollback()
+        raise LeaseLostError("LEASE_LOST")
+    db.refresh(run)
+
+
+def _write_run_fields(
+    db: Session,
+    run: BacktestRun,
+    *,
+    values: dict[str, Any],
+    generation: int | None = None,
+) -> None:
+    if generation is None:
+        _allow_update(run)
+        for key, value in values.items():
+            setattr(run, key, value)
+        db.flush()
+        return
+    _cas_worker_write(db, run, generation, values=values)
+
+
+def _write_worker_failure(
+    db: Session,
+    run: BacktestRun,
+    generation: int,
+    *,
+    values: dict[str, Any],
+) -> bool:
+    """Persist a failure only while this generation still owns the run."""
+
+    try:
+        _write_run_fields(db, run, values=values, generation=generation)
+    except LeaseLostError:
+        db.rollback()
+        return False
+    db.commit()
+    return True
+
+
+def _write_final_state(
+    db: Session,
+    run: BacktestRun,
+    *,
+    values: dict[str, Any],
+    generation: int | None,
+) -> bool:
+    if generation is None:
+        _write_run_fields(db, run, values=values)
+        db.commit()
+        return True
+    return _write_worker_failure(db, run, generation, values=values)
+
+
+def _set_stage(
+    db: Session,
+    run: BacktestRun,
+    stage: str,
+    progress: int,
+    generation: int | None = None,
+    extra_values: dict[str, Any] | None = None,
+) -> None:
+    values = {
+        "current_stage": stage,
+        "progress_percent": max(0, min(100, progress)),
+        "last_heartbeat_at": _now(),
+        "lease_expires_at": _lease(),
+        **(extra_values or {}),
+    }
+    _write_run_fields(db, run, values=values, generation=generation)
 
 
 def heartbeat_backtest_run(
@@ -299,7 +384,18 @@ def heartbeat_backtest_run(
         return None
     if row.status != "RUNNING" or row.cancel_requested:
         return row
-    if generation is not None and int(row.attempt_count or 0) != int(generation):
+    if generation is not None:
+        updated = db.execute(
+            update(BacktestRun)
+            .where(
+                BacktestRun.id == run_id,
+                BacktestRun.status == "RUNNING",
+                BacktestRun.attempt_count == generation,
+            )
+            .values(last_heartbeat_at=_now(), lease_expires_at=_lease())
+        ).rowcount
+        if updated:
+            db.refresh(row)
         return row
     _allow_update(row)
     row.last_heartbeat_at = _now()
@@ -375,12 +471,13 @@ def _mark_cancelled(db: Session, run: BacktestRun) -> None:
     db.commit()
 
 
-def _stop_if_cancelled(db: Session, run: BacktestRun) -> bool:
+def _stop_if_cancelled(db: Session, run: BacktestRun, generation: int | None = None) -> bool:
     """Observe an external cancel request at durable stage boundaries."""
 
     db.refresh(run, attribute_names=["status", "cancel_requested"])
     if run.status == "CANCELLED" or run.cancel_requested:
-        _mark_cancelled(db, run)
+        if generation is None:
+            _mark_cancelled(db, run)
         return True
     return False
 
@@ -389,23 +486,30 @@ def _worker_lost_lease(stop_event: threading.Event | None) -> bool:
     return stop_event is not None and stop_event.is_set()
 
 
-def _invalidate_for_source_change(db: Session, run: BacktestRun, source_ids: Iterable[str]) -> BacktestRun:
-    _allow_update(run)
-    run.status = "INVALIDATED"
-    run.quality_status = "INVALIDATED"
-    run.leakage_status = "INVALIDATED"
-    run.error_code = "SOURCE_SET_CHANGED"
-    run.error_message = "Frozen replay source set changed before execution."
-    run.known_limitations_json = sorted(set((run.known_limitations_json or []) + ["SOURCE_SET_CHANGED: run inputs were not frozen."]))
-    run.result_summary_json = {
-        "no_production_write": True,
-        "invalidated": True,
-        "frozen_source_set_hash": (run.data_manifest_json or {}).get("frozen_source_set_hash"),
-        "observed_source_set_hash": content_hash(sorted(set(source_ids))),
+def _invalidate_for_source_change(
+    db: Session,
+    run: BacktestRun,
+    source_ids: Iterable[str],
+    generation: int | None = None,
+) -> BacktestRun:
+    values = {
+        "status": "INVALIDATED",
+        "quality_status": "INVALIDATED",
+        "leakage_status": "INVALIDATED",
+        "error_code": "SOURCE_SET_CHANGED",
+        "error_message": "Frozen replay source set changed before execution.",
+        "known_limitations_json": sorted(set((run.known_limitations_json or []) + ["SOURCE_SET_CHANGED: run inputs were not frozen."])),
+        "result_summary_json": {
+            "no_production_write": True,
+            "invalidated": True,
+            "frozen_source_set_hash": (run.data_manifest_json or {}).get("frozen_source_set_hash"),
+            "observed_source_set_hash": content_hash(sorted(set(source_ids))),
+        },
+        "completed_at": _now(),
+        "lease_expires_at": None,
+        "last_heartbeat_at": _now(),
     }
-    run.completed_at = _now()
-    run.lease_expires_at = None
-    run.last_heartbeat_at = _now()
+    _write_run_fields(db, run, values=values, generation=generation)
     db.commit()
     return run
 
@@ -686,18 +790,18 @@ def _load_replay_rows(
     return facts, rows, sorted(source_ids)
 
 
-def load_backtest_rows(
+def load_backtest_rows_with_sources(
     db: Session,
     *,
     run: BacktestRun,
     as_of: datetime | None = None,
     decision_feature_cutoff: datetime | date | None = None,
     outcome_evaluation_cutoff: datetime | date | None = None,
-) -> list[dict[str, Any]]:
-    """Rebuild server-owned evaluation rows for calibration without accepting client facts."""
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Rebuild server-owned evaluation rows plus their current source set."""
 
     horizons = validate_horizons(list(run.horizons_json or DEFAULT_HORIZONS), market=run.scope == "MARKET")
-    _, rows, _ = _load_replay_rows(
+    _, rows, source_ids = _load_replay_rows(
         db,
         scope=run.scope,
         replay_mode=run.replay_mode,
@@ -710,6 +814,26 @@ def load_backtest_rows(
         decision_feature_cutoff=decision_feature_cutoff,
         outcome_evaluation_cutoff=outcome_evaluation_cutoff,
         transaction_cost_model=_run_transaction_cost_model(run),
+    )
+    return rows, source_ids
+
+
+def load_backtest_rows(
+    db: Session,
+    *,
+    run: BacktestRun,
+    as_of: datetime | None = None,
+    decision_feature_cutoff: datetime | date | None = None,
+    outcome_evaluation_cutoff: datetime | date | None = None,
+) -> list[dict[str, Any]]:
+    """Rebuild server-owned evaluation rows without accepting client facts."""
+
+    rows, _ = load_backtest_rows_with_sources(
+        db,
+        run=run,
+        as_of=as_of,
+        decision_feature_cutoff=decision_feature_cutoff,
+        outcome_evaluation_cutoff=outcome_evaluation_cutoff,
     )
     return rows
 
@@ -845,28 +969,31 @@ def execute_backtest_run(
     *,
     run: BacktestRun,
     as_of: datetime | None = None,
+    generation: int | None = None,
     stop_event: threading.Event | None = None,
 ) -> BacktestRun:
     if run.status in {"COMPLETED", "FAILED", "CANCELLED", "INSUFFICIENT_DATA", "INVALIDATED"}:
         return run
     if run.cancel_requested:
-        _mark_cancelled(db, run)
+        if generation is None:
+            _mark_cancelled(db, run)
         return run
-    _allow_update(run)
-    run.status = "RUNNING"
-    run.started_at = run.started_at or _now()
-    run.current_stage = "DATA_AUDIT"
-    run.lease_expires_at = _lease()
-    run.last_heartbeat_at = _now()
+    _write_run_fields(db, run, values={
+        "status": "RUNNING",
+        "started_at": run.started_at or _now(),
+        "current_stage": "DATA_AUDIT",
+        "lease_expires_at": _lease(),
+        "last_heartbeat_at": _now(),
+    }, generation=generation)
     db.commit()
     try:
         horizons = validate_horizons(list(run.horizons_json or DEFAULT_HORIZONS), market=run.scope == "MARKET")
         experiment = run.experiment_config_json or {}
         bootstrap_iterations = int(experiment.get("bootstrap_iterations") or 500)
         with historical_replay_network_policy():
-            _set_stage(db, run, "LOADING", 15)
+            _set_stage(db, run, "LOADING", 15, generation=generation)
             db.commit()
-            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+            if _stop_if_cancelled(db, run, generation=generation) or _worker_lost_lease(stop_event):
                 db.rollback()
                 return run
             facts, rows, source_ids = _load_replay_rows(
@@ -883,7 +1010,7 @@ def execute_backtest_run(
             )
             frozen_source_ids = (run.data_manifest_json or {}).get("frozen_source_ids")
             if frozen_source_ids is not None and sorted(frozen_source_ids) != source_ids:
-                return _invalidate_for_source_change(db, run, source_ids)
+                return _invalidate_for_source_change(db, run, source_ids, generation=generation)
             data_hash = _data_hash(
                 manifest=run.data_manifest_json or {},
                 source_ids=source_ids,
@@ -893,22 +1020,20 @@ def execute_backtest_run(
                 scope=run.scope,
                 replay_mode=run.replay_mode,
             )
-            _allow_update(run)
-            run.data_hash = data_hash
-            _set_stage(db, run, "REPLAY", 35)
+            _set_stage(db, run, "REPLAY", 35, generation=generation, extra_values={"data_hash": data_hash})
             db.commit()
-            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+            if _stop_if_cancelled(db, run, generation=generation) or _worker_lost_lease(stop_event):
                 db.rollback()
                 return run
-            _set_stage(db, run, "OUTCOME", 60)
+            _set_stage(db, run, "OUTCOME", 60, generation=generation)
             db.commit()
-            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+            if _stop_if_cancelled(db, run, generation=generation) or _worker_lost_lease(stop_event):
                 db.rollback()
                 return run
             slices = _slice_payloads(run.scope, rows, horizons=horizons, bootstrap_iterations=bootstrap_iterations, seed=run.random_seed)
-            _set_stage(db, run, "METRICS", 78)
+            _set_stage(db, run, "METRICS", 78, generation=generation)
             db.commit()
-            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+            if _stop_if_cancelled(db, run, generation=generation) or _worker_lost_lease(stop_event):
                 db.rollback()
                 return run
             limitations = list(run.known_limitations_json or [])
@@ -934,62 +1059,71 @@ def execute_backtest_run(
             else:
                 quality_status = "VALID" if valid_rows else "DEGRADED"
                 run_status = "COMPLETED"
-            _allow_update(run)
-            run.status = run_status
-            run.progress_percent = 100
-            run.current_stage = "FINALIZING"
-            run.sample_count = len(valid_rows)
-            run.unique_trade_dates = len(dates)
-            run.quality_status = quality_status
-            run.leakage_status = "PASS" if run.replay_mode == "PRODUCTION_REPLAY" else "LEAKAGE_BLOCKED"
-            run.failure_counts_json = dict(failure_counts)
-            run.known_limitations_json = sorted(set(limitations))
-            run.result_summary_json = {
-                "metric_slice_count": len(slices),
-                "case_count": len(rows),
-                "valid_case_count": len(valid_rows),
+            final_values = {
+                "status": run_status,
+                "progress_percent": 100,
+                "current_stage": "FINALIZING",
                 "sample_count": len(valid_rows),
                 "unique_trade_dates": len(dates),
-                "source_lineage": {
-                    "source_ids": source_ids,
-                    "source_set_hash": content_hash(source_ids),
+                "quality_status": quality_status,
+                "leakage_status": "PASS" if run.replay_mode == "PRODUCTION_REPLAY" else "LEAKAGE_BLOCKED",
+                "failure_counts_json": dict(failure_counts),
+                "known_limitations_json": sorted(set(limitations)),
+                "result_summary_json": {
+                    "metric_slice_count": len(slices),
+                    "case_count": len(rows),
+                    "valid_case_count": len(valid_rows),
+                    "sample_count": len(valid_rows),
+                    "unique_trade_dates": len(dates),
+                    "source_lineage": {
+                        "source_ids": source_ids,
+                        "source_set_hash": content_hash(source_ids),
+                    },
+                    "replay_mode": run.replay_mode,
+                    "scope": run.scope,
+                    "execution_basis": run.data_manifest_json.get("execution_model") if isinstance(run.data_manifest_json, dict) else None,
+                    "transaction_cost_assumption": _run_transaction_cost_model(run).as_dict(),
+                    "no_production_write": True,
                 },
-                "replay_mode": run.replay_mode,
-                "scope": run.scope,
-                "execution_basis": run.data_manifest_json.get("execution_model") if isinstance(run.data_manifest_json, dict) else None,
-                "transaction_cost_assumption": _run_transaction_cost_model(run).as_dict(),
-                "no_production_write": True,
+                "completed_at": _now(),
+                "lease_expires_at": None,
+                "last_heartbeat_at": _now(),
             }
-            run.completed_at = _now()
-            run.lease_expires_at = None
-            run.last_heartbeat_at = _now()
+            _write_run_fields(db, run, values=final_values, generation=generation)
             db.commit()
             return run
+    except LeaseLostError:
+        db.rollback()
+        return run
     except ReplayDataQualityError as exc:
         db.rollback()
-        _allow_update(run)
-        run.status = "INSUFFICIENT_DATA"
-        run.quality_status = "LEAKAGE_BLOCKED" if "RECOMPUTE" in str(exc) or "PIT" in str(exc) else "INSUFFICIENT_DATA"
-        run.leakage_status = "LEAKAGE_BLOCKED"
-        run.error_code = str(exc)
-        run.error_message = str(exc)
-        run.known_limitations_json = sorted(set((run.known_limitations_json or []) + [str(exc)]))
-        run.completed_at = _now()
-        run.lease_expires_at = None
-        run.last_heartbeat_at = _now()
-        db.commit()
+        failure_values = {
+            "status": "INSUFFICIENT_DATA",
+            "quality_status": "LEAKAGE_BLOCKED" if "RECOMPUTE" in str(exc) or "PIT" in str(exc) else "INSUFFICIENT_DATA",
+            "leakage_status": "LEAKAGE_BLOCKED",
+            "error_code": str(exc),
+            "error_message": str(exc),
+            "known_limitations_json": sorted(set((run.known_limitations_json or []) + [str(exc)])),
+            "completed_at": _now(),
+            "lease_expires_at": None,
+            "last_heartbeat_at": _now(),
+        }
+        if not _write_final_state(db, run, values=failure_values, generation=generation):
+            return run
         return run
     except Exception as exc:
         db.rollback()
-        _allow_update(run)
-        run.status = "FAILED"
-        run.quality_status = "FAILED"
-        run.error_code = type(exc).__name__
-        run.error_message = str(exc)
-        run.completed_at = _now()
-        run.lease_expires_at = None
-        run.last_heartbeat_at = _now()
-        db.commit()
+        failure_values = {
+            "status": "FAILED",
+            "quality_status": "FAILED",
+            "error_code": type(exc).__name__,
+            "error_message": str(exc),
+            "completed_at": _now(),
+            "lease_expires_at": None,
+            "last_heartbeat_at": _now(),
+        }
+        if not _write_final_state(db, run, values=failure_values, generation=generation):
+            return run
         raise
 
 
@@ -1118,7 +1252,7 @@ def run_backtest_worker(run_id: int) -> None:
             daemon=True,
         )
         heartbeat_thread.start()
-        execute_backtest_run(db, run=run, stop_event=stop_event)
+        execute_backtest_run(db, run=run, generation=generation, stop_event=stop_event)
     except Exception:
         # execute_backtest_run persists FAILED before re-raising.  A worker
         # thread must not take down the scheduler that owns it.
@@ -1227,6 +1361,7 @@ __all__ = [
     "execute_backtest_run",
     "run_backtest",
     "load_backtest_rows",
+    "load_backtest_rows_with_sources",
     "get_backtest_run",
     "list_backtest_runs",
     "cancel_backtest_run",

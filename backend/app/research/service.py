@@ -15,9 +15,9 @@ from .runner import (
     cancel_backtest_run,
     get_backtest_run,
     list_backtest_runs,
-    load_backtest_rows,
+    load_backtest_rows_with_sources,
 )
-from .replay import ReplayDataQualityError
+from .replay import ReplayDataQualityError, content_hash
 
 
 def _replay_capability(manifest: dict[str, Any] | None, scope: str) -> str:
@@ -91,9 +91,17 @@ def create_calibration_report(
         if backtest_run.status != "COMPLETED":
             raise ValueError("calibration_requires_completed_backtest_run")
         try:
-            case_rows = load_backtest_rows(db, run=backtest_run)
+            case_rows, current_source_ids = load_backtest_rows_with_sources(db, run=backtest_run)
         except (ReplayDataQualityError, ValueError):
-            case_rows = []
+            case_rows, current_source_ids = [], []
+        frozen_source_ids = (backtest_run.data_manifest_json or {}).get("frozen_source_ids")
+        if frozen_source_ids is not None and sorted(current_source_ids) != sorted(frozen_source_ids):
+            raise ValueError("CALIBRATION_SOURCE_SET_CHANGED")
+        frozen_summary = backtest_run.result_summary_json if isinstance(backtest_run.result_summary_json, dict) else {}
+        source_lineage = frozen_summary.get("source_lineage") if isinstance(frozen_summary.get("source_lineage"), dict) else {}
+        frozen_hash = source_lineage.get("source_set_hash")
+        if frozen_hash and content_hash(sorted(current_source_ids)) != frozen_hash:
+            raise ValueError("CALIBRATION_SOURCE_SET_CHANGED")
     else:
         case_rows = list(cases)
     evidence = build_calibration_evidence(

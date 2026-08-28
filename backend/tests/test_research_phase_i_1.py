@@ -26,17 +26,23 @@ from app.research.replay import (
     replay_market_cases,
 )
 from app.research.runner import (
+    LeaseLostError,
     _candidate_outcome_rows,
+    _set_stage,
+    _write_final_state,
     create_backtest_run,
     dispatch_queued_backtest_runs,
+    execute_backtest_run,
     heartbeat_backtest_run,
 )
+import app.research.runner as runner_module
 from app.research.splits import ResearchSplit
 from app.research.splits import chronological_splits
 
 
-def _db() -> Session:
-    engine = create_engine("sqlite:///:memory:")
+def _db(engine=None):
+    if engine is None:
+        engine = create_engine("sqlite:///:memory:")
     import app.candidates.models  # noqa: F401
     import app.market_models  # noqa: F401
     import app.memory.models  # noqa: F401
@@ -445,6 +451,102 @@ def test_old_worker_generation_cannot_renew_a_reclaimed_lease():
         assert run.lease_expires_at == lease_before
     finally:
         db.close()
+
+
+def test_old_generation_cannot_write_stage_or_final_state():
+    db = _db()
+    try:
+        run = create_backtest_run(
+            db,
+            scope="MARKET",
+            replay_mode="PRODUCTION_REPLAY",
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            horizons=[1],
+            bootstrap_iterations=1,
+        )
+        db.commit()
+        dispatch_queued_backtest_runs(db, start_workers=False)
+        assert run.attempt_count == 1
+        run.lease_expires_at = datetime(2026, 6, 1, 9)
+        db.commit()
+        dispatch_queued_backtest_runs(db, start_workers=False)
+        assert run.status == "RUNNING"
+        assert run.attempt_count == 2
+
+        stage_before = run.current_stage
+        lease_before = run.lease_expires_at
+        heartbeat_before = run.last_heartbeat_at
+        with pytest.raises(LeaseLostError):
+            _set_stage(db, run, "METRICS", 78, generation=1)
+        db.refresh(run)
+        assert run.status == "RUNNING"
+        assert run.attempt_count == 2
+        assert run.current_stage == stage_before
+        assert run.lease_expires_at == lease_before
+        assert run.last_heartbeat_at == heartbeat_before
+
+        wrote = _write_final_state(
+            db,
+            run,
+            values={
+                "status": "COMPLETED",
+                "quality_status": "FULL",
+                "current_stage": "FINALIZING",
+                "completed_at": datetime(2026, 6, 1, 10),
+            },
+            generation=1,
+        )
+        assert wrote is False
+        db.refresh(run)
+        assert run.status == "RUNNING"
+        assert run.attempt_count == 2
+        assert run.current_stage == stage_before
+        assert run.quality_status != "FULL"
+        assert run.completed_at is None
+    finally:
+        db.close()
+
+
+def test_old_generation_exception_does_not_fail_reclaimed_run(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    db = _db(engine)
+    other_db = Session(engine)
+    try:
+        run = create_backtest_run(
+            db,
+            scope="MARKET",
+            replay_mode="PRODUCTION_REPLAY",
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            horizons=[1],
+            bootstrap_iterations=1,
+        )
+        db.commit()
+        dispatch_queued_backtest_runs(db, start_workers=False)
+        assert run.attempt_count == 1
+
+        def fake_load_replay_rows(*args, **kwargs):
+            other_run = other_db.get(type(run), run.id)
+            other_run.lease_expires_at = datetime(2026, 6, 1, 9)
+            other_db.commit()
+            dispatch_queued_backtest_runs(other_db, start_workers=False)
+            assert other_db.get(type(run), run.id).attempt_count == 2
+            raise RuntimeError("worker crashed after reclaim")
+
+        monkeypatch.setattr(runner_module, "_load_replay_rows", fake_load_replay_rows)
+        returned = execute_backtest_run(db, run=run, generation=1)
+        assert returned.status == "RUNNING"
+        db.refresh(run)
+        assert run.status == "RUNNING"
+        assert run.attempt_count == 2
+        assert run.quality_status != "FAILED"
+        assert run.error_code is None
+        assert run.error_message is None
+        assert run.completed_at is None
+    finally:
+        db.close()
+        other_db.close()
 
 
 def test_market_daily_replay_uses_one_close_canonical_observation_per_day():

@@ -322,6 +322,58 @@ def test_backtest_lease_heartbeat_reclaim_cancel_and_same_run_recovery():
         db.close()
 
 
+def test_calibration_rejects_changed_frozen_source_set():
+    from app.research.service import create_calibration_report
+
+    db = _db()
+    try:
+        days = [date(2026, 6, 1), date(2026, 6, 2)]
+        _calendar(db, days)
+        db.add(MarketScoreSnapshot(
+            snapshot_id="frozen-1", market="CN", trade_date=days[0],
+            captured_at=datetime(2026, 6, 1, 6, 55, tzinfo=UTC),
+            display_score=80, raw_score=80, regime="RISK_ON", quality_status="VALID",
+        ))
+        for index, day in enumerate(days):
+            db.add(AllAMedianIndexDaily(
+                market="CN", trade_date=day, index_value=100 + index,
+                median_return=0.01, eligible_count=100,
+                available_at=datetime(2026, 6, day.day, 16),
+            ))
+        db.commit()
+        run = create_backtest_run(
+            db, scope="MARKET", replay_mode="PRODUCTION_REPLAY",
+            start_date=days[0], end_date=days[0], horizons=[1], bootstrap_iterations=1,
+        )
+        db.commit()
+        frozen_ids = sorted(run.data_manifest_json["frozen_source_ids"])
+        run._allow_research_update = True
+        run.status = "COMPLETED"
+        run.quality_status = "FULL"
+        run.leakage_status = "PASS"
+        run.result_summary_json = {"source_lineage": {"source_set_hash": content_hash(frozen_ids)}}
+        db.commit()
+
+        db.add(MarketScoreSnapshot(
+            snapshot_id="frozen-late", market="CN", trade_date=days[0],
+            captured_at=datetime(2026, 6, 1, 6, 50, tzinfo=UTC),
+            display_score=82, raw_score=82, regime="RISK_ON", quality_status="VALID",
+        ))
+        db.commit()
+
+        with pytest.raises(ValueError, match="CALIBRATION_SOURCE_SET_CHANGED"):
+            create_calibration_report(
+                db,
+                backtest_run=run,
+                target_parameter="candidate.action_entry_min",
+                parameter_grid=[65],
+                bootstrap_iterations=1,
+            )
+        assert db.query(CalibrationReport).count() == 0
+    finally:
+        db.close()
+
+
 def test_replay_applies_explicit_cutoff_and_candidate_price_requires_trusted_owner():
     db = _db()
     try:
