@@ -564,25 +564,20 @@ class UniverseResult:
         }
 
 
-def resolve_equity_universe(
-    db: Session,
-    as_of: date | datetime | str,
+def resolve_equity_universe_from_facts(
+    day: date,
     *,
-    purpose: str = "MARKET_SCORE",
-    market: str = "CN",
-    portfolio_id: int | None = None,
-    user_id: int | None = None,
-    held_codes: Iterable[str] = (),
+    purpose: str,
+    states: Mapping[str, dict[str, Any]],
+    classification: Mapping[str, dict[str, Any]],
+    trading: Mapping[str, dict[str, Any]],
+    calendar_dates: set[date],
+    held: set[str],
     minimum_trading_days: int | None = None,
 ) -> UniverseResult:
-    """Build the as-of universe from historical facts only."""
+    """Build the as-of universe from already-materialized PIT facts only."""
 
-    day = _date(as_of)
-    if day is None:
-        raise ValueError("as_of_date_required")
     normalized_purpose = str(purpose or "MARKET_SCORE").upper()
-    cutoff = _end_of_day(day)
-    states = _lifecycle_states(db, as_of=day, cutoff=cutoff, market=market)
     if not states:
         return UniverseResult(
             as_of_date=day,
@@ -590,29 +585,11 @@ def resolve_equity_universe(
             status="LEAKAGE_BLOCKED",
             source_lineage={"lifecycle_events": 0},
         )
-    classification = _classification_by_code(
-        db, as_of=day, cutoff=cutoff, market=market
-    )
-    trading = _trading_status_by_code(
-        db, as_of=day, cutoff=cutoff, market=market
-    )
-    calendar = _calendar_dates(db, as_of=day, market=market)
-    if normalized_purpose in {"CANDIDATE_STOCK", "CANDIDATE_ETF"} and portfolio_id is not None:
-        held = resolve_historical_holdings(
-            db,
-            portfolio_id=portfolio_id,
-            as_of=day,
-            user_id=user_id,
-        )
-    else:
-        held = {normalize_security_code(value) for value in held_codes if normalize_security_code(value)}
-
     threshold = minimum_trading_days
     if threshold is None:
         threshold = 60 if normalized_purpose in {"CANDIDATE_STOCK", "CANDIDATE_ETF"} else 20
     is_stock_purpose = normalized_purpose in {"MARKET_SCORE", "CANDIDATE_STOCK", "RESEARCH"}
     is_etf_purpose = normalized_purpose == "CANDIDATE_ETF"
-
     eligible: list[str] = []
     exclusions: dict[str, list[str]] = {}
     counts: Counter[str] = Counter()
@@ -653,8 +630,8 @@ def resolve_equity_universe(
         if code in held:
             reasons.append("UNIVERSE_HELD")
         if state["listed_date"] is not None:
-            age = trading_days_between(state["listed_date"], day, calendar)
-            if not calendar:
+            age = trading_days_between(state["listed_date"], day, calendar_dates)
+            if not calendar_dates:
                 reasons.append("CALENDAR_UNAVAILABLE")
             elif age < threshold:
                 reasons.append("UNIVERSE_NEW_LISTING")
@@ -695,8 +672,55 @@ def resolve_equity_universe(
             "lifecycle_events": len(states),
             "classification_rows": len(classification),
             "trading_status_rows": len(trading),
-            "calendar_dates": len(calendar),
+            "calendar_dates": len(calendar_dates),
         },
+    )
+
+
+def resolve_equity_universe(
+    db: Session,
+    as_of: date | datetime | str,
+    *,
+    purpose: str = "MARKET_SCORE",
+    market: str = "CN",
+    portfolio_id: int | None = None,
+    user_id: int | None = None,
+    held_codes: Iterable[str] = (),
+    minimum_trading_days: int | None = None,
+) -> UniverseResult:
+    """Build the as-of universe from historical facts only."""
+
+    day = _date(as_of)
+    if day is None:
+        raise ValueError("as_of_date_required")
+    cutoff = _end_of_day(day)
+    states = _lifecycle_states(db, as_of=day, cutoff=cutoff, market=market)
+    classification = _classification_by_code(
+        db, as_of=day, cutoff=cutoff, market=market
+    )
+    trading = _trading_status_by_code(
+        db, as_of=day, cutoff=cutoff, market=market
+    )
+    calendar = _calendar_dates(db, as_of=day, market=market)
+    normalized_purpose = str(purpose or "MARKET_SCORE").upper()
+    if normalized_purpose in {"CANDIDATE_STOCK", "CANDIDATE_ETF"} and portfolio_id is not None:
+        held = resolve_historical_holdings(
+            db,
+            portfolio_id=portfolio_id,
+            as_of=day,
+            user_id=user_id,
+        )
+    else:
+        held = {normalize_security_code(value) for value in held_codes if normalize_security_code(value)}
+    return resolve_equity_universe_from_facts(
+        day,
+        purpose=normalized_purpose,
+        states=states,
+        classification=classification,
+        trading=trading,
+        calendar_dates=calendar,
+        held=held,
+        minimum_trading_days=minimum_trading_days,
     )
 
 
@@ -711,4 +735,5 @@ __all__ = [
     "resolve_special_treatment",
     "resolve_valuation",
     "trading_days_between",
+    "resolve_equity_universe_from_facts",
 ]

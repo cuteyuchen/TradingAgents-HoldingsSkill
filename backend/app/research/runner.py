@@ -219,12 +219,28 @@ def create_backtest_run(
             user_id=user_id,
             portfolio_id=portfolio_id,
             as_of=None,
+            parameter_snapshot=config,
+            parameter_set_version=governance_lineage["parameter_set_version"],
+            config_hash=governance_lineage["parameter_set_hash"],
         )
     except (ReplayDataQualityError, SQLAlchemyError):
         # A run must still be creatable when the requested historical dataset is
         # absent.  The execution path will persist an auditable DATA_GAP or
         # LEAKAGE_BLOCKED result instead of manufacturing source facts.
         source_ids = []
+    if replay_mode == "DETERMINISTIC_RECOMPUTE":
+        from ..recompute.capability import build_recompute_capability_manifest
+
+        manifest["recompute_capability"] = build_recompute_capability_manifest(
+            db,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            market="CN",
+            checkpoint="EOD",
+            parameter_version=governance_lineage["parameter_set_version"],
+            config_hash=governance_lineage["parameter_set_hash"],
+        )
     manifest["frozen_source_ids"] = source_ids
     manifest["frozen_source_set_hash"] = content_hash(source_ids)
     data_hash = _data_hash(
@@ -657,7 +673,10 @@ def _candidate_outcome_rows(
                 "held_baseline": case.facts.get("held_baseline"),
                 "components": case.facts.get("components") or {},
                 "reference_price_basis": case.facts.get("reference_price_basis"),
-                "censored_sample": True,
+                # Persisted production candidates are a censored top-subset;
+                # deterministic recompute re-ranks the full PIT universe and
+                # carries its own uncensored flag from the engine.
+                "censored_sample": bool(case.facts.get("censored_sample", True)),
                 **outcome,
                 "source_ids": list(case.source_ids) + [str(outcome["target_bar_id"])] if outcome.get("target_bar_id") else list(case.source_ids),
             })
@@ -713,6 +732,9 @@ def _load_replay_rows(
     decision_feature_cutoff: datetime | date | None = None,
     outcome_evaluation_cutoff: datetime | date | None = None,
     transaction_cost_model: TransactionCostModel | None = None,
+    parameter_snapshot: dict[str, Any] | None = None,
+    parameter_set_version: str | None = None,
+    config_hash: str | None = None,
 ) -> tuple[dict[str, list[Any]], list[dict[str, Any]], list[str]]:
     """Load one complete, bulk-fetched replay input set and its outcome rows."""
 
@@ -728,6 +750,9 @@ def _load_replay_rows(
         outcome_evaluation_cutoff=outcome_evaluation_cutoff,
         user_id=user_id,
         portfolio_id=portfolio_id,
+        parameter_snapshot=parameter_snapshot,
+        parameter_set_version=parameter_set_version,
+        config_hash=config_hash,
     )
     calendar_dates = _calendar_dates(
         db,
@@ -743,14 +768,22 @@ def _load_replay_rows(
     )
     source_facts: dict[str, Iterable[Any]] = dict(facts)
     if scope == "MARKET":
-        cases = replay_market_cases(facts, replay_mode=replay_mode)
+        cases = (
+            facts.get("recompute_cases") or []
+            if replay_mode == "DETERMINISTIC_RECOMPUTE"
+            else replay_market_cases(facts, replay_mode=replay_mode)
+        )
         benchmark_rows = _load_future_benchmark(
             db, start_date=start_date, end_date=end_date, horizon=max(horizon_values)
         )
         rows = _market_outcome_rows(cases, benchmark_rows, horizon_values, calendar_dates, cutoff)
         source_facts["future_benchmarks"] = benchmark_rows
     elif scope == "CANDIDATE":
-        cases = replay_candidate_cases(facts, replay_mode=replay_mode)
+        cases = (
+            facts.get("recompute_cases") or []
+            if replay_mode == "DETERMINISTIC_RECOMPUTE"
+            else replay_candidate_cases(facts, replay_mode=replay_mode)
+        )
         codes = [case.facts.get("code") for case in cases]
         bars = _load_future_bars(
             db, codes=codes, start_date=start_date, end_date=end_date, horizon=max(horizon_values)
@@ -780,19 +813,31 @@ def _load_replay_rows(
         rows = _bar_metric_rows(cases, bars, calendar_dates, horizon_values)
         source_facts["future_bars"] = bars
     else:
-        snapshots = facts.get("portfolio_snapshots", [])
-        rows = [{
-            "trade_date": item.snapshot_time.date(),
-            "portfolio_snapshot_id": item.id,
-            "total_assets": item.total_assets,
-            "market_value": item.total_market_value,
-            "status": item.status,
-            "excess_return": None,
-            "coverage": 1.0,
-            "source_ids": [f"portfolio_snapshots:id:{item.id}"],
-        } for item in snapshots]
+        if replay_mode == "DETERMINISTIC_RECOMPUTE":
+            rows = [
+                {
+                    "trade_date": case.trade_date,
+                    **case.facts,
+                    "coverage": case.coverage,
+                    "source_ids": list(case.source_ids),
+                }
+                for case in (facts.get("recompute_cases") or [])
+            ]
+        else:
+            snapshots = facts.get("portfolio_snapshots", [])
+            rows = [{
+                "trade_date": item.snapshot_time.date(),
+                "portfolio_snapshot_id": item.id,
+                "total_assets": item.total_assets,
+                "market_value": item.total_market_value,
+                "status": item.status,
+                "excess_return": None,
+                "coverage": 1.0,
+                "source_ids": [f"portfolio_snapshots:id:{item.id}"],
+            } for item in snapshots]
 
     source_ids = set(_source_ids(source_facts))
+    source_ids.update(str(item) for item in (facts.get("recompute_source_ids") or []))
     for row in rows:
         source_ids.update(str(item) for item in row.get("source_ids", []))
     return facts, rows, sorted(source_ids)
@@ -822,6 +867,9 @@ def load_backtest_rows_with_sources(
         decision_feature_cutoff=decision_feature_cutoff,
         outcome_evaluation_cutoff=outcome_evaluation_cutoff,
         transaction_cost_model=_run_transaction_cost_model(run),
+        parameter_snapshot=run.baseline_config_json if isinstance(run.baseline_config_json, dict) else None,
+        parameter_set_version=run.parameter_set_version,
+        config_hash=run.parameter_set_hash,
     )
     return rows, source_ids
 
@@ -913,6 +961,8 @@ def _persist_slices(db: Session, run: BacktestRun, slices: list[dict[str, Any]],
 
 
 def _serialize(row: BacktestRun) -> dict[str, Any]:
+    manifest = row.data_manifest_json if isinstance(row.data_manifest_json, dict) else {}
+    summary = row.result_summary_json if isinstance(row.result_summary_json, dict) else {}
     return {
         "id": row.id,
         "user_id": row.user_id,
@@ -928,6 +978,8 @@ def _serialize(row: BacktestRun) -> dict[str, Any]:
         "engine_version": row.engine_version,
         "data_hash": row.data_hash,
         "data_manifest": row.data_manifest_json,
+        "recompute_capability": manifest.get("recompute_capability"),
+        "recompute_summary": summary.get("recompute"),
         "sample_count": row.sample_count,
         "unique_trade_dates": row.unique_trade_dates,
         "quality_status": row.quality_status,
@@ -965,6 +1017,54 @@ def _serialize(row: BacktestRun) -> dict[str, Any]:
             }
             for item in row.metric_slices
         ],
+    }
+
+
+def _recompute_summary(
+    run: BacktestRun,
+    facts: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if run.replay_mode != "DETERMINISTIC_RECOMPUTE":
+        return None
+    summary = facts.get("recompute_summary") if isinstance(facts.get("recompute_summary"), dict) else {}
+    manifest = facts.get("recompute_manifest") if isinstance(facts.get("recompute_manifest"), dict) else {}
+    candidate_actions = [
+        row for row in rows
+        if str(row.get("stage") or "").upper() == "ACTION"
+    ]
+    portfolio_rows = [
+        row for row in rows
+        if row.get("portfolio_action") in {"ACTION", "NO_ACTION"}
+    ]
+    portfolio_actions = [
+        row for row in portfolio_rows
+        if row.get("portfolio_action") == "ACTION"
+    ]
+    coverage = manifest.get("coverage") if isinstance(manifest.get("coverage"), dict) else {}
+    return {
+        "capability": summary.get("capability") or manifest.get("capability"),
+        "date_count": summary.get("date_count"),
+        "query_count": summary.get("query_count"),
+        "deterministic_hash": summary.get("deterministic_hash"),
+        "input_coverage": coverage,
+        "missing_inputs": manifest.get("missing_inputs") or [],
+        "partial_inputs": manifest.get("partial_inputs") or [],
+        "limitations": manifest.get("limitations") or [],
+        "candidate_case_count": len(rows),
+        "candidate_action_count": len(candidate_actions),
+        "candidate_no_action_rate": (
+            (len(rows) - len(candidate_actions)) / len(rows)
+            if rows and run.scope == "CANDIDATE"
+            else None
+        ),
+        "portfolio_action_count": len(portfolio_actions),
+        "portfolio_no_action_count": len(portfolio_rows) - len(portfolio_actions),
+        "portfolio_no_action_rate": (
+            (len(portfolio_rows) - len(portfolio_actions)) / len(portfolio_rows)
+            if portfolio_rows
+            else None
+        ),
     }
 
 
@@ -1015,6 +1115,9 @@ def execute_backtest_run(
                 portfolio_id=run.portfolio_id,
                 as_of=as_of,
                 transaction_cost_model=_run_transaction_cost_model(run),
+                parameter_snapshot=run.baseline_config_json if isinstance(run.baseline_config_json, dict) else None,
+                parameter_set_version=run.parameter_set_version,
+                config_hash=run.parameter_set_hash,
             )
             frozen_source_ids = (run.data_manifest_json or {}).get("frozen_source_ids")
             if frozen_source_ids is not None and sorted(frozen_source_ids) != source_ids:
@@ -1050,7 +1153,7 @@ def execute_backtest_run(
             if run.scope == "CANDIDATE":
                 limitations.append("CENSORED_PRODUCTION_SAMPLE: persisted candidates are a top-subset, not the full universe.")
             if run.replay_mode == "DETERMINISTIC_RECOMPUTE":
-                limitations.append("DETERMINISTIC_RECOMPUTE was blocked unless an explicit PIT preparation set exists.")
+                limitations.append("DETERMINISTIC_RECOMPUTE consumes frozen PIT facts only; capability is reported per run and PARTIAL is never labelled FULL.")
             _persist_slices(db, run, slices, limitations=sorted(set(limitations)))
             valid_rows = [row for row in rows if row.get("excess_return") is not None or row.get("forward_return") is not None]
             dates = {str(row.get("trade_date"))[:10] for row in rows if row.get("trade_date") is not None}
@@ -1092,6 +1195,7 @@ def execute_backtest_run(
                     "execution_basis": run.data_manifest_json.get("execution_model") if isinstance(run.data_manifest_json, dict) else None,
                     "transaction_cost_assumption": _run_transaction_cost_model(run).as_dict(),
                     "no_production_write": True,
+                    **({"recompute": _recompute_summary(run, facts, rows)} if run.replay_mode == "DETERMINISTIC_RECOMPUTE" else {}),
                 },
                 "completed_at": _now(),
                 "lease_expires_at": None,

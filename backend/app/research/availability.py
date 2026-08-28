@@ -245,7 +245,7 @@ def build_replay_availability_manifest(
         db, name="MarketScoreSnapshot", model=MarketScoreSnapshot, date_column=MarketScoreSnapshot.trade_date,
         timestamp_column=MarketScoreSnapshot.captured_at, start_date=start_date, end_date=end_date, market=market,
         status="FULL", reason="production_snapshots_are_replayable_facts; deterministic_recompute_requires_source_PIT_inputs",
-        capabilities={"PRODUCTION_REPLAY": "FULL", "DETERMINISTIC_RECOMPUTE": "LEAKAGE_BLOCKED", "BAR_ONLY_DIAGNOSTIC": "UNSUPPORTED"},
+        capabilities={"PRODUCTION_REPLAY": "FULL", "DETERMINISTIC_RECOMPUTE": "PARTIAL", "BAR_ONLY_DIAGNOSTIC": "UNSUPPORTED"},
         extra=(MarketScoreSnapshot.market == market,), source_fields=["trade_date", "captured_at", "snapshot_id", "calculation_version", "score_config_version"],
         availability_field="captured_at", lineage_field="market_snapshot_id",
     )
@@ -269,7 +269,7 @@ def build_replay_availability_manifest(
         db, name="AllAMedianIndexDaily", model=AllAMedianIndexDaily, date_column=AllAMedianIndexDaily.trade_date,
         timestamp_column=AllAMedianIndexDaily.available_at, start_date=start_date, end_date=end_date, market=market,
         status="FULL", reason="persisted_benchmark_is_used_as_a_fact; current_constituent_recompute_is_forbidden",
-        capabilities={"PRODUCTION_REPLAY": "FULL", "DETERMINISTIC_RECOMPUTE": "LEAKAGE_BLOCKED"},
+        capabilities={"PRODUCTION_REPLAY": "FULL", "DETERMINISTIC_RECOMPUTE": "PARTIAL"},
         extra=(AllAMedianIndexDaily.market == market,), source_fields=["trade_date", "available_at", "index_value", "calculation_version"],
         availability_field="available_at", lineage_field="calculation_version",
     )
@@ -279,7 +279,7 @@ def build_replay_availability_manifest(
         db, name="DailyBarCache", model=DailyBarCache, date_column=DailyBarCache.trade_date,
         timestamp_column=DailyBarCache.available_at, start_date=start_date, end_date=end_date, market=market,
         status=daily_bar_status, reason=daily_bar_reason,
-        capabilities={"BAR_ONLY_DIAGNOSTIC": "FULL", "PRODUCTION_REPLAY": "PARTIAL", "DETERMINISTIC_RECOMPUTE": "LEAKAGE_BLOCKED"},
+        capabilities={"BAR_ONLY_DIAGNOSTIC": "FULL", "PRODUCTION_REPLAY": "PARTIAL", "DETERMINISTIC_RECOMPUTE": "PARTIAL"},
         extra=(DailyBarCache.market == market,), source_fields=["trade_date", "available_at", "fetched_at", "provider", "adjustment", "quality_status"],
         availability_field="available_at", lineage_field="provider",
     )
@@ -305,7 +305,7 @@ def build_replay_availability_manifest(
         db, name="CandidateRun", model=CandidateRun, date_column=CandidateRun.trade_date,
         timestamp_column=CandidateRun.captured_at, start_date=start_date, end_date=end_date, market=market,
         status="PARTIAL", reason="persisted_candidate_scores contain only Watchlist/Ready/Action top subset",
-        capabilities={"PRODUCTION_REPLAY": "PARTIAL", "full_universe_factor_calibration": "CENSORED_PRODUCTION_SAMPLE", "DETERMINISTIC_RECOMPUTE": "LEAKAGE_BLOCKED"},
+        capabilities={"PRODUCTION_REPLAY": "PARTIAL", "full_universe_factor_calibration": "CENSORED_PRODUCTION_SAMPLE", "DETERMINISTIC_RECOMPUTE": "PARTIAL"},
         extra=tuple(candidate_extra), source_fields=["trade_date", "as_of", "captured_at", "calculation_key", "quote_snapshot_id", "calculation_version"],
         availability_field="captured_at", lineage_field="quote_snapshot_id",
     )

@@ -89,6 +89,25 @@ Phase L provides point-in-time security lifecycle, trading status, ST state, val
 - The PIT universe resolver uses historical lifecycle, trading status, classification, and historical PortfolioSnapshot holdings. Listing age is measured in trading days.
 - Do not hand the historical sync authority to the LLM; historical data preparation and import are operator actions.
 
+## Deterministic Recompute (Phase M)
+
+DETERMINISTIC_RECOMPUTE re-runs the production Market / Candidate /
+Portfolio decision algorithm from frozen PIT facts. It never reads persisted
+MarketScoreSnapshot / CandidateRun / CandidateScore as recompute inputs, never
+calls live providers, and never calls the model client.
+
+- FULL_PIT_EQUIVALENT requires production-equivalent inputs, the historical
+  ParameterSetVersion, historical portfolio state, and the same production
+  algorithm path.
+- PARTIAL_PIT_RECOMPUTE / DIAGNOSTIC_ONLY / DATA_GAP / LEAKAGE_BLOCKED /
+  UNSUPPORTED are honest labels; PARTIAL must never be presented as a complete
+  backtest.
+- Missing factors are unavailable, never zero, and never backfilled from
+  current or future facts.
+- Parameter versions are frozen at Backtest creation; current ACTIVE
+  parameters never reinterpret old dates.
+- Recompute never auto-applies parameters and never auto-trades.
+
 ## Parameter Governance (Phase J)
 
 Phase J makes parameter changes a versioned, human-reviewed operation. Research proposes, humans approve, governance versions, production consumes, and rollback stays possible. There is no auto-apply and no auto-trade path in governance.

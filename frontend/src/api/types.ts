@@ -245,6 +245,13 @@ export interface NotificationChannel {
 export type ResearchScope = 'MARKET' | 'CANDIDATE' | 'PORTFOLIO_DECISION' | 'MEMORY_DECISION' | 'BAR_FACTOR'
 export type ReplayMode = 'PRODUCTION_REPLAY' | 'DETERMINISTIC_RECOMPUTE' | 'BAR_ONLY_DIAGNOSTIC'
 export type CalibrationRecommendation = 'KEEP_CURRENT' | 'CONSIDER_CHANGE' | 'INSUFFICIENT_EVIDENCE' | 'REJECT_CHANGE'
+export type RecomputeCapabilityStatus =
+  | 'FULL_PIT_EQUIVALENT'
+  | 'PARTIAL_PIT_RECOMPUTE'
+  | 'DIAGNOSTIC_ONLY'
+  | 'DATA_GAP'
+  | 'LEAKAGE_BLOCKED'
+  | 'UNSUPPORTED'
 
 export interface ReplayAvailabilityItem {
   name?: string
@@ -266,6 +273,28 @@ export interface ReplayAvailabilityManifest {
   data_hash: string
   known_limitations?: string[]
   [key: string]: ReplayAvailabilityItem | Record<string, any> | string | string[] | undefined
+}
+
+export interface RecomputeCapabilityManifest {
+  manifest_version: string
+  scope: string
+  requested_range: { start_date: string; end_date: string }
+  checkpoint: string
+  capability: RecomputeCapabilityStatus
+  required_inputs: string[]
+  available_inputs: string[]
+  partial_inputs: string[]
+  missing_inputs: string[]
+  coverage: Record<string, number | null>
+  parameter_version?: string | null
+  config_hash?: string | null
+  universe_version: string
+  price_basis?: string | null
+  engine_version: string
+  limitations: string[]
+  preview?: boolean
+  parameter_snapshot_frozen_at_creation?: boolean
+  [key: string]: any
 }
 
 export interface BacktestMetricSlice {
@@ -301,6 +330,8 @@ export interface BacktestRun {
   engine_version: string
   data_hash: string
   data_manifest?: Record<string, any> | null
+  recompute_capability?: RecomputeCapabilityManifest | null
+  recompute_summary?: Record<string, any> | null
   sample_count: number
   unique_trade_dates: number
   quality_status: string

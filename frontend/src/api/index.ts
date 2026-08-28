@@ -26,6 +26,7 @@ import type {
   ProposalListResponse,
   Portfolio,
   PortfolioSnapshot,
+  RecomputeCapabilityManifest,
   ReplayAvailabilityManifest,
   SystemBackup,
   SystemBackupList,
@@ -176,6 +177,16 @@ export const api = {
     if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request<ReplayAvailabilityManifest>(`/api/v3/research/replay-availability${suffix}`)
+  },
+  getRecomputeCapability: (params: { scope: ResearchScope; start_date: string; end_date: string; checkpoint?: string; portfolio_id?: number }) => {
+    const query = new URLSearchParams({
+      scope: params.scope,
+      start_date: params.start_date,
+      end_date: params.end_date,
+      checkpoint: params.checkpoint || 'EOD',
+    })
+    if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
+    return request<RecomputeCapabilityManifest>(`/api/v3/research/recompute-capability?${query.toString()}`)
   },
   listBacktests: (portfolioId?: number) => request<BacktestRun[]>(`/api/v3/research/backtests${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`),
   getBacktest: (id: number) => request<BacktestRun>(`/api/v3/research/backtests/${id}`),

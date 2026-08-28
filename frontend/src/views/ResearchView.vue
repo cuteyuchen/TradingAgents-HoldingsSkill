@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   CalendarRange,
   Database,
@@ -17,6 +17,7 @@ import type {
   BacktestRun,
   CalibrationReport,
   Portfolio,
+  RecomputeCapabilityManifest,
   ReplayAvailabilityItem,
   ReplayAvailabilityManifest,
   ReplayMode,
@@ -32,6 +33,8 @@ const runs = ref<BacktestRun[]>([])
 const reports = ref<CalibrationReport[]>([])
 const selectedRun = ref<BacktestRun | null>(null)
 const selectedReport = ref<CalibrationReport | null>(null)
+const recomputePreview = ref<RecomputeCapabilityManifest | null>(null)
+const previewLoading = ref(false)
 
 function isoDate(value: Date): string {
   return value.toISOString().slice(0, 10)
@@ -91,6 +94,14 @@ const portfolioOptions = computed(() => [
 ])
 const selectedMetricRows = computed(() => (selectedRun.value?.metric_slices || []).slice(0, 30))
 const canCancel = computed(() => selectedRun.value && ['QUEUED', 'RUNNING'].includes(selectedRun.value.status))
+const canPreviewRecompute = computed(() =>
+  runForm.replay_mode === 'DETERMINISTIC_RECOMPUTE' &&
+  ['MARKET', 'CANDIDATE', 'PORTFOLIO_DECISION'].includes(runForm.scope),
+)
+const selectedRecompute = computed(() => {
+  if (selectedRun.value?.replay_mode !== 'DETERMINISTIC_RECOMPUTE') return null
+  return (selectedRun.value?.recompute_summary as Record<string, any> | null | undefined) || null
+})
 const calibrationRunOptions = computed(() => runs.value
   .filter((run) => run.status === 'COMPLETED')
   .map((run) => ({ label: `#${run.id} ${run.scope} ${run.start_date} → ${run.end_date}`, value: run.id })))
@@ -150,10 +161,35 @@ async function load() {
     } else if (reports.value[0]) {
       selectedReport.value = reports.value[0]
     }
+    await refreshRecomputePreview()
   } catch (error) {
     message.error((error as Error).message)
   } finally {
     loading.value = false
+  }
+}
+
+let previewSequence = 0
+async function refreshRecomputePreview() {
+  const seq = ++previewSequence
+  if (!canPreviewRecompute.value) {
+    recomputePreview.value = null
+    previewLoading.value = false
+    return
+  }
+  previewLoading.value = true
+  try {
+    const value = await api.getRecomputeCapability({
+      scope: runForm.scope,
+      start_date: runForm.start_date,
+      end_date: runForm.end_date,
+      portfolio_id: runForm.portfolio_id || undefined,
+    })
+    if (seq === previewSequence) recomputePreview.value = value
+  } catch {
+    if (seq === previewSequence) recomputePreview.value = null
+  } finally {
+    if (seq === previewSequence) previewLoading.value = false
   }
 }
 
@@ -256,6 +292,11 @@ function downloadJson(label: string, value: unknown) {
 }
 
 onMounted(() => void load())
+
+watch(
+  () => [runForm.scope, runForm.replay_mode, runForm.start_date, runForm.end_date, runForm.portfolio_id],
+  () => { void refreshRecomputePreview() },
+)
 </script>
 
 <template>
@@ -310,6 +351,35 @@ onMounted(() => void load())
           <label>研究组合<n-select v-model:value="runForm.portfolio_id" :options="portfolioOptions" /></label>
           <label>Experiment 名称<n-input v-model:value="runForm.experiment_name" placeholder="threshold sensitivity" /></label>
         </div>
+        <div v-if="canPreviewRecompute" class="recompute-preview">
+          <div class="preview-heading">
+            <strong>Recompute Capability Preview</strong>
+            <n-spin v-if="previewLoading" size="small" />
+            <n-tag v-else-if="recomputePreview" size="small" :type="statusType(recomputePreview.capability)">
+              {{ statusText(recomputePreview.capability) }}
+            </n-tag>
+          </div>
+          <template v-if="recomputePreview">
+            <div class="preview-meta">
+              <span>Parameter <code>{{ recomputePreview.parameter_version || '—' }}</code></span>
+              <span>Config <code>{{ recomputePreview.config_hash ? recomputePreview.config_hash.slice(0, 12) : '—' }}</code></span>
+              <span>Universe <code>{{ recomputePreview.universe_version }}</code></span>
+              <span>Checkpoint <code>{{ recomputePreview.checkpoint }}</code></span>
+            </div>
+            <div class="preview-chips">
+              <span v-for="key in recomputePreview.missing_inputs" :key="`missing-${key}`" class="chip chip-error">{{ key }}</span>
+              <span v-for="key in recomputePreview.partial_inputs" :key="`partial-${key}`" class="chip chip-warning">{{ key }}</span>
+              <span v-if="!recomputePreview.missing_inputs.length && !recomputePreview.partial_inputs.length" class="chip chip-ok">required inputs available</span>
+            </div>
+            <div v-if="recomputePreview.limitations.length" class="preview-limits">
+              <span v-for="item in recomputePreview.limitations" :key="item">{{ item }}</span>
+            </div>
+            <div v-if="recomputePreview.capability !== 'FULL_PIT_EQUIVALENT'" class="preview-warning">
+              {{ recomputePreview.capability }} 不是 FULL 等价回测；运行后以实际 capability 为准。
+            </div>
+          </template>
+          <div v-else-if="!previewLoading" class="preview-warning">Capability 预览暂不可用。</div>
+        </div>
         <div class="horizon-line">
           <span class="field-label">Forward Horizon</span>
           <n-checkbox-group v-model:value="runForm.horizons">
@@ -362,6 +432,30 @@ onMounted(() => void load())
             <span>Stage {{ selectedRun.current_stage }} · {{ selectedRun.progress_percent }}%</span>
             <span>Heartbeat {{ fmt(selectedRun.last_heartbeat_at) }}</span>
             <span>Data {{ selectedRun.data_hash }}</span>
+          </div>
+          <div v-if="selectedRecompute" class="recompute-result">
+            <div class="preview-heading">
+              <strong>Deterministic Recompute</strong>
+              <n-tag size="small" :type="statusType(selectedRecompute.capability)">{{ statusText(selectedRecompute.capability) }}</n-tag>
+            </div>
+            <div class="preview-meta">
+              <span>Dates <code>{{ selectedRecompute.date_count ?? '—' }}</code></span>
+              <span>Queries <code>{{ selectedRecompute.query_count ?? '—' }}</code></span>
+              <span>Hash <code>{{ selectedRecompute.deterministic_hash ? selectedRecompute.deterministic_hash.slice(0, 16) : '—' }}</code></span>
+              <span>Cases <code>{{ selectedRecompute.candidate_case_count ?? '—' }}</code></span>
+              <span>Candidate Action <code>{{ selectedRecompute.candidate_action_count ?? '—' }}</code></span>
+              <span>No-action Rate <code>{{ selectedRecompute.candidate_no_action_rate === null || selectedRecompute.candidate_no_action_rate === undefined ? '—' : `${(selectedRecompute.candidate_no_action_rate * 100).toFixed(1)}%` }}</code></span>
+              <span v-if="selectedRecompute.portfolio_action_count !== undefined || selectedRecompute.portfolio_no_action_count !== undefined">
+                Portfolio <code>{{ selectedRecompute.portfolio_action_count }} ACTION / {{ selectedRecompute.portfolio_no_action_count }} NO_ACTION</code>
+              </span>
+            </div>
+            <div class="preview-chips">
+              <span v-for="key in selectedRecompute.missing_inputs || []" :key="`run-missing-${key}`" class="chip chip-error">{{ key }}</span>
+              <span v-for="key in selectedRecompute.partial_inputs || []" :key="`run-partial-${key}`" class="chip chip-warning">{{ key }}</span>
+            </div>
+            <div v-if="selectedRecompute.limitations?.length" class="preview-limits">
+              <span v-for="item in selectedRecompute.limitations" :key="item">{{ item }}</span>
+            </div>
           </div>
           <n-alert v-if="selectedRun.error_message" class="research-alert" type="error" :show-icon="true">{{ selectedRun.error_message }}</n-alert>
           <div v-if="selectedRun.known_limitations?.length" class="limitations">
@@ -462,6 +556,17 @@ label :deep(.n-input), label :deep(.n-select) { width: 100%; }
 input { width: 100%; min-height: 34px; border: 1px solid var(--app-border); border-radius: 6px; padding: 0 10px; background: var(--app-surface-muted); color: var(--app-text); }
 .horizon-line { display: grid; gap: 8px; margin-top: 16px; }
 .field-label { color: var(--app-text-muted); font-size: 12px; font-weight: 700; }
+.recompute-preview, .recompute-result { display: grid; gap: 10px; margin-top: 16px; border-top: 1px solid var(--app-border-soft); padding-top: 14px; }
+.preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.preview-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--app-text-muted); font-size: 11px; }
+.preview-meta code, .preview-heading code { color: var(--app-text); overflow-wrap: anywhere; }
+.preview-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 5px; padding: 2px 7px; font-size: 11px; font-weight: 700; }
+.chip-error { background: color-mix(in srgb, var(--app-error, #d03050) 12%, transparent); color: var(--app-error, #d03050); }
+.chip-warning { background: color-mix(in srgb, var(--app-warning, #d08800) 12%, transparent); color: var(--app-warning, #d08800); }
+.chip-ok { background: color-mix(in srgb, var(--app-success, #18a058) 12%, transparent); color: var(--app-success, #18a058); }
+.preview-limits { display: grid; gap: 4px; color: var(--app-warning); font-size: 11px; }
+.preview-warning { border-radius: 6px; background: color-mix(in srgb, var(--app-warning, #d08800) 10%, transparent); color: var(--app-warning, #d08800); padding: 8px 10px; font-size: 12px; font-weight: 700; }
 .form-actions, .evidence-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .run-row, .report-row { display: grid; align-items: center; gap: 12px; width: 100%; border: 0; border-bottom: 1px solid var(--app-border-soft); padding: 12px 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .run-row { grid-template-columns: 48px minmax(0, 1fr) 80px auto; }

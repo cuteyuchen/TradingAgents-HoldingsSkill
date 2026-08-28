@@ -231,6 +231,9 @@ def load_replay_facts(
     outcome_evaluation_cutoff: datetime | date | None = None,
     user_id: int | None = None,
     portfolio_id: int | None = None,
+    parameter_snapshot: dict[str, Any] | None = None,
+    parameter_set_version: str | None = None,
+    config_hash: str | None = None,
 ) -> dict[str, list[Any]]:
     """Load one frozen source set with bulk queries and strict date visibility."""
 
@@ -253,11 +256,10 @@ def load_replay_facts(
         else _as_of(None)
     )
     if mode == "DETERMINISTIC_RECOMPUTE":
-        # Phase L builds the PIT foundation only.  The historical data
-        # preparation step is separate from replay and never performs live
-        # network IO; the deterministic recompute engine arrives in a later
-        # phase, so DETERMINISTIC_RECOMPUTE remains fail-closed today.
         from ..history.availability import pit_recompute_gate
+        from ..recompute.capability import build_recompute_capability_manifest
+        from ..recompute.context import build_context
+        from ..recompute.engine import cohort_recompute_summary, recompute_deterministic_scope
 
         gate = pit_recompute_gate(
             db,
@@ -272,10 +274,47 @@ def load_replay_facts(
                 f"{gate['status']}:{gate.get('reason')}:"
                 + ",".join(gate.get("missing_inputs") or [])
             )
-        raise ReplayDataQualityError(
-            "DETERMINISTIC_RECOMPUTE_ENGINE_NOT_IMPLEMENTED:"
-            f"{gate['status']}:{gate.get('reason')}"
+        manifest = build_recompute_capability_manifest(
+            db,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            market="CN",
+            checkpoint="EOD",
+            parameter_version=parameter_set_version,
+            config_hash=config_hash,
         )
+        capability = str(manifest.get("capability") or "DATA_GAP")
+        if capability in {"DATA_GAP", "LEAKAGE_BLOCKED", "UNSUPPORTED"}:
+            raise ReplayDataQualityError(
+                "DETERMINISTIC_RECOMPUTE_"
+                f"{capability}:{','.join(manifest.get('missing_inputs') or [])}"
+            )
+        context = build_context(
+            scope=scope,
+            trade_date=end_date,
+            start_date=start_date,
+            end_date=end_date,
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+            parameter_set_version=parameter_set_version,
+            config_hash=config_hash,
+            parameter_snapshot=parameter_snapshot,
+        )
+        results = recompute_deterministic_scope(
+            db,
+            context=context,
+            parameter_snapshot=parameter_snapshot,
+            config_hash=config_hash,
+        )
+        cases = [case for result in results for case in result.to_replay_cases()]
+        source_ids = sorted({str(value) for result in results for value in result.source_ids})
+        return {
+            "recompute_cases": cases,
+            "recompute_source_ids": source_ids,
+            "recompute_summary": cohort_recompute_summary(results),
+            "recompute_manifest": manifest,
+        }
 
     result: dict[str, list[Any]] = {}
     if scope == "MARKET":

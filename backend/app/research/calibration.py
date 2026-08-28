@@ -270,7 +270,12 @@ def recommend_calibration(
         return "INSUFFICIENT_EVIDENCE"
     if str(quality_status).upper() not in {"FULL", "VALID"} or str(leakage_status).upper() not in {"PASS", "VALID"}:
         return "INSUFFICIENT_EVIDENCE"
-    if quality_reasons or str(replay_capability or "FULL").upper() not in {"FULL", "VALID", "PRODUCTION_REPLAY"}:
+    if quality_reasons or str(replay_capability or "FULL").upper() not in {
+        "FULL",
+        "VALID",
+        "PRODUCTION_REPLAY",
+        "FULL_PIT_EQUIVALENT",
+    }:
         return "INSUFFICIENT_EVIDENCE"
     if censored_sample and (
         (target_parameter and (_is_weight_or_ablation(target_parameter) or _is_opportunity_calibration(target_parameter)))
@@ -958,8 +963,8 @@ def build_calibration_evidence(
     quality_reasons: list[str] = []
     if len(dates) < 252:
         quality_reasons.append("INSUFFICIENT_HISTORICAL_TRADE_DATES")
-    if replay_mode and str(replay_mode).upper() == "DETERMINISTIC_RECOMPUTE":
-        quality_reasons.append("DETERMINISTIC_RECOMPUTE_REQUIRES_EXPLICIT_PIT_DATASET")
+    if str(replay_capability or "").upper() in {"PARTIAL_PIT_RECOMPUTE", "DIAGNOSTIC_ONLY", "DATA_GAP", "LEAKAGE_BLOCKED"}:
+        quality_reasons.append("PARTIAL_RECOMPUTE_DIAGNOSTIC_ONLY")
     if challenger_expands and expanded_range_case_count == 0:
         quality_reasons.append("EXPANDED_THRESHOLD_RANGE_NOT_COVERED")
     if availability_manifest:

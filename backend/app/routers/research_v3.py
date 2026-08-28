@@ -34,6 +34,7 @@ from ..research.runner import (
     enqueue_backtest_run,
     serialize_backtest_run,
 )
+from ..recompute.capability import build_recompute_capability_manifest
 from ..v2_dependencies import get_current_user
 from ..v2_models import Portfolio, User
 
@@ -143,6 +144,46 @@ def replay_availability(
         portfolio_id=portfolio_id,
         user_id=current_user.id,
     )
+
+
+@router.get("/recompute-capability")
+def recompute_capability_preview(
+    scope: str,
+    start_date: date,
+    end_date: date,
+    checkpoint: str = Query(default="EOD"),
+    portfolio_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Preview the capability a deterministic recompute run would freeze."""
+
+    normalized_scope = str(scope).upper()
+    supported = {"MARKET", "CANDIDATE", "CANDIDATE_STOCK", "CANDIDATE_ETF", "PORTFOLIO_DECISION"}
+    if normalized_scope not in supported:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="unsupported_recompute_scope")
+    if start_date > end_date:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="start_date_must_not_exceed_end_date")
+    if str(checkpoint).upper() != "EOD":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="only_eod_checkpoint_is_supported")
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    from ..governance.service import lineage_fields, resolve_production_parameters
+
+    governance = resolve_production_parameters(db)
+    lineage = lineage_fields(governance)
+    manifest = build_recompute_capability_manifest(
+        db,
+        scope=normalized_scope,
+        start_date=start_date,
+        end_date=end_date,
+        market="CN",
+        checkpoint="EOD",
+        parameter_version=lineage["parameter_set_version"],
+        config_hash=lineage["parameter_set_hash"],
+    )
+    manifest["parameter_snapshot_frozen_at_creation"] = True
+    manifest["preview"] = True
+    return manifest
 
 
 @router.post("/backtests")

@@ -786,7 +786,7 @@ def test_deterministic_recompute_fails_without_pit_data() -> None:
         db.close()
 
 
-def test_deterministic_recompute_requires_engine_before_claiming_success() -> None:
+def test_deterministic_recompute_runs_real_engine_when_pit_inputs_exist() -> None:
     db = _db()
     try:
         day = date(2025, 1, 2)
@@ -799,20 +799,20 @@ def test_deterministic_recompute_requires_engine_before_claiming_success() -> No
             code="600001",
             trade_date=day,
             adjustment="QFQ",
-            close=100,
-            high=101,
-            low=99,
-            available_at=datetime(2025, 1, 2, 16, 0),
-        ))
+                close=100,
+                high=101,
+                low=99,
+                available_at=datetime(2025, 1, 2, 7, 0),
+            ))
         db.add(SecurityValuationDaily(
             market="CN", code="600001", trade_date=day, pe_ttm=15.0,
             source="operator-import", source_ref="val-1",
-            source_available_at=datetime(2025, 1, 2, 9, 0), quality_status="VALID",
+            source_available_at=datetime(2025, 1, 2, 7, 0), quality_status="VALID",
         ))
         db.add(PriceBasisMetadata(
             market="CN", code="600001", trade_date=day, basis="QFQ",
             source="operator-import", source_ref="basis-1",
-            source_available_at=datetime(2025, 1, 2, 9, 0), quality_status="VALID",
+            source_available_at=datetime(2025, 1, 2, 7, 0), quality_status="VALID",
         ))
         db.add(FundamentalReport(
             market="CN", code="600001", report_period=date(2024, 12, 31),
@@ -828,17 +828,20 @@ def test_deterministic_recompute_requires_engine_before_claiming_success() -> No
         # the gate must stay PARTIAL even when every daily table is complete.
         assert gate["status"] != "PIT_INPUTS_READY"
         assert "historical_security_state" in gate["partial_inputs"]
-        with pytest.raises(
-            ReplayDataQualityError,
-            match="DETERMINISTIC_RECOMPUTE_ENGINE_NOT_IMPLEMENTED",
-        ):
-            load_replay_facts(
-                db,
-                scope="CANDIDATE",
-                replay_mode="DETERMINISTIC_RECOMPUTE",
-                start_date=day,
-                end_date=day,
-            )
+        facts = load_replay_facts(
+            db,
+            scope="CANDIDATE",
+            replay_mode="DETERMINISTIC_RECOMPUTE",
+            start_date=day,
+            end_date=day,
+        )
+        assert "recompute_cases" in facts
+        assert "recompute_source_ids" in facts
+        assert facts["recompute_summary"]["capability"] in {
+            "PARTIAL_PIT_RECOMPUTE",
+            "DATA_GAP",
+        }
+        assert "ENGINE_NOT_IMPLEMENTED" not in str(facts["recompute_manifest"])
     finally:
         db.close()
 

@@ -23,6 +23,9 @@ from .replay import ReplayDataQualityError, content_hash
 def _replay_capability(manifest: dict[str, Any] | None, scope: str) -> str:
     if not isinstance(manifest, dict):
         return "FULL"
+    recompute = manifest.get("recompute_capability")
+    if isinstance(recompute, dict) and recompute.get("capability"):
+        return str(recompute["capability"])
     key = {
         "MARKET": "market_score",
         "CANDIDATE": "candidate_runs",
@@ -117,7 +120,11 @@ def create_calibration_report(
         replay_mode=backtest_run.replay_mode,
         replay_capability=_replay_capability(backtest_run.data_manifest_json, backtest_run.scope),
         scope=backtest_run.scope,
-        censored_sample=backtest_run.scope == "CANDIDATE" or any(bool(row.get("censored_sample")) for row in case_rows),
+        censored_sample=(
+            any(bool(row.get("censored_sample")) for row in case_rows)
+            if backtest_run.replay_mode == "DETERMINISTIC_RECOMPUTE"
+            else backtest_run.scope == "CANDIDATE" or any(bool(row.get("censored_sample")) for row in case_rows)
+        ),
     )
     existing = db.execute(select(CalibrationReport).where(
         CalibrationReport.backtest_run_id == backtest_run.id,
