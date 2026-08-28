@@ -37,11 +37,44 @@ Base = declarative_base()
 
 def init_db() -> None:
     """Create legacy and V2 tables. Called once at application startup."""
-    from . import models, v2_models  # noqa: F401
+    from . import (  # noqa: F401
+        market_engine_models,
+        market_models,
+        market_runtime_models,
+        memory,
+        governance,
+        models,
+        operations,
+        research,
+        candidates,
+        portfolio_models,
+        trigger_models,
+        v2_models,
+    )
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
+    _bootstrap_parameter_governance()
     _repair_historical_pnl_values()
+
+
+def _bootstrap_parameter_governance() -> None:
+    """Create ACTIVE v1 exactly once when no governance history exists."""
+
+    from .governance import GovernanceBlockedError, bootstrap_parameter_set
+
+    if not inspect(engine).has_table("parameter_set_versions"):
+        return
+    db = SessionLocal()
+    try:
+        bootstrap_parameter_set(db)
+    except GovernanceBlockedError:
+        # A deployment with governance history but no ACTIVE version is an
+        # operator intervention point.  Health remains BLOCKED and new
+        # risk-increasing candidate work fails closed instead of guessing.
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _apply_lightweight_migrations() -> None:
@@ -110,6 +143,44 @@ def _apply_lightweight_migrations() -> None:
                 conn.execute(text("ALTER TABLE health_log_new RENAME TO health_log"))
                 conn.execute(text("CREATE INDEX ix_health_log_code ON health_log (code)"))
                 conn.execute(text("CREATE INDEX ix_health_log_checkpoint ON health_log (checkpoint)"))
+
+    # ``create_all`` does not add columns to an existing SQLite table.  Keep
+    # local developer databases compatible with the Phase D Alembic upgrade.
+    if inspector.has_table("analysis_jobs"):
+        analysis_columns = {c["name"] for c in inspector.get_columns("analysis_jobs")}
+        if "context_json" not in analysis_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE analysis_jobs ADD COLUMN context_json JSON"))
+
+    if inspector.has_table("daily_review_runs"):
+        review_columns = {c["name"] for c in inspector.get_columns("daily_review_runs")}
+        with engine.begin() as conn:
+            if "review_stale" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN review_stale BOOLEAN NOT NULL DEFAULT 0"))
+            if "last_refreshed_at" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN last_refreshed_at DATETIME"))
+            if "refresh_count" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN refresh_count INTEGER NOT NULL DEFAULT 0"))
+            if "lease_expires_at" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN lease_expires_at DATETIME"))
+            if "attempt_count" not in review_columns:
+                conn.execute(text("ALTER TABLE daily_review_runs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1"))
+
+    if inspector.has_table("daily_operational_checkpoints"):
+        checkpoint_columns = {c["name"] for c in inspector.get_columns("daily_operational_checkpoints")}
+        if "lease_expires_at" not in checkpoint_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE daily_operational_checkpoints ADD COLUMN lease_expires_at DATETIME"
+                ))
+
+    if inspector.has_table("operating_notifications"):
+        notification_columns = {c["name"] for c in inspector.get_columns("operating_notifications")}
+        if "lease_expires_at" not in notification_columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE operating_notifications ADD COLUMN lease_expires_at DATETIME"
+                ))
 
 
 def _repair_historical_pnl_values() -> None:

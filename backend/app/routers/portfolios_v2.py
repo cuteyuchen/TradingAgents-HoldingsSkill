@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..services.holdings_service import normalize_payload, parse_payload_dict, parse_upload
 from ..services.storage import resolve_storage_path, save_holding_image
+from ..portfolio.snapshot_diff import upsert_snapshot_diff
 from ..v2_dependencies import get_current_user
 from ..v2_models import HoldingItem, HoldingUpload, Portfolio, PortfolioSnapshot, User
 from ..v2_schemas import (
@@ -197,7 +198,7 @@ def update_portfolio(
     return _portfolio_response(db, row)
 
 
-@router.delete("/portfolios/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/portfolios/{portfolio_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_portfolio(
     portfolio_id: int,
     db: Session = Depends(get_db),
@@ -366,6 +367,19 @@ def confirm_upload(
                 extra_json=holding.extra,
             )
         )
+    db.flush()
+    previous = (
+        db.query(PortfolioSnapshot)
+        .filter(
+            PortfolioSnapshot.portfolio_id == snapshot.portfolio_id,
+            PortfolioSnapshot.status == "confirmed",
+            PortfolioSnapshot.id != snapshot.id,
+        )
+        .order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())
+        .first()
+    )
+    if previous is not None:
+        upsert_snapshot_diff(db, before=previous, after=snapshot)
     row.confirmed_at = datetime.now(UTC)
     row.parsing_status = "confirmed"
     db.commit()

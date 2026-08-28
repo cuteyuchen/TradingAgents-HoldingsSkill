@@ -2,6 +2,66 @@ export type DataGrade = 'A' | 'B' | 'C' | 'D' | 'F'
 export type ModelPurpose = 'vision' | 'analysis' | 'deep_analysis'
 // `quick` remains readable for legacy jobs/schedules; new requests use canonical modes.
 export type AnalysisMode = 'quick' | 'fast' | 'standard' | 'deep'
+export type WorkflowState = 'PRE_MARKET_MAINTENANCE' | 'PRE_MARKET_READY' | 'AUCTION' | 'MORNING_SESSION' | 'LUNCH_BREAK' | 'AFTERNOON_SESSION' | 'LATE_SESSION' | 'MARKET_CLOSED' | 'POST_CLOSE_ANALYSIS' | 'DAILY_REVIEW' | 'DAY_COMPLETE' | 'NON_TRADING_DAY'
+export type HealthSeverity = 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
+export type Freshness = 'FRESH' | 'STALE' | 'FROZEN' | 'MISSING'
+
+export interface DashboardSection { status: string; [key: string]: any }
+export interface DashboardTimelineItem { key: string; time: string; label: string; kind: string; mode?: string | null; status?: string; scheduled_at: string; is_current: boolean; [key: string]: any }
+export interface DashboardTimeline { as_of: string; trade_date: string; workflow_state: WorkflowState; monitor: Record<string, any>; timeline: DashboardTimelineItem[] }
+export interface DashboardHealth { status: HealthSeverity; overall: HealthSeverity; components: Array<{ name: string; status: string; mandatory?: boolean; detail?: any; [key: string]: any }>; severity_values: HealthSeverity[] }
+export interface OperatingNotification {
+  notification_id: string
+  title: string
+  summary: string
+  severity: string
+  portfolio_id: number
+  event_type: string
+  entity_type: string
+  entity_id: string
+  occurred_at: string
+  deep_link: string
+  dedupe_key: string
+  status?: string
+  read?: boolean
+  read_at?: string | null
+  [key: string]: any
+}
+export interface OperatingNotificationList {
+  items: OperatingNotification[]
+  count: number
+  total_count: number
+  unread_count: number
+  critical_count: number
+  latest_at?: string | null
+}
+export interface DashboardDiagnostics {
+  as_of: string
+  trade_date: string
+  workflow_state: WorkflowState
+  read_only: boolean
+  no_lookahead: boolean
+  health: DashboardHealth
+  sections: Record<string, { status: string; error?: string }>
+  issues: Array<{ component: string; status: string; detail?: any }>
+}
+export interface DailyDashboard {
+  as_of: string
+  trade_date: string
+  market_open: boolean
+  workflow_state: WorkflowState
+  market: DashboardSection
+  portfolio: DashboardSection
+  candidates: DashboardSection
+  triggers: DashboardSection
+  analysis: DashboardSection
+  decisions: DashboardSection & { final_action?: string }
+  executions: DashboardSection
+  memory: DashboardSection
+  data_health: DashboardHealth | DashboardSection
+  timeline: DashboardTimeline
+  notifications: OperatingNotificationList & DashboardSection
+}
 
 export interface User {
   id: number
@@ -180,6 +240,290 @@ export interface NotificationChannel {
   last_test_at?: string | null
   created_at: string
   updated_at: string
+}
+
+export type ResearchScope = 'MARKET' | 'CANDIDATE' | 'PORTFOLIO_DECISION' | 'MEMORY_DECISION' | 'BAR_FACTOR'
+export type ReplayMode = 'PRODUCTION_REPLAY' | 'DETERMINISTIC_RECOMPUTE' | 'BAR_ONLY_DIAGNOSTIC'
+export type CalibrationRecommendation = 'KEEP_CURRENT' | 'CONSIDER_CHANGE' | 'INSUFFICIENT_EVIDENCE' | 'REJECT_CHANGE'
+
+export interface ReplayAvailabilityItem {
+  name?: string
+  status: string
+  row_count?: number
+  distinct_trade_dates?: number
+  earliest_supported_at?: string | null
+  latest_supported_at?: string | null
+  coverage?: number | null
+  reason?: string
+  capabilities?: Record<string, string>
+  [key: string]: any
+}
+
+export interface ReplayAvailabilityManifest {
+  manifest_version: string
+  generated_at: string
+  requested_range: { start_date?: string | null; end_date?: string | null }
+  data_hash: string
+  known_limitations?: string[]
+  [key: string]: ReplayAvailabilityItem | Record<string, any> | string | string[] | undefined
+}
+
+export interface BacktestMetricSlice {
+  id: number
+  metric_family: string
+  security_type?: string | null
+  market_regime?: string | null
+  stage?: string | null
+  score_bucket?: string | null
+  horizon?: number | null
+  parameter_variant?: string | null
+  sample_count: number
+  trade_date_count: number
+  coverage?: number | null
+  metrics?: Record<string, any> | null
+  confidence_interval?: Record<string, any> | null
+  quality_status: string
+  limitations?: string[] | null
+}
+
+export interface BacktestRun {
+  id: number
+  user_id?: number | null
+  portfolio_id?: number | null
+  scope: ResearchScope
+  replay_mode: ReplayMode
+  start_date: string
+  end_date: string
+  status: string
+  progress_percent: number
+  current_stage: string
+  config_version: string
+  engine_version: string
+  data_hash: string
+  data_manifest?: Record<string, any> | null
+  sample_count: number
+  unique_trade_dates: number
+  quality_status: string
+  leakage_status: string
+  result_summary?: Record<string, any> | null
+  failure_counts?: Record<string, number> | null
+  horizons?: number[] | null
+  known_limitations?: string[] | null
+  error_code?: string | null
+  error_message?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  created_at?: string | null
+  lease_expires_at?: string | null
+  last_heartbeat_at?: string | null
+  attempt_count: number
+  cancel_requested: boolean
+  metric_slices: BacktestMetricSlice[]
+}
+
+export interface CalibrationReport {
+  id: number
+  backtest_run_id: number
+  user_id?: number | null
+  portfolio_id?: number | null
+  status: string
+  target_parameter: string
+  current_value?: any
+  challenger_value?: any
+  recommendation: CalibrationRecommendation
+  train?: Record<string, any> | null
+  validation?: Record<string, any> | null
+  test?: Record<string, any> | null
+  robustness?: Record<string, any> | null
+  sample_counts?: Record<string, any> | null
+  risk_notes?: string[] | null
+  proposal?: Record<string, any> | null
+  report?: Record<string, any> | null
+  calibration_version: string
+  created_at?: string | null
+  no_auto_apply: boolean
+}
+
+export type GovernanceParameterClassification = 'CALIBRATABLE' | 'PROTECTED' | 'OPERATIONAL' | 'EXTERNAL' | 'DERIVED'
+export type GovernanceParameterValue = string | number | boolean | Record<string, any> | null
+
+export interface GovernanceParameter {
+  display_name: string
+  domain: string
+  classification: GovernanceParameterClassification
+  value_type: string
+  min_value?: number | null
+  max_value?: number | null
+  allowed_values?: Array<string | number> | null
+  calibration_supported: boolean
+  requires_calibration_report: boolean
+  protected: boolean
+  restart_required: boolean
+  runtime_contract_relevant: boolean
+  description: string
+  current_value?: GovernanceParameterValue
+}
+
+export interface ParameterSetVersion {
+  id: number
+  version: number
+  status: string
+  parent_version_id?: number | null
+  created_by_user_id?: number | null
+  approved_by_user_id?: number | null
+  source_proposal_id?: number | null
+  snapshot?: Record<string, any> | null
+  diff?: Record<string, any> | null
+  config_hash: string
+  runtime_contract_version: string
+  decision_contract_version: string
+  validation?: Record<string, any> | null
+  validation_status?: string | null
+  created_at?: string | null
+  approved_at?: string | null
+  activated_at?: string | null
+  deactivated_at?: string | null
+  activation_reason?: string | null
+  rollback_from_version_id?: number | null
+  rollback_reason?: string | null
+}
+
+export interface ParameterChangeProposal {
+  id: number
+  user_id?: number | null
+  source_type: string
+  source_calibration_report_id?: number | null
+  base_parameter_set_version_id?: number | null
+  target_parameter: string
+  current_value?: any
+  proposed_value?: any
+  proposed_snapshot?: Record<string, any> | null
+  proposal_type: string
+  status: string
+  evidence?: Record<string, any> | null
+  risk_summary?: Record<string, any> | null
+  validation_summary?: Record<string, any> | null
+  reason?: string | null
+  risk_acknowledged: boolean
+  created_at?: string | null
+  submitted_at?: string | null
+  reviewed_at?: string | null
+  reviewed_by_user_id?: number | null
+  review_comment?: string | null
+  approved_version_id?: number | null
+}
+
+export interface ParameterGovernanceEvent {
+  id: number
+  actor_user_id?: number | null
+  event_type: string
+  proposal_id?: number | null
+  parameter_set_version_id?: number | null
+  occurred_at?: string | null
+  metadata?: Record<string, any> | null
+}
+
+export interface GovernanceRegistryResponse {
+  registry: Record<string, GovernanceParameter>
+  active_version_id?: number | null
+  active_version?: number | null
+}
+
+export interface ParameterSetListResponse {
+  versions: ParameterSetVersion[]
+}
+
+export interface ProposalListResponse {
+  proposals: ParameterChangeProposal[]
+}
+
+export interface GovernanceEventListResponse {
+  events: ParameterGovernanceEvent[]
+}
+
+export interface GovernanceHealth {
+  status: 'OK' | 'DEGRADED' | 'BLOCKED'
+  reasons: string[]
+  active: ParameterSetVersion | null
+}
+
+export interface SystemRelease {
+  app_version: string
+  git_sha: string
+  git_ref?: string | null
+  build_time?: string | null
+  alembic_db_revision?: string | null
+  alembic_code_head_revision?: string | null
+  schema_state: string
+  schema_reason?: string | null
+  schema_blocked: boolean
+  runtime_contract_version: string
+  decision_contract_version: string
+  active_parameter_set_version?: string | null
+  active_parameter_set_hash?: string | null
+  governance_status?: string | null
+  python_version: string
+  environment: string
+  database_backend: string
+  database_identity?: string | null
+  started_at: string
+  uptime_seconds: number
+}
+
+export interface SystemHealthCheck {
+  status: 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
+  reason?: string | null
+  [key: string]: any
+}
+
+export interface SystemHealth {
+  status: 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
+  components: Record<string, SystemHealthCheck>
+  as_of: string
+}
+
+export interface SystemReadiness {
+  status: 'READY' | 'READY_WITH_WARNINGS' | 'BLOCKED'
+  ready: boolean
+  checks: Record<string, SystemHealthCheck>
+}
+
+export interface SystemBackup {
+  backup_id: string
+  filename: string
+  type: string
+  reason: string
+  created_at: string
+  completed_at: string
+  source_db_revision?: string | null
+  code_head_revision?: string | null
+  app_version: string
+  git_sha?: string | null
+  source_db_size: number
+  backup_size: number
+  sha256: string
+  quick_check_result: string
+  source_db_fingerprint: string
+  [key: string]: any
+}
+
+export interface SystemBackupList {
+  backups: SystemBackup[]
+}
+
+export interface SystemDiagnostics {
+  bundle_id: string
+  filename: string
+  sha256: string
+  size: number
+  entries: string[]
+  contains_db: boolean
+  contains_backup: boolean
+}
+
+export interface SystemRecoveryReport {
+  counts: Record<string, number>
+  errors: string[]
 }
 
 // Legacy archive types remain for migration/debug views.
