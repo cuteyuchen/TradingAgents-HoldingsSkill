@@ -37,6 +37,7 @@ from app.v2_models import Portfolio, User
 
 def _db() -> Session:
     engine = create_engine("sqlite:///:memory:")
+    import app.history.models  # noqa: F401
     import app.memory.models  # noqa: F401
     import app.operations.models  # noqa: F401
     import app.trigger_models  # noqa: F401
@@ -81,9 +82,13 @@ def test_manifest_marks_current_lifecycle_and_missing_pit_factors_conservatively
         assert manifest["market_score"]["row_count"] == 1
         assert manifest["market_score"]["capabilities"]["PRODUCTION_REPLAY"] == "FULL"
         assert manifest["daily_bars"]["status"] == "DIAGNOSTIC_ONLY"
-        assert manifest["security_lifecycle"]["status"] == "LEAKAGE_BLOCKED"
-        assert manifest["fundamentals"]["status"] == "UNSUPPORTED"
-        assert manifest["survivorship"]["survivorship_status"] == "CURRENT_UNIVERSE_ONLY"
+        # Phase L adds the historical tables even before any data is imported;
+        # an empty PIT foundation must be DATA_GAP, never FULL or NORMAL.
+        assert manifest["security_lifecycle"]["status"] == "DATA_GAP"
+        assert manifest["fundamentals"]["status"] == "DATA_GAP"
+        assert manifest["survivorship"]["survivorship_status"] == "DATA_GAP"
+        assert manifest["historical_universe"]["status"] == "DATA_GAP"
+        assert manifest["security_lifecycle"]["capabilities"]["DETERMINISTIC_RECOMPUTE"] == "DATA_GAP"
         assert manifest["data_hash"] == build_replay_availability_manifest(db, start_date=day, end_date=day)["data_hash"]
     finally:
         db.close()

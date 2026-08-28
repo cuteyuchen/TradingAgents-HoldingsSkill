@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import {
   Activity,
   Archive,
@@ -14,6 +14,9 @@ import { useMessage, type DataTableColumns } from 'naive-ui'
 
 import { api } from '../api'
 import type {
+  HistoryCoverage,
+  HistoryCoverageItem,
+  HistorySyncRun,
   SystemBackup,
   SystemDiagnostics,
   SystemHealth,
@@ -29,6 +32,22 @@ const health = ref<SystemHealth | null>(null)
 const readiness = ref<SystemReadiness | null>(null)
 const recovery = ref<SystemRecoveryReport | null>(null)
 const backups = ref<SystemBackup[]>([])
+const historyCoverage = ref<HistoryCoverage | null>(null)
+const syncRuns = ref<HistorySyncRun[]>([])
+const syncDataType = ref('valuation')
+const syncStartDate = ref('')
+const syncEndDate = ref('')
+const syncProvider = ref('AUTO')
+const syncLoading = ref(false)
+
+const historyStatus = computed(() => {
+  if (!historyCoverage.value?.items.length) return 'DATA_GAP'
+  const statuses = historyCoverage.value.items.map((item) => item.status)
+  if (statuses.some((status) => status === 'LEAKAGE_BLOCKED')) return 'BLOCKED'
+  if (statuses.some((status) => status === 'DATA_GAP')) return 'PARTIAL'
+  if (statuses.some((status) => status === 'PARTIAL')) return 'PARTIAL'
+  return 'FULL'
+})
 
 type TagType = 'success' | 'warning' | 'error' | 'info' | 'default'
 function statusType(value?: string | null): TagType {
@@ -57,22 +76,45 @@ function humanSize(bytes?: number | null): string {
 async function load() {
   loading.value = true
   try {
-    const [releaseResult, healthResult, readinessResult, recoveryResult, backupResult] = await Promise.all([
+    const [releaseResult, healthResult, readinessResult, recoveryResult, backupResult, historyResult, syncResult] = await Promise.all([
       api.getSystemRelease(),
       api.getSystemHealth(),
       api.getSystemReadiness(),
       api.getSystemRecovery(),
       api.listSystemBackups(),
+      api.getHistoryCoverage(),
+      api.listHistorySyncRuns(),
     ])
     release.value = releaseResult
     health.value = healthResult
     readiness.value = readinessResult
     recovery.value = recoveryResult
     backups.value = backupResult.backups
+    historyCoverage.value = historyResult
+    syncRuns.value = syncResult.runs.slice(0, 10)
   } catch (error) {
     message.error((error as Error).message)
   } finally {
     loading.value = false
+  }
+}
+
+async function runHistorySync() {
+  syncLoading.value = true
+  try {
+    await api.runHistorySync({
+      data_type: syncDataType.value,
+      start_date: syncStartDate.value || undefined,
+      end_date: syncEndDate.value || undefined,
+      provider: syncProvider.value,
+      market: 'CN',
+    })
+    message.success('历史 sync 已执行')
+    await load()
+  } catch (error) {
+    message.error((error as Error).message)
+  } finally {
+    syncLoading.value = false
   }
 }
 
@@ -136,6 +178,24 @@ const backupColumns: DataTableColumns<SystemBackup> = [
         h('button', { class: 'link-action', onClick: () => void runRestoreDrill(row) }, 'Drill'),
       ])
   } },
+]
+
+const historyColumns: DataTableColumns<HistoryCoverageItem> = [
+  { title: 'Data Type', key: 'data_type', width: 170 },
+  { title: 'Status', key: 'status', width: 120, render: (row) => h('span', { class: 'status-text' }, row.status) },
+  { title: 'Coverage', key: 'coverage', width: 100, render: (row) => row.coverage === null || row.coverage === undefined ? '—' : `${(row.coverage * 100).toFixed(1)}%` },
+  { title: 'Earliest', key: 'earliest_supported_at', render: (row) => fmt(row.earliest_supported_at) },
+  { title: 'Latest', key: 'latest_supported_at', render: (row) => fmt(row.latest_supported_at) },
+  { title: 'Last Sync', key: 'last_sync', render: (row) => row.last_sync ? `${row.last_sync.status} · ${row.last_sync.inserted_count} in` : '—' },
+]
+
+const syncRunColumns: DataTableColumns<HistorySyncRun> = [
+  { title: 'ID', key: 'id', width: 60 },
+  { title: 'Type', key: 'data_type', width: 150 },
+  { title: 'Status', key: 'status', width: 120 },
+  { title: 'Progress', key: 'progress_percent', width: 90, render: (row) => `${row.progress_percent}%` },
+  { title: 'In/Up/Skip', key: 'counts', width: 110, render: (row) => `${row.inserted_count}/${row.updated_count}/${row.skipped_count}` },
+  { title: 'Created', key: 'created_at', render: (row) => fmt(row.created_at) },
 ]
 
 onMounted(() => void load())
@@ -213,6 +273,33 @@ onMounted(() => void load())
           <ShieldCheck :size="14" /> 诊断包已做 secret redaction，不包含 DB、backup 或 token。
         </div>
       </div>
+
+      <section class="panel-card system-section">
+        <div class="section-title">
+          <Database :size="18" /><strong>Historical Data</strong>
+          <n-tag v-if="historyCoverage" size="small" :type="statusType(historyStatus)">{{ historyStatus }}</n-tag>
+        </div>
+        <div class="sync-bar">
+          <select v-model="syncDataType" class="sync-select" aria-label="Data Type">
+            <option v-for="item in ['security_lifecycle', 'trading_status', 'st_classification', 'valuation', 'fundamentals', 'etf_metadata', 'price_basis']" :key="item" :value="item">{{ item }}</option>
+          </select>
+          <input v-model="syncStartDate" type="date" aria-label="Start Date" />
+          <input v-model="syncEndDate" type="date" aria-label="End Date" />
+          <input v-model="syncProvider" class="sync-provider" placeholder="Provider" aria-label="Provider" />
+          <n-button size="small" type="primary" :loading="syncLoading" @click="runHistorySync">Run Sync</n-button>
+          <n-button size="small" @click="load">刷新 Runs</n-button>
+        </div>
+        <n-data-table v-if="syncRuns.length" size="small" :columns="syncRunColumns" :data="syncRuns" :max-height="220" />
+        <n-empty v-else description="还没有历史 sync run" />
+        <n-data-table
+          v-if="historyCoverage && historyCoverage.items.length"
+          size="small"
+          :columns="historyColumns"
+          :data="historyCoverage.items"
+          :max-height="300"
+        />
+        <n-empty v-else description="Historical PIT 数据尚未导入" />
+      </section>
     </n-spin>
   </div>
 </template>
@@ -227,6 +314,10 @@ onMounted(() => void load())
 .section-title { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
 .section-title strong { font-size: 15px; }
 .section-title .n-button { margin-left: auto; }
+.sync-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.sync-bar input, .sync-bar .sync-select, .sync-bar .sync-provider { height: 30px; border: 1px solid var(--app-border-soft); border-radius: 6px; padding: 0 8px; font-size: 13px; background: var(--app-surface); color: var(--app-text); }
+.sync-select { max-width: 220px; }
+.sync-provider { width: 110px; }
 .kv-list { display: grid; gap: 8px; }
 .kv-list > div { display: grid; grid-template-columns: 120px 1fr; gap: 8px; align-items: start; }
 .kv-list span:first-child { color: var(--app-text-muted); }

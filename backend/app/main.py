@@ -53,6 +53,13 @@ async def lifespan(app: FastAPI):
             f"{key}={value.get('status')}" for key, value in sorted(preflight["checks"].items())
         )
         raise RuntimeError(f"STARTUP_PREFLIGHT_BLOCKED:{blocked}")
+    with SessionLocal() as db:
+        from .history.sync import reclaim_stale_history_sync_runs
+
+        stale_syncs = reclaim_stale_history_sync_runs(db)
+        if stale_syncs:
+            db.commit()
+            logger.info("Reclaimed %s stale historical sync runs", len(stale_syncs))
     # Prevent a process restart from forgetting an already-open provider
     # circuit while the durable health table still reports it as blocked.
     with SessionLocal() as db:
@@ -126,6 +133,7 @@ from .routers import (  # noqa: E402
     automation_v2,
     candidates_v3,
     governance_v3,
+    history_v3,
     market_v3,
     model_health_v2,
     model_settings_v2,
@@ -148,6 +156,7 @@ app.include_router(analysis_v2.router)
 app.include_router(automation_v2.router)
 app.include_router(candidates_v3.router)
 app.include_router(governance_v3.router)
+app.include_router(history_v3.router)
 app.include_router(market_v3.router)
 app.include_router(market_engine_v3.router)
 app.include_router(memory_v3.router)

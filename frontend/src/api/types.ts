@@ -526,6 +526,61 @@ export interface SystemRecoveryReport {
   errors: string[]
 }
 
+export interface HistoryCoverageItem {
+  data_type: string
+  semantics: 'DAILY' | 'EVENT' | 'PUBLICATION'
+  status: 'FULL' | 'PARTIAL' | 'DATA_GAP' | 'UNSUPPORTED' | 'LEAKAGE_BLOCKED'
+  reason?: string | null
+  row_count: number
+  expected_dates?: number | null
+  known_dates?: number | null
+  coverage?: number | null
+  earliest_supported_at?: string | null
+  latest_supported_at?: string | null
+  sources?: string[]
+  last_sync?: {
+    run_id: number
+    status: string
+    completed_at?: string | null
+    inserted_count: number
+    updated_count: number
+    skipped_count: number
+    failed_count: number
+    provider?: string | null
+    source?: string | null
+  } | null
+  [key: string]: any
+}
+
+export interface HistoryCoverage {
+  generated_at: string
+  requested_range: { start_date?: string | null; end_date?: string | null }
+  market: string
+  items: HistoryCoverageItem[]
+}
+
+export interface HistorySyncRun {
+  id: number
+  data_type: string
+  market: string
+  start_date?: string | null
+  end_date?: string | null
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'UNSUPPORTED' | 'INSUFFICIENT_DATA'
+  progress_percent: number
+  fetched_count: number
+  inserted_count: number
+  updated_count: number
+  skipped_count: number
+  failed_count: number
+  provider?: string | null
+  source?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  attempt_count: number
+  error_summary?: string | null
+  created_at: string
+}
+
 // Legacy archive types remain for migration/debug views.
 export interface ScreenshotPayload {
   filename?: string | null

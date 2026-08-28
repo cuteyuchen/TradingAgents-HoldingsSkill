@@ -17,6 +17,8 @@ import type {
   GovernanceEventListResponse,
   GovernanceHealth,
   GovernanceRegistryResponse,
+  HistoryCoverage,
+  HistorySyncRun,
   ParameterChangeProposal,
   ParameterSetListResponse,
   ParameterSetVersion,
@@ -231,6 +233,20 @@ export const api = {
   restoreDrill: (backupId: string) => request<Record<string, unknown>>(`/api/v3/system/backups/${encodeURIComponent(backupId)}/restore-drill`, { method: 'POST' }),
   createDiagnostics: () => request<SystemDiagnostics>('/api/v3/system/diagnostics', { method: 'POST' }),
   downloadDiagnostics: (bundleId: string) => requestBlob(`/api/v3/system/diagnostics/${encodeURIComponent(bundleId)}/download`),
+  getHistoryCoverage: (params: { start_date?: string; end_date?: string; data_type?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (params.start_date) query.set('start_date', params.start_date)
+    if (params.end_date) query.set('end_date', params.end_date)
+    if (params.data_type) query.set('data_type', params.data_type)
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<HistoryCoverage>(`/api/v3/history/coverage${suffix}`)
+  },
+  getHistoryAvailability: () => request<{ items: Record<string, any> }>('/api/v3/history/availability'),
+  listHistorySyncRuns: (dataType?: string) => request<{ runs: HistorySyncRun[] }>(
+    `/api/v3/history/sync-runs${dataType ? `?data_type=${encodeURIComponent(dataType)}` : ''}`,
+  ),
+  runHistorySync: (payload: { data_type: string; start_date?: string; end_date?: string; market?: string; provider?: string }) =>
+    request<HistorySyncRun>('/api/v3/history/sync', { method: 'POST', body: payload }),
 }
 
 async function requestBlob(path: string, retryAuth = true): Promise<Blob> {

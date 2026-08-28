@@ -153,7 +153,7 @@ def test_pre_upgrade_backup_requirement(backup_env):
     assert requires_pre_upgrade_backup() is True
     conn = sqlite3.connect(str(backup_env / "advisor.db"))
     try:
-        conn.execute("UPDATE alembic_version SET version_num='20260828_0018'")
+        conn.execute("UPDATE alembic_version SET version_num='20260828_0019'")
         conn.commit()
     finally:
         conn.close()

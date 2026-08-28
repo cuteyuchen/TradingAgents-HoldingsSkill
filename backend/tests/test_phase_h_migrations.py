@@ -45,7 +45,7 @@ def test_deployed_phase_h_0015_upgrades_to_current_head(tmp_path):
     _upgrade(backend_dir, database_path, "head")
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260828_0018",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260828_0019",)
         for table, columns in {
             "daily_review_runs": {"lease_expires_at", "attempt_count"},
             "daily_operational_checkpoints": {"lease_expires_at"},
@@ -58,4 +58,14 @@ def test_deployed_phase_h_0015_upgrades_to_current_head(tmp_path):
             "parameter_set_versions",
             "parameter_change_proposals",
             "parameter_governance_events",
+        } <= tables
+        assert {
+            "security_lifecycle_events",
+            "security_trading_status_daily",
+            "security_classification_daily",
+            "security_valuation_daily",
+            "fundamental_reports",
+            "etf_metadata_history",
+            "price_basis_metadata",
+            "historical_data_sync_runs",
         } <= tables

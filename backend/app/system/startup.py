@@ -133,6 +133,17 @@ def collect_startup_recovery_report(db: Session) -> dict[str, Any]:
                     {"cutoff": cutoff},
                 ).scalar_one()
             )
+        if table_exists(db, "historical_data_sync_runs"):
+            counts["stale_history_syncs"] = int(
+                db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM historical_data_sync_runs "
+                        "WHERE status = 'RUNNING' AND lease_expires_at IS NOT NULL "
+                        "AND lease_expires_at < :cutoff"
+                    ),
+                    {"cutoff": cutoff},
+                ).scalar_one()
+            )
         if table_exists(db, "analysis_jobs") and table_exists(db, "daily_operational_checkpoints"):
             counts["stale_analysis_jobs"] = int(
                 db.execute(

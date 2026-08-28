@@ -27,6 +27,22 @@ from ..v2_models import PortfolioSnapshot
 from .config import REPLAY_AVAILABILITY_STATUSES
 
 
+def _history_manifest_items(db, *, start_date, end_date, market):
+    try:
+        from ..history.availability import history_manifest_items as build_items
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return build_items(
+            db,
+            start_date=start_date,
+            end_date=end_date,
+            market=market,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _iso(value: date | datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -384,38 +400,44 @@ def build_replay_availability_manifest(
         availability_field="source_timestamp", lineage_field="provider",
     )
 
-    for key, reason in {
-        "fundamentals": "no report_period plus published_at/available_at point-in-time fundamental table exists",
-        "valuation": "no historical PE/PB/dividend-yield table with point-in-time availability exists",
-        "industry": "only current SecurityMaster classification is available; historical classification is not persisted",
-        "etf_constituents": "historical ETF constituent snapshots are not persisted",
-        "historical_universe": "ST, suspension, delisting and active status lack effective-dated history",
-    }.items():
-        manifest[key] = {
-            "name": key,
-            "status": "UNSUPPORTED" if key in {"fundamentals", "valuation", "etf_constituents"} else "LEAKAGE_BLOCKED",
-            "row_count": 0,
-            "distinct_trade_dates": 0,
-            "earliest_supported_at": None,
-            "latest_supported_at": None,
-            "coverage": 0.0,
-            "reason": reason,
-            "capabilities": {"DETERMINISTIC_RECOMPUTE": "UNSUPPORTED"},
-        }
+    history_items = _history_manifest_items(
+        db, start_date=start_date, end_date=end_date, market=market
+    )
+    if history_items:
+        manifest.update(history_items)
+    else:
+        for key, reason in {
+            "fundamentals": "no report_period plus published_at/available_at point-in-time fundamental table exists",
+            "valuation": "no historical PE/PB/dividend-yield table with point-in-time availability exists",
+            "industry": "only current SecurityMaster classification is available; historical classification is not persisted",
+            "etf_constituents": "historical ETF constituent snapshots are not persisted",
+            "historical_universe": "ST, suspension, delisting and active status lack effective-dated history",
+        }.items():
+            manifest[key] = {
+                "name": key,
+                "status": "UNSUPPORTED" if key in {"fundamentals", "valuation", "etf_constituents"} else "LEAKAGE_BLOCKED",
+                "row_count": 0,
+                "distinct_trade_dates": 0,
+                "earliest_supported_at": None,
+                "latest_supported_at": None,
+                "coverage": 0.0,
+                "reason": reason,
+                "capabilities": {"DETERMINISTIC_RECOMPUTE": "UNSUPPORTED"},
+            }
 
-    manifest["survivorship"] = {
-        "status": "LEAKAGE_BLOCKED",
-        "survivorship_status": "CURRENT_UNIVERSE_ONLY",
-        "reason": "historical security lifecycle and delisted/suspended membership are unavailable",
-    }
-    manifest["point_in_time_universe"] = "PRODUCTION_SNAPSHOT_ONLY"
-    manifest["factor_point_in_time"] = {
-        "production_snapshots": "PARTIAL",
-        "fundamentals": "UNSUPPORTED",
-        "valuation": "UNSUPPORTED",
-        "security_lifecycle": "LEAKAGE_BLOCKED",
-    }
-    manifest["price_basis"] = {"daily_bars": "QFQ_DECLARED", "source_availability": "INGESTION_SEMANTICS_UNCONFIRMED"}
+        manifest["survivorship"] = {
+            "status": "LEAKAGE_BLOCKED",
+            "survivorship_status": "CURRENT_UNIVERSE_ONLY",
+            "reason": "historical security lifecycle and delisted/suspended membership are unavailable",
+        }
+        manifest["point_in_time_universe"] = "PRODUCTION_SNAPSHOT_ONLY"
+        manifest["factor_point_in_time"] = {
+            "production_snapshots": "PARTIAL",
+            "fundamentals": "UNSUPPORTED",
+            "valuation": "UNSUPPORTED",
+            "security_lifecycle": "LEAKAGE_BLOCKED",
+        }
+        manifest["price_basis"] = {"daily_bars": "QFQ_DECLARED", "source_availability": "INGESTION_SEMANTICS_UNCONFIRMED"}
     manifest["benchmark_basis"] = {"default": "ALL_A_MEDIAN_INDEX_DAILY", "intraday": "UNAVAILABLE_WITHOUT_INTRADAY_HISTORY"}
     manifest["execution_model"] = "NEXT_OPEN_PROXY_FOR_EOD_DIAGNOSTIC_ONLY"
     manifest["transaction_cost_model"] = "phase-e-portfolio-ledger-v1"
@@ -424,13 +446,22 @@ def build_replay_availability_manifest(
         "slippage_bps": None,
         "excluded_from_return": True,
     }
-    manifest["known_limitations"] = [
-        "No historical effective-dated SecurityMaster lifecycle facts.",
-        "Fundamental and valuation point-in-time replay is unsupported.",
-        "Persisted CandidateScore is a censored top-subset sample.",
-        "DailyBarCache.available_at is not asserted to be source publication time.",
-        "Research output never enters DecisionMemory, TradeLedger, or production snapshots.",
-    ]
+    if history_items:
+        manifest["known_limitations"] = [
+            "Historical PIT foundation tables exist; coverage is reported per data type.",
+            "Candidate Score remains a censored top-subset sample.",
+            "DailyBarCache.available_at is not asserted to be source publication time.",
+            "Industry/flow historical recompute remains unsupported.",
+            "Research output never enters DecisionMemory, TradeLedger, or production snapshots.",
+        ]
+    else:
+        manifest["known_limitations"] = [
+            "No historical effective-dated SecurityMaster lifecycle facts.",
+            "Fundamental and valuation point-in-time replay is unsupported.",
+            "Persisted CandidateScore is a censored top-subset sample.",
+            "DailyBarCache.available_at is not asserted to be source publication time.",
+            "Research output never enters DecisionMemory, TradeLedger, or production snapshots.",
+        ]
     manifest["data_hash"] = _stable_source_hash(manifest)
     return manifest
 

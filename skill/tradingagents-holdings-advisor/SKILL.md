@@ -79,6 +79,16 @@ PRODUCTION_REPLAY, DETERMINISTIC_RECOMPUTE, and BAR_ONLY_DIAGNOSTIC remain separ
 
 Calibration may return KEEP_CURRENT, CONSIDER_CHANGE, INSUFFICIENT_EVIDENCE, or REJECT_CHANGE only. It must use chronological train/validation/test separation, never select from the test set, and never automatically apply a threshold, factor weight, runtime prompt, risk rule, or production configuration. Do not inject backtest metrics or historical best parameters into live Decision context.
 
+## Historical Data Foundation (Phase L)
+
+Phase L provides point-in-time security lifecycle, trading status, ST state, valuation, fundamental publication, ETF metadata, price basis, and PIT universe reconstruction. Historical facts must be point-in-time: current SecurityMaster, current valuation, current fundamentals, and current ETF category can never be projected backward.
+
+- Missing historical state is `UNKNOWN` / `DATA_GAP`, never `NORMAL` or zero. Missing fundamentals publication time is `MISSING_PUBLICATION_TIME`; a report is only visible when `published_at <= as_of`.
+- Research cannot fetch live network data during replay. Historical data sync is an explicit operator step (`python -m app.history.cli sync ...`) that is separate from Backtest execution.
+- `DETERMINISTIC_RECOMPUTE` is fail-closed: it requires the requested range's PIT inputs to pass the availability gate; otherwise the run reports `DATA_GAP` / `LEAKAGE_BLOCKED`.
+- The PIT universe resolver uses historical lifecycle, trading status, classification, and historical PortfolioSnapshot holdings. Listing age is measured in trading days.
+- Do not hand the historical sync authority to the LLM; historical data preparation and import are operator actions.
+
 ## Parameter Governance (Phase J)
 
 Phase J makes parameter changes a versioned, human-reviewed operation. Research proposes, humans approve, governance versions, production consumes, and rollback stays possible. There is no auto-apply and no auto-trade path in governance.

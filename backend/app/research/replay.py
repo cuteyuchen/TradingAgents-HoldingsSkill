@@ -253,9 +253,24 @@ def load_replay_facts(
         else _as_of(None)
     )
     if mode == "DETERMINISTIC_RECOMPUTE":
-        # Recompute is permitted only when the caller supplies a fully PIT data
-        # preparation set.  The current schema does not have that set.
-        raise ReplayDataQualityError("DETERMINISTIC_RECOMPUTE_REQUIRES_EXPLICIT_PIT_DATASET")
+        # Recompute is permitted only when the explicit PIT dataset is
+        # complete for the requested range.  The historical data preparation
+        # step is separate from replay and never performs live network IO.
+        from ..history.availability import pit_recompute_gate
+
+        gate = pit_recompute_gate(
+            db,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            market="CN",
+        )
+        if gate["status"] != "FULL":
+            raise ReplayDataQualityError(
+                "DETERMINISTIC_RECOMPUTE_"
+                f"{gate['status']}:{gate.get('reason')}:"
+                + ",".join(gate.get("missing_inputs") or [])
+            )
 
     result: dict[str, list[Any]] = {}
     if scope == "MARKET":

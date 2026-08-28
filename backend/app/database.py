@@ -38,6 +38,7 @@ Base = declarative_base()
 def init_db() -> None:
     """Create legacy and V2 tables. Called once at application startup."""
     from . import (  # noqa: F401
+        history,
         market_engine_models,
         market_models,
         market_runtime_models,

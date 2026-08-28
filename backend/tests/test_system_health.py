@@ -70,11 +70,11 @@ def test_release_metadata_unknown_sha_does_not_crash(monkeypatch):
 
 
 def test_schema_state_current_behind_and_ahead():
-    head = "20260828_0018"
+    head = "20260828_0019"
     revisions = ["20260827_0017", head]
     assert schema_state(head, head, revisions)["state"] == "CURRENT"
     assert schema_state("20260827_0017", head, revisions)["state"] == "BEHIND"
-    ahead = schema_state("20260901_0019", head, revisions)
+    ahead = schema_state("20260901_0020", head, revisions)
     assert ahead["state"] == "AHEAD"
     assert ahead["blocked"] is True
 
