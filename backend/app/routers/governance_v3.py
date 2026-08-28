@@ -51,7 +51,6 @@ class ManualProposalRequest(BaseModel):
     target_parameter_key: str = Field(min_length=1, max_length=160)
     proposed_value: Any
     reason: str = Field(min_length=1, max_length=4000)
-    proposal_type: str = "MANUAL_EXCEPTION"
     risk_acknowledged: bool = False
     risk_summary: dict[str, Any] | None = None
 
@@ -77,6 +76,7 @@ class RollbackRequest(BaseModel):
 def _error(exc: ValueError) -> HTTPException:
     message = str(exc)
     conflict_codes = {
+        "CALIBRATION_BASE_VERSION_CHANGED",
         "STALE_BASE_VERSION",
         "ACTIVE_VERSION_CHANGED",
         "BLOCKED_TRADING_SESSION",
@@ -99,11 +99,19 @@ def _version(db: Session, version_id: int) -> ParameterSetVersion:
     return row
 
 
-def _proposal(db: Session, proposal_id: int) -> ParameterChangeProposal:
+def _owned_proposal(db: Session, proposal_id: int, user_id: int) -> ParameterChangeProposal:
     row = db.get(ParameterChangeProposal, proposal_id)
-    if row is None:
+    if row is None or row.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parameter proposal not found.")
     return row
+
+
+def _assert_source_proposal_owner(db: Session, version: ParameterSetVersion, user_id: int) -> None:
+    if version.source_proposal_id is None:
+        return
+    proposal = db.get(ParameterChangeProposal, version.source_proposal_id)
+    if proposal is None or proposal.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parameter proposal not found.")
 
 
 @router.get("/parameters")
@@ -190,7 +198,7 @@ def proposals(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return {"proposals": [serialize_proposal(row) for row in list_proposals(db, limit=limit)]}
+    return {"proposals": [serialize_proposal(row) for row in list_proposals(db, user_id=current_user.id, limit=limit)]}
 
 
 @router.get("/proposals/{proposal_id}")
@@ -199,7 +207,7 @@ def proposal_detail(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return serialize_proposal(_proposal(db, proposal_id))
+    return serialize_proposal(_owned_proposal(db, proposal_id, current_user.id))
 
 
 @router.post("/proposals/from-calibration")
@@ -209,7 +217,7 @@ def proposal_from_calibration(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     report = db.get(CalibrationReport, payload.calibration_report_id)
-    if report is None:
+    if report is None or report.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Calibration report not found.")
     try:
         row = create_proposal_from_calibration(
@@ -239,7 +247,6 @@ def manual_proposal(
             proposed_value=payload.proposed_value,
             user_id=current_user.id,
             reason=payload.reason,
-            proposal_type=payload.proposal_type,
             risk_acknowledged=payload.risk_acknowledged,
             risk_summary=payload.risk_summary,
         )
@@ -256,7 +263,7 @@ def submit(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    row = _proposal(db, proposal_id)
+    row = _owned_proposal(db, proposal_id, current_user.id)
     try:
         submit_proposal(db, proposal=row, user_id=current_user.id)
         db.commit()
@@ -273,7 +280,7 @@ def approve(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    row = _proposal(db, proposal_id)
+    row = _owned_proposal(db, proposal_id, current_user.id)
     try:
         version = approve_proposal(
             db,
@@ -295,7 +302,7 @@ def reject(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    row = _proposal(db, proposal_id)
+    row = _owned_proposal(db, proposal_id, current_user.id)
     try:
         reject_proposal(
             db,
@@ -317,6 +324,7 @@ def validate_version(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     row = _version(db, version_id)
+    _assert_source_proposal_owner(db, row, current_user.id)
     try:
         validate_parameter_set_version(db, version=row, actor_user_id=current_user.id)
         db.commit()
@@ -334,6 +342,7 @@ def activate(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     row = _version(db, version_id)
+    _assert_source_proposal_owner(db, row, current_user.id)
     try:
         activate_parameter_set_version(
             db,

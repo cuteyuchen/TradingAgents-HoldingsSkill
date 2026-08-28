@@ -54,6 +54,7 @@
     ,"Only an explicitly activated ParameterSetVersion changes future production behavior. Approval creates an immutable APPROVED version; activation is a separate explicit step, and the model cannot approve, activate, or roll back parameter versions."
     ,"Rollback is an explicit audited governance operation that creates a new version; it never reactivates an old row, and it is never triggered automatically by performance."
     ,"A running Market, Candidate, Analysis, or Backtest keeps the parameter snapshot it started with. New runs read the active immutable parameter set and record its lineage."
+    ,"A standard parameter proposal must bind to the current ACTIVE snapshot: calibration current/challenger values and the originating Backtest parameter version/hash must match, otherwise the proposal is rejected. Manual proposals are always MANUAL_EXCEPTION and require explicit risk acknowledgement."
   ],
   "decision_contract": {
     "version": "2.4.0",

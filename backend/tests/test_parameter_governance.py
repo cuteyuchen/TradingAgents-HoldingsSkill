@@ -67,7 +67,12 @@ def _user(db: Session) -> User:
     return row
 
 
-def _backtest(db: Session, key: str = "governance-backtest-1") -> BacktestRun:
+def _backtest(
+    db: Session,
+    key: str = "governance-backtest-1",
+    *,
+    lineage: dict[str, object] | None = None,
+) -> BacktestRun:
     row = BacktestRun(
         user_id=None,
         portfolio_id=None,
@@ -82,6 +87,10 @@ def _backtest(db: Session, key: str = "governance-backtest-1") -> BacktestRun:
         calculation_key=key,
         horizons_json=[1],
     )
+    if lineage:
+        row.parameter_set_version_id = lineage["version_id"]
+        row.parameter_set_version = lineage["version"]
+        row.parameter_set_hash = lineage["config_hash"]
     db.add(row)
     db.flush()
     return row
@@ -95,7 +104,19 @@ def _calibration(
     current: float = 5.0,
     challenger: float = 6.0,
 ) -> CalibrationReport:
-    run = _backtest(db, key=f"governance-backtest-{next(_BACKTEST_SEQ)}-{recommendation}-{target}")
+    active = get_active_parameter_set(db)
+    lineage = None
+    if active is not None:
+        lineage = {
+            "version_id": active.id,
+            "version": f"v{active.version}",
+            "config_hash": active.config_hash,
+        }
+    run = _backtest(
+        db,
+        key=f"governance-backtest-{next(_BACKTEST_SEQ)}-{recommendation}-{target}",
+        lineage=lineage,
+    )
     row = CalibrationReport(
         backtest_run_id=run.id,
         user_id=None,
@@ -268,7 +289,17 @@ def test_protected_parameter_requires_manual_exception(db: Session):
     db.commit()
     with pytest.raises(ValueError, match="parameter_not_calibratable"):
         create_proposal_from_calibration(db, calibration_report=report, proposed_value=0.25, user_id=1)
-    with pytest.raises(ValueError, match="protected_parameter_requires_manual_exception"):
+    with pytest.raises(ValueError, match="manual_proposal_requires_manual_exception"):
+        create_manual_proposal(
+            db,
+            target_parameter_key="portfolio.hard_caps.stock",
+            proposed_value=0.25,
+            user_id=1,
+            reason="manual",
+            proposal_type="STANDARD",
+            risk_acknowledged=True,
+        )
+    with pytest.raises(ValueError, match="manual_proposal_requires_risk_acknowledgement"):
         create_manual_proposal(
             db,
             target_parameter_key="portfolio.hard_caps.stock",
@@ -291,6 +322,30 @@ def test_protected_parameter_requires_manual_exception(db: Session):
     db.commit()
     assert proposal.proposal_type == "MANUAL_EXCEPTION"
     assert proposal.risk_acknowledged is True
+
+
+def test_manual_proposal_always_requires_manual_exception_and_risk_acknowledgement(db: Session):
+    bootstrap_parameter_set(db)
+    with pytest.raises(ValueError, match="manual_proposal_requires_manual_exception"):
+        create_manual_proposal(
+            db,
+            target_parameter_key="candidate.min_decision_edge",
+            proposed_value=6.0,
+            user_id=1,
+            reason="manual",
+            proposal_type="STANDARD",
+            risk_acknowledged=True,
+        )
+    with pytest.raises(ValueError, match="manual_proposal_requires_risk_acknowledgement"):
+        create_manual_proposal(
+            db,
+            target_parameter_key="candidate.min_decision_edge",
+            proposed_value=6.0,
+            user_id=1,
+            reason="manual",
+            proposal_type="MANUAL_EXCEPTION",
+            risk_acknowledged=False,
+        )
 
 
 def test_diagnostic_or_non_consider_change_cannot_create_standard_proposal(db: Session):
@@ -449,3 +504,115 @@ def test_no_governance_history_without_active_is_blocked_not_guessed(db: Session
     db.commit()
     with pytest.raises(GovernanceBlockedError, match="NO_ACTIVE_PARAMETER_SET_WITH_HISTORY"):
         bootstrap_parameter_set(db)
+
+
+def test_resolver_blocks_legacy_fallback_when_history_exists_without_active(db: Session):
+    bootstrap_parameter_set(db)
+    active = get_active_parameter_set(db)
+    active._allow_governance_update = True
+    active.status = "SUPERSEDED"
+    active.deactivated_at = active.activated_at
+    db.commit()
+
+    with pytest.raises(GovernanceBlockedError, match="NO_ACTIVE_PARAMETER_SET_WITH_HISTORY"):
+        resolve_production_parameters(db)
+
+
+def test_calibration_evidence_must_match_active_value_and_backtest_base(db: Session):
+    bootstrap_parameter_set(db)
+    report = _calibration(
+        db,
+        target="candidate.min_decision_edge",
+        current=5.0,
+        challenger=6.0,
+    )
+    db.commit()
+    with pytest.raises(ValueError, match="CALIBRATION_VALUE_MISMATCH"):
+        create_proposal_from_calibration(
+            db,
+            calibration_report=report,
+            proposed_value=50.0,
+            user_id=1,
+            reason="forged",
+        )
+
+    wrong_current = _calibration(
+        db,
+        target="candidate.min_decision_edge",
+        current=4.0,
+        challenger=6.0,
+    )
+    db.commit()
+    with pytest.raises(ValueError, match="CALIBRATION_VALUE_MISMATCH"):
+        create_proposal_from_calibration(
+            db,
+            calibration_report=wrong_current,
+            proposed_value=6.0,
+            user_id=1,
+            reason="stale current",
+        )
+
+
+def test_calibration_from_old_base_version_is_rejected(db: Session):
+    v1 = bootstrap_parameter_set(db)
+    report = _calibration(
+        db,
+        target="candidate.min_decision_edge",
+        current=5.0,
+        challenger=6.0,
+    )
+    db.commit()
+
+    proposal = create_proposal_from_calibration(
+        db,
+        calibration_report=report,
+        proposed_value=6.0,
+        user_id=1,
+        reason="evidence",
+    )
+    db.commit()
+    submit_proposal(db, proposal=proposal, user_id=1)
+    db.commit()
+    approved = approve_proposal(db, proposal=proposal, reviewer_user_id=1)
+    db.commit()
+    validate_parameter_set_version(db, version=approved, actor_user_id=1)
+    db.commit()
+    activate_parameter_set_version(
+        db,
+        version=approved,
+        actor_user_id=1,
+        emergency_override=True,
+        reason="test",
+    )
+    db.commit()
+
+    old_run = _backtest(
+        db,
+        key=f"governance-backtest-old-base-{next(_BACKTEST_SEQ)}",
+        lineage={
+            "version_id": v1.id,
+            "version": "v1",
+            "config_hash": v1.config_hash,
+        },
+    )
+    old_report = CalibrationReport(
+        backtest_run_id=old_run.id,
+        user_id=None,
+        portfolio_id=None,
+        status="COMPLETED",
+        target_parameter="candidate.min_decision_edge",
+        current_value_json=6.0,
+        challenger_value_json=7.0,
+        recommendation="CONSIDER_CHANGE",
+        report_json={"replay_mode": "PRODUCTION_REPLAY"},
+    )
+    db.add(old_report)
+    db.commit()
+    with pytest.raises(ValueError, match="CALIBRATION_BASE_VERSION_CHANGED"):
+        create_proposal_from_calibration(
+            db,
+            calibration_report=old_report,
+            proposed_value=7.0,
+            user_id=1,
+            reason="old evidence",
+        )

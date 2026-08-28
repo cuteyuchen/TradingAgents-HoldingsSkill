@@ -144,7 +144,6 @@ async function createManualProposal() {
       target_parameter_key: manualForm.key,
       proposed_value: parseValue(manualForm.proposedValue),
       reason: manualForm.reason,
-      proposal_type: 'MANUAL_EXCEPTION',
       risk_acknowledged: manualForm.riskAcknowledged,
     })
     manualModal.value = false

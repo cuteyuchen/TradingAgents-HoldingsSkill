@@ -10,7 +10,7 @@ from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
 from ..decision_contract import CONTRACT_VERSION
-from ..research.models import CalibrationReport
+from ..research.models import BacktestRun, CalibrationReport
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
 from .models import (
     ParameterChangeProposal,
@@ -120,9 +120,12 @@ def resolve_production_parameters(db: Session | None = None) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             return _legacy_context()
         try:
+            history_count = db.execute(select(func.count()).select_from(ParameterSetVersion)).scalar_one()
+            if history_count == 0:
+                return _legacy_context()
             active = get_active_parameter_set(db)
             if active is None:
-                return _legacy_context()
+                raise GovernanceBlockedError("NO_ACTIVE_PARAMETER_SET_WITH_HISTORY")
             return _context_from_version(active)
         except GovernanceBlockedError:
             raise
@@ -139,8 +142,16 @@ def resolve_production_parameters(db: Session | None = None) -> dict[str, Any]:
             if not inspect(db_session.get_bind()).has_table("parameter_set_versions"):
                 payload = _legacy_context()
             else:
-                active = get_active_parameter_set(db_session)
-                payload = _context_from_version(active) if active is not None else _legacy_context()
+                history_count = db_session.execute(
+                    select(func.count()).select_from(ParameterSetVersion)
+                ).scalar_one()
+                if history_count == 0:
+                    payload = _legacy_context()
+                else:
+                    active = get_active_parameter_set(db_session)
+                    if active is None:
+                        raise GovernanceBlockedError("NO_ACTIVE_PARAMETER_SET_WITH_HISTORY")
+                    payload = _context_from_version(active)
     except GovernanceBlockedError:
         raise
     except Exception:  # noqa: BLE001
@@ -248,6 +259,8 @@ def create_proposal_from_calibration(
 ) -> ParameterChangeProposal:
     if calibration_report.recommendation != "CONSIDER_CHANGE":
         raise GovernanceError("calibration_not_consider_change")
+    if calibration_report.status != "COMPLETED":
+        raise GovernanceError("calibration_not_completed")
     key = calibration_report.target_parameter
     spec = get_spec(key)
     if not spec.calibration_supported:
@@ -259,6 +272,18 @@ def create_proposal_from_calibration(
         raise GovernanceError("no_active_parameter_set")
     current_value = read_current_value(active.snapshot_json, key)
     proposed = validate_registry_value(key, proposed_value)
+    if calibration_report.challenger_value_json != proposed:
+        raise GovernanceError("CALIBRATION_VALUE_MISMATCH")
+    if calibration_report.current_value_json != current_value:
+        raise GovernanceError("CALIBRATION_VALUE_MISMATCH")
+    backtest = db.get(BacktestRun, calibration_report.backtest_run_id)
+    if backtest is None:
+        raise GovernanceError("calibration_backtest_not_found")
+    if (
+        backtest.parameter_set_version_id != active.id
+        or backtest.parameter_set_hash != active.config_hash
+    ):
+        raise GovernanceError("CALIBRATION_BASE_VERSION_CHANGED")
     existing = _open_proposal(
         db,
         source_calibration_report_id=calibration_report.id,
@@ -304,9 +329,11 @@ def create_manual_proposal(
     risk_acknowledged: bool = False,
     risk_summary: dict[str, Any] | None = None,
 ) -> ParameterChangeProposal:
-    spec = get_spec(target_parameter_key)
-    if spec.protected and not (proposal_type == "MANUAL_EXCEPTION" and risk_acknowledged):
-        raise GovernanceError("protected_parameter_requires_manual_exception_and_risk_acknowledgement")
+    get_spec(target_parameter_key)
+    if proposal_type != "MANUAL_EXCEPTION":
+        raise GovernanceError("manual_proposal_requires_manual_exception")
+    if not risk_acknowledged:
+        raise GovernanceError("manual_proposal_requires_risk_acknowledgement")
     active = get_active_parameter_set(db)
     if active is None:
         raise GovernanceError("no_active_parameter_set")

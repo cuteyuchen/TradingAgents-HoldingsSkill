@@ -84,6 +84,11 @@ Calibration may return KEEP_CURRENT, CONSIDER_CHANGE, INSUFFICIENT_EVIDENCE, or 
 Phase J makes parameter changes a versioned, human-reviewed operation. Research proposes, humans approve, governance versions, production consumes, and rollback stays possible. There is no auto-apply and no auto-trade path in governance.
 
 - Calibration is evidence only. `CONSIDER_CHANGE` creates a `ParameterChangeProposal`; it never changes the ACTIVE `ParameterSetVersion`.
+- A standard proposal must bind to the current ACTIVE baseline: the report's
+  current/challenger values and its Backtest parameter version/hash must match
+  the live snapshot, or the proposal is rejected as stale or mismatched.
+- Manual proposals are always `MANUAL_EXCEPTION` and require explicit risk
+  acknowledgement; they cannot masquerade as standard calibration proposals.
 - Approval creates an immutable `APPROVED` version. Activation is a separate explicit step and the only operation that changes what future production runs consume.
 - The model cannot approve, activate, or roll back parameter versions. Governance actions require an authenticated human actor and are recorded in an append-only audit timeline.
 - Each production Market, Candidate, Analysis, Decision Memory, and Backtest run records the `ParameterSetVersion` it started with. A version activated mid-run never changes that run.

@@ -58,8 +58,10 @@ The resolver is the single production authority:
 - `get_active_parameter_set()`: active immutable snapshot, rejects two ACTIVE
   rows with `MULTIPLE_ACTIVE_PARAMETER_SETS`.
 - `resolve_production_parameters()`: active snapshot or
-  `LEGACY_PRE_GOVERNANCE` before first bootstrap; 15-second TTL cache,
-  invalidated on activation.
+  `LEGACY_PRE_GOVERNANCE` only when the governance table does not exist or has
+  no version history; existing history without an ACTIVE row raises
+  `NO_ACTIVE_PARAMETER_SET_WITH_HISTORY` instead of falling back to code
+  defaults. 15-second TTL cache, invalidated on activation.
 - `bootstrap_parameter_set()`: idempotent ACTIVE v1 from the exact Phase J
   baseline constants; history without ACTIVE is `BLOCKED`, never guessed.
 
@@ -71,6 +73,15 @@ creation resolve the snapshot once at run start and keep it for the whole run.
 - Only `CONSIDER_CHANGE` can create a standard proposal. `KEEP_CURRENT`,
   `INSUFFICIENT_EVIDENCE`, `REJECT_CHANGE`, factor ablation, and weight
   perturbation cannot create a standard proposal.
+- A standard proposal binds the CalibrationReport to the current ACTIVE
+  baseline: report `current_value` must equal the ACTIVE value, report
+  `challenger_value` must equal the proposed value, and the BacktestRun
+  `parameter_set_version_id` / `parameter_set_hash` must equal the ACTIVE
+  version. Any mismatch returns `CALIBRATION_VALUE_MISMATCH` or
+  `CALIBRATION_BASE_VERSION_CHANGED` and requires a new Backtest/Calibration;
+  evidence is never silently rebased.
+- Manual proposals are always `MANUAL_EXCEPTION`, always require
+  `risk_acknowledged=true`, and cannot be created as `STANDARD` from the API.
 - Proposals lock `base_parameter_set_version_id` at creation. Approval fails
   with `STALE_BASE_VERSION` when the ACTIVE version changed; no automatic
   rebase.
@@ -113,6 +124,9 @@ creation resolve the snapshot once at run start and keep it for the whole run.
 proposal list/detail, from-calibration, manual, submit, approve, reject,
 validate, activate, rollback-proposal, events, and health. There is no
 `PATCH /active-config`, no direct constant writer, and no auto-trade path.
+Calibration reports, proposals, and proposal-derived version mutations are
+scoped to the authenticated owner; another user receives 404 instead of being
+able to read, submit, approve, reject, validate, or activate them.
 
 ## 7. Frontend
 
@@ -132,8 +146,8 @@ Contract remains `2.4.0`.
 
 ## 9. Verification
 
-- Governance tests: `16 passed`.
-- Full backend suite: `307 passed`.
+- Governance tests: `22 passed`.
+- Full backend suite: `313 passed`.
 - `compileall`: passed.
 - Frontend `npm run typecheck`: passed.
 - Frontend `npm run build`: passed.
