@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from . import auth
@@ -16,6 +16,7 @@ from .services.market_identity_sync import (
     calendar_status,
     initialize_local_market_identity,
     start_remote_market_identity_sync,
+    stop_remote_market_identity_sync,
 )
 from .services.market_snapshot_service import (
     hydrate_runtime_provider_health,
@@ -24,6 +25,10 @@ from .services.market_snapshot_service import (
 from .services.scheduler import start_scheduler, stop_scheduler
 from .services.realtime_monitor import start_realtime_monitor, stop_realtime_monitor
 from .services.skill_runtime import runtime_metadata, runtime_prompt
+from .system.backup import BackupError, ensure_pre_upgrade_backup
+from .system.health import liveness, readiness
+from .system.logging import RequestIDMiddleware, configure_logging
+from .system.startup import run_startup_preflight
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("advisor")
@@ -32,7 +37,15 @@ logger = logging.getLogger("advisor")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize storage, the versioned Skill runtime, and the scheduler."""
+    configure_logging()
+    try:
+        ensure_pre_upgrade_backup()
+    except BackupError as exc:
+        logger.error("Pre-upgrade backup guard failed: %s", exc)
+        raise RuntimeError("PRE_UPGRADE_BACKUP_FAILED") from exc
     init_db()
+    with SessionLocal() as db:
+        run_startup_preflight(db)
     # Prevent a process restart from forgetting an already-open provider
     # circuit while the durable health table still reports it as blocked.
     with SessionLocal() as db:
@@ -71,6 +84,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_scheduler()
         stop_realtime_monitor()
+        stop_remote_market_identity_sync()
 
 
 app = FastAPI(
@@ -90,6 +104,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIDMiddleware)
 
 from .routers import archives  # noqa: E402
 
@@ -107,6 +122,7 @@ from .routers import (  # noqa: E402
     portfolios_v2,
     market_engine_v3,
     memory_v3,
+    system_v3,
     research_v3,
     monitor_v3,
     operations_v3,
@@ -130,31 +146,26 @@ app.include_router(monitor_v3.router)
 app.include_router(operations_v3.router)
 app.include_router(triggers_v3.router)
 app.include_router(portfolio_v3.router)
+app.include_router(system_v3.router)
 
 
 @app.get("/healthz")
 def healthz() -> dict:
-    skill = runtime_metadata()
-    try:
-        with SessionLocal() as db:
-            market_calendar = calendar_status(db)
-    except SQLAlchemyError:
-        logger.warning("Market calendar table is unavailable during health check", exc_info=True)
-        # A liveness probe must remain useful during first boot/migration; the
-        # explicit state still tells operators that the calendar is unready.
-        market_calendar = {
-            "status": "calendar_not_initialized",
-            "market": "CN",
-            "row_count": 0,
-        }
-    return {
-        "status": "ok",
-        "version": app.version,
-        "scheduler": settings.SCHEDULER_ENABLED,
-        "market_calendar": market_calendar,
-        "skill_version": skill["version"],
-        "skill_runtime_sha256": skill["runtime_sha256"],
-    }
+    return liveness()
+
+
+@app.get("/healthz/live")
+def healthz_live() -> dict:
+    return liveness()
+
+
+@app.get("/healthz/ready")
+def healthz_ready() -> JSONResponse:
+    result = readiness()
+    return JSONResponse(
+        content=result,
+        status_code=200 if result["ready"] else status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 @app.get("/api/v1/auth/verify")

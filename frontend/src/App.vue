@@ -5,6 +5,7 @@ import {
   BarChart3,
   BellRing,
   FlaskConical,
+  Activity,
   LayoutDashboard,
   LogOut,
   Moon,
@@ -44,6 +45,7 @@ const navigation = [
   { name: 'reports', label: '分析报告', icon: BarChart3 },
   { name: 'research', label: '历史研究', icon: FlaskConical },
   { name: 'governance', label: '参数治理', icon: ShieldCheck },
+  { name: 'system', label: '系统运维', icon: Activity },
   { name: 'settings', label: '系统设置', icon: Settings },
 ]
 

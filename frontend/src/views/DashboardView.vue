@@ -23,6 +23,7 @@ import type {
   OperatingNotification,
   Portfolio,
   Schedule,
+  SystemReadiness,
 } from '../api/types'
 
 const route = useRoute()
@@ -36,6 +37,7 @@ const profiles = ref<ModelProfile[]>([])
 const schedules = ref<Schedule[]>([])
 const selectedId = ref<number | null>(null)
 const dashboard = ref<DailyDashboard | null>(null)
+const systemReadiness = ref<SystemReadiness | null>(null)
 const candidateTab = ref<'action' | 'ready' | 'watchlist'>('action')
 const reconciling = ref(false)
 const createOpen = ref(false)
@@ -88,6 +90,13 @@ function statusType(status?: string | null) {
   return 'warning'
 }
 
+function readinessType(status?: string | null) {
+  const value = String(status || '').toUpperCase()
+  if (value === 'READY') return 'success'
+  if (value === 'BLOCKED') return 'error'
+  return 'warning'
+}
+
 function actionType(action?: string | null) {
   const value = String(action || '').toUpperCase()
   if (['REDUCE', 'EXIT', 'SELL', 'BLOCKED'].includes(value)) return 'error'
@@ -130,6 +139,14 @@ async function loadDashboard(silent = false) {
   }
 }
 
+async function loadSystemReadiness() {
+  try {
+    systemReadiness.value = await api.getSystemReadiness()
+  } catch {
+    systemReadiness.value = null
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -148,7 +165,7 @@ async function load() {
       || portfolios.value.find((item) => item.is_default)?.id
       || portfolios.value[0]?.id
       || null
-    await loadDashboard(true)
+    await Promise.all([loadDashboard(true), loadSystemReadiness()])
   } catch (err) {
     error.value = (err as Error).message
     message.error(error.value)
@@ -285,6 +302,14 @@ onUnmounted(() => {
           <span>下一节点：{{ nextCheckpoint?.time || '—' }}</span>
           <span v-if="schedulesEnabled" class="schedule-mark">自动时间表已启用</span>
           <n-tag v-if="unreadNotifications" type="warning" size="small" :bordered="false"><Bell :size="13" /> {{ unreadNotifications }} 条未读</n-tag>
+          <n-tag
+            v-if="systemReadiness"
+            :type="readinessType(systemReadiness.status)"
+            size="small"
+            :bordered="false"
+            class="readiness-badge"
+            @click="router.push({ name: 'system' })"
+          >系统 {{ systemReadiness.status }}</n-tag>
         </div>
 
         <div class="hero-grid">
@@ -441,6 +466,7 @@ h1 { margin: 0; font-size: 36px; }
 .as-of-line, .section-footer, .inline-meta, .health-summary, .decision-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; color: var(--app-text-muted); font-size: 12px; }
 .as-of-line { min-height: 28px; }
 .schedule-mark { color: var(--app-success); }
+.readiness-badge { cursor: pointer; }
 .hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .section-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .wide-first { grid-template-columns: minmax(0, 1.45fr) minmax(320px, .8fr); }

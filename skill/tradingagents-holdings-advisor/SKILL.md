@@ -97,6 +97,19 @@ Phase J makes parameter changes a versioned, human-reviewed operation. Research 
 - Protected invariants such as stock 20% / sector-theme ETF 30% hard caps, ACTION max 3, data-quality fail-close, and no-auto-trade cannot be changed by standard calibration. A manual exception requires explicit risk acknowledgement.
 - Trading-session activation is blocked by default. Emergency activation requires an authenticated actor, a reason, and an audit event.
 
+## Production Observability & Release Readiness (Phase K)
+
+Phase K makes the self-hosted deployment observable without changing investment semantics. Release metadata, schema state, verified backups, restore drills, readiness, diagnostics, and graceful shutdown are operational actions; they never call an LLM, never create or modify trading facts, and never execute broker orders.
+
+- Health is layered: liveness only proves the process is alive; readiness checks DB writability, schema compatibility, governance, storage, and startup preflight; operational health reports Release, Database, Backup, Storage, Governance, Scheduler, Monitor, and Worker Recovery states.
+- Schema status distinguishes CURRENT, BEHIND, AHEAD, UNKNOWN, and BROKEN. A DB revision ahead of the code head is `BLOCKED_SCHEMA_AHEAD`; production risk-increasing work must fail closed, and existing holdings are never auto-sold.
+- A verified backup uses the SQLite online backup API plus quick check, SHA-256, and a durable JSON manifest. `SUCCESS` is only claimed when the backup opens, quick check passes, checksum matches, and the manifest is durable. `.partial` files are never listed as verified.
+- Production restore is offline-only through `python -m app.system.restore`. The web UI offers Create Backup, Verify, and Restore Drill only; there is no production restore button and no automatic restore.
+- Pre-upgrade migration requires a verified `PRE_UPGRADE` backup; if backup creation or verification fails, the upgrade fails closed. A failed migration is never auto-downgraded.
+- Diagnostic bundles are sanitized and authenticated. They exclude the database, backups, API keys, tokens, cookies, passwords, raw screenshots, and raw model conversations. Request IDs are generated or reused across every HTTP response.
+- A system health `BLOCKED` state is not a sell signal. Provider outage is reflected in operational health, while liveness stays true so Docker does not restart-loop solely because a provider is temporarily unavailable.
+- All Phase H/I/J lease recovery, worker fencing, and governance fail-close behavior remains authoritative. Phase K only observes and reports recovery; it does not add a second scheduler or a second job queue.
+
 ## Quality-First Workflow
 
 Target routine execution time is about 10 minutes, but this is a progress

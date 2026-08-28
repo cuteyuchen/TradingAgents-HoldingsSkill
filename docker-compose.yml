@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     container_name: tradingagents-holdings-advisor
     environment:
+      - APP_VERSION=${APP_VERSION:-0.3.0}
+      - APP_GIT_SHA=${APP_GIT_SHA:-UNKNOWN}
+      - APP_BUILD_TIME=${APP_BUILD_TIME:-unknown}
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
       - APP_SECRET_KEY=${APP_SECRET_KEY}
       - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-true}
@@ -12,6 +15,7 @@ services:
       - JWT_REFRESH_TOKEN_DAYS=${JWT_REFRESH_TOKEN_DAYS:-30}
       - ADVISOR_DB_PATH=/app/data/advisor.db
       - ADVISOR_ARTIFACTS_DIR=/app/data/artifacts
+      - ADVISOR_BACKUP_DIR=/app/data/backups
       - ADVISOR_SQLITE_JOURNAL_MODE=${ADVISOR_SQLITE_JOURNAL_MODE:-WAL}
       - ADVISOR_CORS_ORIGINS=${ADVISOR_CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
       - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-12582912}
@@ -24,6 +28,15 @@ services:
       - MODEL_MAX_RETRIES=${MODEL_MAX_RETRIES:-1}
       - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-true}
       - SCHEDULER_INTERVAL_SECONDS=${SCHEDULER_INTERVAL_SECONDS:-60}
+      - WEB_CONCURRENCY=1
+      - BACKUP_SCHEDULE_ENABLED=${BACKUP_SCHEDULE_ENABLED:-true}
+      - BACKUP_SCHEDULE_TIME=${BACKUP_SCHEDULE_TIME:-20:45}
+      - BACKUP_RETENTION_DAILY=${BACKUP_RETENTION_DAILY:-7}
+      - BACKUP_RETENTION_WEEKLY=${BACKUP_RETENTION_WEEKLY:-4}
+      - BACKUP_RETENTION_PRE_UPGRADE=${BACKUP_RETENTION_PRE_UPGRADE:-5}
+      - DISK_DEGRADED_RATIO=${DISK_DEGRADED_RATIO:-0.10}
+      - DISK_BLOCKED_RATIO=${DISK_BLOCKED_RATIO:-0.03}
+      - DIAGNOSTIC_LOG_LINES=${DIAGNOSTIC_LOG_LINES:-2000}
       - PUBLIC_APP_URL=${PUBLIC_APP_URL:-http://localhost:8080}
       - MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER=${MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER:-eastmoney_batch}
       - MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS=${MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS:-tencent}
@@ -48,6 +61,12 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
       - "${FRONTEND_PORT:-8080}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

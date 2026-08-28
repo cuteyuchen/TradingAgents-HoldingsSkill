@@ -17,6 +17,14 @@ def _choice_int_env(name: str, default: int, allowed: set[int]) -> int:
 class Settings:
     """Runtime settings for the legacy archive API and the V2 application."""
 
+    # Release metadata. Production images should inject these at build time;
+    # the resolver never fabricates a SHA when no value is supplied.
+    APP_VERSION: str = os.getenv("APP_VERSION", "0.3.0")
+    APP_GIT_SHA: str = os.getenv("APP_GIT_SHA", "").strip()
+    APP_GIT_REF: str = os.getenv("APP_GIT_REF", "").strip()
+    APP_BUILD_TIME: str = os.getenv("APP_BUILD_TIME", "").strip()
+    APP_ENV: str = os.getenv("APP_ENV", "development").strip().lower() or "development"
+
     # Legacy archive auth. Kept during the V1 -> V2 migration window.
     ADVISOR_TOKEN: str = os.getenv("ADVISOR_TOKEN", "")
 
@@ -39,6 +47,10 @@ class Settings:
     STATIC_DIR: str = os.getenv(
         "ADVISOR_STATIC_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static"),
+    )
+    BACKUP_DIR: str = os.getenv(
+        "ADVISOR_BACKUP_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "backups"),
     )
     SQLITE_JOURNAL_MODE: str = os.getenv("ADVISOR_SQLITE_JOURNAL_MODE", "").upper()
     MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(12 * 1024 * 1024)))
@@ -78,6 +90,22 @@ class Settings:
         0, int(os.getenv("NOTIFICATION_DEFAULT_COOLDOWN_MINUTES", "60"))
     )
     PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", "http://localhost:8080").rstrip("/")
+
+    # Phase K release-readiness and self-hosted operations.
+    BACKUP_SCHEDULE_ENABLED: bool = _bool_env("BACKUP_SCHEDULE_ENABLED", "true")
+    BACKUP_SCHEDULE_TIME: str = os.getenv("BACKUP_SCHEDULE_TIME", "20:45").strip() or "20:45"
+    BACKUP_RETENTION_DAILY: int = max(0, int(os.getenv("BACKUP_RETENTION_DAILY", "7")))
+    BACKUP_RETENTION_WEEKLY: int = max(0, int(os.getenv("BACKUP_RETENTION_WEEKLY", "4")))
+    BACKUP_RETENTION_PRE_UPGRADE: int = max(0, int(os.getenv("BACKUP_RETENTION_PRE_UPGRADE", "5")))
+    BACKUP_RETENTION_MANUAL: int = max(0, int(os.getenv("BACKUP_RETENTION_MANUAL", "0")))
+    BACKUP_DEGRADED_HOURS: float = max(0.0, float(os.getenv("BACKUP_DEGRADED_HOURS", "36")))
+    BACKUP_BLOCKED_HOURS: float = max(0.0, float(os.getenv("BACKUP_BLOCKED_HOURS", "72")))
+    DISK_DEGRADED_RATIO: float = float(os.getenv("DISK_DEGRADED_RATIO", "0.10"))
+    DISK_BLOCKED_RATIO: float = float(os.getenv("DISK_BLOCKED_RATIO", "0.03"))
+    DIAGNOSTIC_LOG_LINES: int = max(100, int(os.getenv("DIAGNOSTIC_LOG_LINES", "2000")))
+    SYSTEM_MAINTENANCE_QUICK_CHECK_ENABLED: bool = _bool_env(
+        "SYSTEM_MAINTENANCE_QUICK_CHECK_ENABLED", "true"
+    )
 
     # Phase D deterministic realtime monitor and trigger engine.  The monitor
     # is opt-in so an upgraded deployment does not immediately start remote
@@ -222,6 +250,17 @@ def validate_realtime_monitor_settings(value: Settings = settings) -> bool:
         raise ValueError("PORTFOLIO_HIGH_CORRELATION_THRESHOLD must be in (0, 1]")
     if value.PORTFOLIO_TRADING_DAYS_PER_YEAR <= 0:
         raise ValueError("PORTFOLIO_TRADING_DAYS_PER_YEAR must be positive")
+    if not 0 < value.DISK_BLOCKED_RATIO < value.DISK_DEGRADED_RATIO < 1:
+        raise ValueError("DISK_BLOCKED_RATIO must be below DISK_DEGRADED_RATIO and both must be in (0, 1)")
+    if value.BACKUP_BLOCKED_HOURS < value.BACKUP_DEGRADED_HOURS:
+        raise ValueError("BACKUP_BLOCKED_HOURS must not be below BACKUP_DEGRADED_HOURS")
+    try:
+        hour_text, minute_text = value.BACKUP_SCHEDULE_TIME.split(":", 1)
+        hour, minute = int(hour_text), int(minute_text)
+    except ValueError as exc:
+        raise ValueError("BACKUP_SCHEDULE_TIME must use HH:MM") from exc
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("BACKUP_SCHEDULE_TIME must be a valid HH:MM clock time")
     return True
 
 

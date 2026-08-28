@@ -447,6 +447,85 @@ export interface GovernanceHealth {
   active: ParameterSetVersion | null
 }
 
+export interface SystemRelease {
+  app_version: string
+  git_sha: string
+  git_ref?: string | null
+  build_time?: string | null
+  alembic_db_revision?: string | null
+  alembic_code_head_revision?: string | null
+  schema_state: string
+  schema_reason?: string | null
+  schema_blocked: boolean
+  runtime_contract_version: string
+  decision_contract_version: string
+  active_parameter_set_version?: string | null
+  active_parameter_set_hash?: string | null
+  governance_status?: string | null
+  python_version: string
+  environment: string
+  database_backend: string
+  database_identity?: string | null
+  started_at: string
+  uptime_seconds: number
+}
+
+export interface SystemHealthCheck {
+  status: 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
+  reason?: string | null
+  [key: string]: any
+}
+
+export interface SystemHealth {
+  status: 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
+  components: Record<string, SystemHealthCheck>
+  as_of: string
+}
+
+export interface SystemReadiness {
+  status: 'READY' | 'READY_WITH_WARNINGS' | 'BLOCKED'
+  ready: boolean
+  checks: Record<string, SystemHealthCheck>
+}
+
+export interface SystemBackup {
+  backup_id: string
+  filename: string
+  type: string
+  reason: string
+  created_at: string
+  completed_at: string
+  source_db_revision?: string | null
+  code_head_revision?: string | null
+  app_version: string
+  git_sha?: string | null
+  source_db_size: number
+  backup_size: number
+  sha256: string
+  quick_check_result: string
+  source_db_fingerprint: string
+  [key: string]: any
+}
+
+export interface SystemBackupList {
+  backups: SystemBackup[]
+}
+
+export interface SystemDiagnostics {
+  bundle_id: string
+  filename: string
+  sha256: string
+  size: number
+  entries: string[]
+  contains_db: boolean
+  contains_backup: boolean
+}
+
+export interface SystemRecoveryReport {
+  counts: Record<string, number>
+  errors: string[]
+}
+
 // Legacy archive types remain for migration/debug views.
 export interface ScreenshotPayload {
   filename?: string | null

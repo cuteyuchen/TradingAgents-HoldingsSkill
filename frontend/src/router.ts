@@ -12,6 +12,7 @@ const router = createRouter({
     { path: '/reports', name: 'reports', component: () => import('./views/ReportsView.vue') },
     { path: '/research', name: 'research', component: () => import('./views/ResearchView.vue') },
     { path: '/governance', name: 'governance', component: () => import('./views/GovernanceView.vue') },
+    { path: '/system', name: 'system', component: () => import('./views/SystemView.vue') },
     { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],

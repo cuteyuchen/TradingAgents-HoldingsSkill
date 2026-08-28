@@ -542,6 +542,13 @@ def start_scheduler() -> None:
     try:
         with SessionLocal() as db:
             _dispatch_research_backtests(db)
+            from ..system.startup import collect_startup_recovery_report
+
+            recovery = collect_startup_recovery_report(db)
+            if sum(recovery["counts"].values()):
+                logger.info("startup_recovery_report counts=%s", recovery["counts"])
+            if recovery["errors"]:
+                logger.warning("startup_recovery_report errors=%s", recovery["errors"])
     except Exception:
         logger.exception("initial research backtest worker dispatch failed")
     _scheduler = BackgroundScheduler(timezone="UTC", daemon=True)
@@ -554,6 +561,12 @@ def start_scheduler() -> None:
         coalesce=True,
         replace_existing=True,
     )
+    try:
+        from ..system.startup import schedule_system_maintenance
+
+        schedule_system_maintenance(_scheduler)
+    except Exception:
+        logger.exception("system maintenance job scheduling failed")
     _scheduler.start()
     logger.info("Embedded analysis scheduler started")
 

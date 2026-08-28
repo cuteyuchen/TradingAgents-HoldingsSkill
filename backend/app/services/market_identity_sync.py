@@ -212,6 +212,7 @@ def start_remote_market_identity_sync(
 ) -> threading.Thread | None:
     """Start enabled remote sync in a daemon thread without awaiting network."""
 
+    global _REMOTE_SYNC_THREAD
     if not (settings.CALENDAR_SYNC_ENABLED or settings.SECURITY_MASTER_SYNC_ENABLED):
         return None
     thread = thread_factory(
@@ -221,7 +222,21 @@ def start_remote_market_identity_sync(
         daemon=True,
     )
     thread.start()
+    _REMOTE_SYNC_THREAD = thread
     return thread
+
+
+def stop_remote_market_identity_sync(timeout_seconds: float = 5.0) -> None:
+    """Bounded graceful wait for the optional identity refresh thread."""
+
+    global _REMOTE_SYNC_THREAD
+    thread = _REMOTE_SYNC_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=max(0.0, timeout_seconds))
+    _REMOTE_SYNC_THREAD = None
+
+
+_REMOTE_SYNC_THREAD: threading.Thread | None = None
 
 
 __all__ = [
@@ -233,6 +248,7 @@ __all__ = [
     "initialize_local_market_identity",
     "run_remote_market_identity_sync",
     "start_remote_market_identity_sync",
+    "stop_remote_market_identity_sync",
     "sync_calendar_from_provider",
     "sync_security_master_from_provider",
 ]
