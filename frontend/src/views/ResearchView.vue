@@ -52,12 +52,7 @@ const runForm = reactive({
 })
 const calibrationForm = reactive({
   target_parameter: 'decision_edge_threshold',
-  scope: null as ResearchScope | null,
-  replay_mode: 'PRODUCTION_REPLAY' as ReplayMode,
-  start_date: isoDate(start),
-  end_date: endDate,
-  portfolio_id: null as number | null,
-  horizons: [1, 5, 20] as number[],
+  backtest_run_id: null as number | null,
   parameter_grid: '',
 })
 
@@ -96,6 +91,9 @@ const portfolioOptions = computed(() => [
 ])
 const selectedMetricRows = computed(() => (selectedRun.value?.metric_slices || []).slice(0, 30))
 const canCancel = computed(() => selectedRun.value && ['QUEUED', 'RUNNING'].includes(selectedRun.value.status))
+const calibrationRunOptions = computed(() => runs.value
+  .filter((run) => run.status === 'COMPLETED')
+  .map((run) => ({ label: `#${run.id} ${run.scope} ${run.start_date} → ${run.end_date}`, value: run.id })))
 
 function statusType(status?: string | null): 'success' | 'warning' | 'error' | 'info' | 'default' {
   const value = String(status || '').toUpperCase()
@@ -222,14 +220,13 @@ function parseGrid(value: string): Array<number | string> | undefined {
 async function createCalibration() {
   running.value = true
   try {
+    if (!calibrationForm.backtest_run_id) {
+      message.warning('请先选择已完成的 Backtest Run')
+      return
+    }
     const report = await api.createCalibration({
+      backtest_run_id: calibrationForm.backtest_run_id,
       target_parameter: calibrationForm.target_parameter,
-      scope: calibrationForm.scope,
-      replay_mode: calibrationForm.replay_mode,
-      start_date: calibrationForm.start_date,
-      end_date: calibrationForm.end_date,
-      portfolio_id: portfolioFor(calibrationForm.scope || 'CANDIDATE', calibrationForm.portfolio_id),
-      horizons: calibrationForm.horizons,
       parameter_grid: parseGrid(calibrationForm.parameter_grid),
       bootstrap_iterations: 500,
     })
@@ -395,22 +392,11 @@ onMounted(() => void load())
         </template>
         <div class="form-grid">
           <label>Target Parameter<n-input v-model:value="calibrationForm.target_parameter" /></label>
-          <label>Scope<n-select v-model:value="calibrationForm.scope" :options="[{ label: '自动推断', value: null }, ...scopeOptions]" /></label>
-          <label>开始日期<input v-model="calibrationForm.start_date" type="date" /></label>
-          <label>结束日期<input v-model="calibrationForm.end_date" type="date" /></label>
-          <label>研究组合<n-select v-model:value="calibrationForm.portfolio_id" :options="portfolioOptions" /></label>
+          <label>Backtest Run<n-select v-model:value="calibrationForm.backtest_run_id" :options="calibrationRunOptions" placeholder="选择已完成的 Run" /></label>
           <label>Safe Grid<n-input v-model:value="calibrationForm.parameter_grid" placeholder="4,5,6,7" /></label>
         </div>
-        <div class="horizon-line">
-          <span class="field-label">Forward Horizon</span>
-          <n-checkbox-group v-model:value="calibrationForm.horizons">
-            <n-space :size="10">
-              <n-checkbox v-for="horizon in horizonOptions" :key="horizon" :value="horizon">{{ horizon }}d</n-checkbox>
-            </n-space>
-          </n-checkbox-group>
-        </div>
         <n-alert class="research-alert" type="warning" :show-icon="true">
-          Test set 只用于最终报告；没有 Apply 按钮，任何参数变更都必须由人工批准后另行治理。
+          Calibration 只基于已完成的 Backtest Run；Global Final Test 只用于最终报告，没有 Apply 按钮，参数变更必须人工批准。
         </n-alert>
         <div class="form-actions">
           <n-button type="primary" secondary :loading="running" @click="createCalibration">

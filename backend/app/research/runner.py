@@ -287,11 +287,19 @@ def _set_stage(db: Session, run: BacktestRun, stage: str, progress: int) -> None
     db.flush()
 
 
-def heartbeat_backtest_run(db: Session, *, run_id: int, user_id: int | None = None) -> BacktestRun | None:
+def heartbeat_backtest_run(
+    db: Session,
+    *,
+    run_id: int,
+    generation: int | None = None,
+    user_id: int | None = None,
+) -> BacktestRun | None:
     row = db.get(BacktestRun, run_id)
     if row is None or (user_id is not None and row.user_id != user_id):
         return None
     if row.status != "RUNNING" or row.cancel_requested:
+        return row
+    if generation is not None and int(row.attempt_count or 0) != int(generation):
         return row
     _allow_update(row)
     row.last_heartbeat_at = _now()
@@ -313,16 +321,31 @@ def reclaim_stale_backtest_runs(db: Session, *, now: datetime | None = None) -> 
         BacktestRun.lease_expires_at.is_not(None),
         BacktestRun.lease_expires_at < cutoff,
     ).order_by(BacktestRun.id.asc())).scalars())
+    reclaimed: list[BacktestRun] = []
     for row in rows:
-        _allow_update(row)
-        row.status = "QUEUED"
-        row.current_stage = "DATA_AUDIT"
-        row.lease_expires_at = None
-        row.last_heartbeat_at = None
-        row.attempt_count = int(row.attempt_count or 0) + 1
-    if rows:
+        generation = int(row.attempt_count or 0)
+        updated = db.execute(
+            update(BacktestRun)
+            .where(
+                BacktestRun.id == row.id,
+                BacktestRun.status == "RUNNING",
+                BacktestRun.attempt_count == generation,
+                BacktestRun.lease_expires_at < cutoff,
+            )
+            .values(
+                status="QUEUED",
+                current_stage="DATA_AUDIT",
+                lease_expires_at=None,
+                last_heartbeat_at=None,
+                attempt_count=generation + 1,
+            )
+        ).rowcount
+        if updated:
+            db.refresh(row)
+            reclaimed.append(row)
+    if reclaimed:
         db.flush()
-    return rows
+    return reclaimed
 
 
 def cancel_backtest_run(db: Session, *, run_id: int, user_id: int | None = None) -> BacktestRun | None:
@@ -360,6 +383,10 @@ def _stop_if_cancelled(db: Session, run: BacktestRun) -> bool:
         _mark_cancelled(db, run)
         return True
     return False
+
+
+def _worker_lost_lease(stop_event: threading.Event | None) -> bool:
+    return stop_event is not None and stop_event.is_set()
 
 
 def _invalidate_for_source_change(db: Session, run: BacktestRun, source_ids: Iterable[str]) -> BacktestRun:
@@ -813,7 +840,13 @@ def serialize_backtest_run(row: BacktestRun) -> dict[str, Any]:
     return _serialize(row)
 
 
-def execute_backtest_run(db: Session, *, run: BacktestRun, as_of: datetime | None = None) -> BacktestRun:
+def execute_backtest_run(
+    db: Session,
+    *,
+    run: BacktestRun,
+    as_of: datetime | None = None,
+    stop_event: threading.Event | None = None,
+) -> BacktestRun:
     if run.status in {"COMPLETED", "FAILED", "CANCELLED", "INSUFFICIENT_DATA", "INVALIDATED"}:
         return run
     if run.cancel_requested:
@@ -833,7 +866,8 @@ def execute_backtest_run(db: Session, *, run: BacktestRun, as_of: datetime | Non
         with historical_replay_network_policy():
             _set_stage(db, run, "LOADING", 15)
             db.commit()
-            if _stop_if_cancelled(db, run):
+            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+                db.rollback()
                 return run
             facts, rows, source_ids = _load_replay_rows(
                 db,
@@ -863,16 +897,19 @@ def execute_backtest_run(db: Session, *, run: BacktestRun, as_of: datetime | Non
             run.data_hash = data_hash
             _set_stage(db, run, "REPLAY", 35)
             db.commit()
-            if _stop_if_cancelled(db, run):
+            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+                db.rollback()
                 return run
             _set_stage(db, run, "OUTCOME", 60)
             db.commit()
-            if _stop_if_cancelled(db, run):
+            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+                db.rollback()
                 return run
             slices = _slice_payloads(run.scope, rows, horizons=horizons, bootstrap_iterations=bootstrap_iterations, seed=run.random_seed)
             _set_stage(db, run, "METRICS", 78)
             db.commit()
-            if _stop_if_cancelled(db, run):
+            if _stop_if_cancelled(db, run) or _worker_lost_lease(stop_event):
+                db.rollback()
                 return run
             limitations = list(run.known_limitations_json or [])
             if run.replay_mode == "BAR_ONLY_DIAGNOSTIC" or run.scope == "BAR_FACTOR":
@@ -1014,20 +1051,39 @@ def claim_queued_backtest_run(db: Session, *, run_id: int) -> BacktestRun | None
     return db.get(BacktestRun, run_id)
 
 
-def _server_backtest_heartbeat(run_id: int, stop_event: threading.Event) -> None:
-    """Renew a worker lease independently from the long-running calculation."""
+def _server_backtest_heartbeat(
+    run_id: int,
+    generation: int,
+    stop_event: threading.Event,
+) -> None:
+    """Renew only the current attempt generation's worker lease."""
 
     from ..database import SessionLocal
 
-    while not stop_event.wait(WORKER_HEARTBEAT_SECONDS):
+    while True:
         heartbeat_db = SessionLocal()
+        row = None
         try:
-            heartbeat_backtest_run(heartbeat_db, run_id=run_id)
-            heartbeat_db.commit()
+            row = heartbeat_backtest_run(heartbeat_db, run_id=run_id, generation=generation)
+            if row is not None:
+                heartbeat_db.commit()
+                heartbeat_db.refresh(row)
+            else:
+                heartbeat_db.rollback()
         except Exception:
             heartbeat_db.rollback()
+            row = None
         finally:
             heartbeat_db.close()
+        if (
+            row is None
+            or row.status != "RUNNING"
+            or int(row.attempt_count or 0) != generation
+        ):
+            stop_event.set()
+            return
+        if stop_event.wait(WORKER_HEARTBEAT_SECONDS):
+            return
 
 
 def run_backtest_worker(run_id: int) -> None:
@@ -1046,14 +1102,23 @@ def run_backtest_worker(run_id: int) -> None:
             run = claim_queued_backtest_run(db, run_id=run_id)
         if run is None or run.status != "RUNNING":
             return
+        generation = int(run.attempt_count or 1)
+        verified = heartbeat_backtest_run(db, run_id=run_id, generation=generation)
+        if (
+            verified is None
+            or verified.status != "RUNNING"
+            or int(verified.attempt_count or 0) != generation
+        ):
+            return
+        db.commit()
         heartbeat_thread = threading.Thread(
             target=_server_backtest_heartbeat,
-            args=(run_id, stop_event),
+            args=(run_id, generation, stop_event),
             name=f"backtest-heartbeat-{run_id}",
             daemon=True,
         )
         heartbeat_thread.start()
-        execute_backtest_run(db, run=run)
+        execute_backtest_run(db, run=run, stop_event=stop_event)
     except Exception:
         # execute_backtest_run persists FAILED before re-raising.  A worker
         # thread must not take down the scheduler that owns it.

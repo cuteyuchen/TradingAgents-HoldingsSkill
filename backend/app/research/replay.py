@@ -27,6 +27,7 @@ from .config import BACKTEST_ENGINE_VERSION, normalise_replay_mode, normalise_sc
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 _NETWORK_POLICY_DEPTH = 0
 MARKET_DAILY_CANONICAL_CLOSE = time(15, 0)
+MARKET_DAILY_CANONICAL_CLOSE_START = time(14, 45)
 
 
 class ReplayDataQualityError(ValueError):
@@ -471,16 +472,16 @@ def canonical_market_score_rows(rows: Iterable[Any]) -> list[Any]:
             row for row in candidates
             if str(getattr(row, "quality_status", "VALID") or "VALID").upper() in {"VALID", "DEGRADED"}
         ] or candidates
-        before_close = [
+        close_window = [
             row for row in reliable
-            if (_local_wall_time(getattr(row, "captured_at", None)) or time.min) <= MARKET_DAILY_CANONICAL_CLOSE
+            if MARKET_DAILY_CANONICAL_CLOSE_START <= (_local_wall_time(getattr(row, "captured_at", None)) or time.min) <= MARKET_DAILY_CANONICAL_CLOSE
         ]
-        # Daily regime calibration is a close-checkpoint study. If the
-        # checkpoint is absent, omit the day instead of promoting an
-        # after-close observation into the daily cohort.
-        if not before_close:
+        # Daily regime calibration is a close-checkpoint study. Only snapshots
+        # inside the 14:45-15:00 window are canonical; morning or after-close
+        # checkpoints are never promoted into the daily cohort.
+        if not close_window:
             continue
-        pool = before_close
+        pool = close_window
         selected.append(max(
             pool,
             key=lambda row: (

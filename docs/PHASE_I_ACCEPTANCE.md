@@ -50,6 +50,7 @@ Replay validates timestamp ordering and rejects future-visible facts. It never u
 - `BAR_ONLY_DIAGNOSTIC`: evaluates pure bar factors and never claims a complete Candidate Engine backtest.
 - Modes are kept separate in every run and metric slice.
 - Market outcomes use All-A Median Index forward return and drawdown, with score buckets `0-20`, `21-40`, `41-60`, `61-80`, and `81-100`, plus regime breakdown.
+- Market daily calibration uses a canonical close-window snapshot between `14:45` and `15:00`; morning or after-close snapshots are omitted, never promoted to a daily close observation.
 - Candidate outcomes expose raw, benchmark, excess, directional, MFE, MAE, transaction-cost, quality, execution-basis, and reason-code fields.
 - Candidate prices accept only explicit server/trusted quote ownership; model entry/trigger prices cannot become the reference price.
 - Reference basis must match every path bar adjustment. RAW/QFQ mixing returns `PRICE_BASIS_MISMATCH` and no high-confidence return.
@@ -61,9 +62,9 @@ All replay source rows are bulk loaded by category. No day-by-security SQL loop 
 
 ## 5. Chronology and Calibration
 
-Chronological train/validation/test splits and walk-forward folds never shuffle dates. For every fold, calibration selects a local challenger from Train, evaluates it on Validation, aggregates all fold validation evidence, fixes one final challenger, and only then reads the held-out Test folds. Date-block bootstrap resamples whole trade dates so cross-sectional rows are not treated as independent observations. Every result exposes case count, trade-date count, coverage, confidence interval, baseline, challenger, fold directions, and known limitations.
+Chronological splits never shuffle dates. The final 63 trading dates are a single `GLOBAL_FINAL_HOLDOUT`; every walk-forward fold uses only earlier train/validation dates, and no train, validation, or selection row may reuse a global test date. Calibration selects local challengers from each fold Train, evaluates them on each fold Validation, aggregates validation evidence, fixes one final challenger, and only then reads the global holdout exactly once. Date-block bootstrap resamples whole trade dates so cross-sectional rows are not treated as independent observations. Every result exposes case count, trade-date count, coverage, confidence interval, baseline, challenger, fold directions, validation-isolation overlap lists, and known limitations.
 
-Calibration supports Market Score/regime thresholds with paired hysteresis boundaries, Candidate opportunity/entry/RR/Portfolio Fit/Decision Edge thresholds, factor ablation, one-factor weight perturbation, action frequency, robustness plateau, and baseline comparison. Threshold variants rerun the complete production eligibility predicate with exactly one override; they are not single-field filters. Candidate selection reads train/validation only; the test set is evaluated after selection and cannot choose the challenger.
+Calibration supports Market Score/regime thresholds by replaying the production hysteresis state machine in date order (`previous regime -> today score -> production hysteresis transition -> simulated regime`), Candidate opportunity/entry/RR/Portfolio Fit/Decision Edge thresholds, factor ablation, one-factor weight perturbation, action frequency, robustness plateau, and baseline comparison. Market eligibility is never reduced to `score >= threshold`. Threshold variants rerun the complete production eligibility predicate with exactly one override; they are not single-field filters. Candidate selection reads train/validation only; the global holdout is evaluated after selection and cannot choose the challenger.
 
 Recommendations are limited to:
 
@@ -72,13 +73,13 @@ Recommendations are limited to:
 - `INSUFFICIENT_EVIDENCE`
 - `REJECT_CHANGE`
 
-Minimum sample and date requirements, validation/test degradation, tail risk, fold direction, fragile peaks, BacktestRun quality, availability-manifest capability, censored production samples, replay capability, and leakage status all fail closed. Factor/weight calibration and threshold changes that expand a censored candidate sample cannot recommend `CONSIDER_CHANGE`. The report never emits `OPTIMAL_PARAMETER` and cannot mutate any production configuration.
+Minimum sample and date requirements, validation/test degradation, tail risk, fold direction, fragile peaks, BacktestRun quality, availability-manifest capability, censored production samples, replay capability, and leakage status all fail closed. Factor ablation and weight perturbation are `DIAGNOSTIC_ONLY` and can never recommend `CONSIDER_CHANGE` until a full PIT universe permits complete downstream recomputation. Threshold changes that expand a censored candidate sample cannot recommend `CONSIDER_CHANGE`. The report never emits `OPTIMAL_PARAMETER` and cannot mutate any production configuration.
 
 ## 6. API and Worker Contract
 
-Research endpoints are under `/api/v3/research`: availability, backtest list/detail/create, cancel, heartbeat, calibration list/detail/create. They use current-user ownership checks for Runs, Reports, and Portfolios. Client-supplied outcomes, returns, scores, source IDs, and historical rows are rejected; all outcome and lineage fields are server-owned.
+Research endpoints are under `/api/v3/research`: availability, backtest list/detail/create, cancel, calibration list/detail/create. There is no public heartbeat endpoint; client heartbeats cannot represent worker liveness. Calibration POST accepts only a `backtest_run_id` and requires that Run to be `COMPLETED`; it never starts a Backtest synchronously. Endpoints use current-user ownership checks for Runs, Reports, and Portfolios. Client-supplied outcomes, returns, scores, source IDs, and historical rows are rejected; all outcome and lineage fields are server-owned.
 
-Backtest POST creates a durable queued Run; a server-owned worker claims it with CAS, runs it outside the HTTP request, renews the lease with a server heartbeat, and persists completion/failure. Startup and scheduler ticks reclaim expired `RUNNING` Runs and redispatch the same Run without creating a second Run. The client heartbeat endpoint remains an observability/control API; it is not the worker liveness mechanism.
+Backtest POST creates a durable queued Run; a server-owned worker claims it with CAS, runs it outside the HTTP request, renews the lease with a server heartbeat tied to `attempt_count`, and persists completion/failure. Startup and scheduler ticks reclaim expired `RUNNING` Runs with `attempt_count` CAS fencing and redispatch the same Run without creating a second Run. A stale worker that lost its lease cannot renew the new generation's lease and stops at the next durable stage boundary.
 
 ## 7. Frontend and Skill
 
@@ -88,8 +89,8 @@ The Skill keeps live analysis unchanged. Historical research is offline system e
 
 ## 8. Verification
 
-- Phase I + Phase I.1 research tests: `25 passed`.
-- Full backend suite: `284 passed`.
+- Phase I + Phase I.1 + Final Seal research tests: `29 passed`.
+- Full backend suite: `288 passed`.
 - `compileall`: passed.
 - Frontend `npm run typecheck`: passed.
 - Frontend `npm run build`: passed.

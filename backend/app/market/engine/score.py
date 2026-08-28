@@ -239,17 +239,61 @@ def score_subcomponents(
     )
 
 
-def classify_regime(score: float | int | None) -> str | None:
-    """Apply the initial five fixed score bands."""
+def classify_regime_with_bounds(
+    score: float | int | None,
+    *,
+    lower_bounds: Mapping[str, float],
+    order: Iterable[str] = REGIME_ORDER,
+) -> str | None:
+    """Apply score bands against an explicit lower-bound mapping."""
 
+    ordered = tuple(dict.fromkeys(order))
     value = _number(score)
     if value is None:
         return None
     bounded = max(0.0, min(100.0, value))
-    for regime in reversed(REGIME_ORDER):
-        if bounded >= REGIME_LOWER_BOUNDS[regime]:
+    for regime in reversed(ordered):
+        if bounded >= float(lower_bounds[regime]):
             return regime
-    return REGIME_ORDER[0]
+    return ordered[0]
+
+
+def classify_regime(score: float | int | None) -> str | None:
+    """Apply the initial five fixed score bands."""
+
+    return classify_regime_with_bounds(
+        score,
+        lower_bounds=REGIME_LOWER_BOUNDS,
+        order=REGIME_ORDER,
+    )
+
+
+def apply_regime_hysteresis_with_bounds(
+    score: float | int | None,
+    previous_regime: str | None,
+    *,
+    lower_bounds: Mapping[str, float],
+    hysteresis: Mapping[str, Mapping[str, float]],
+    order: Iterable[str] = REGIME_ORDER,
+) -> str | None:
+    """Keep a regime until an explicitly configured exit threshold is crossed."""
+
+    ordered = tuple(dict.fromkeys(order))
+    value = _number(score)
+    if value is None:
+        return previous_regime
+    candidate = classify_regime_with_bounds(value, lower_bounds=lower_bounds, order=ordered)
+    previous = str(previous_regime or "").upper()
+    if previous not in ordered:
+        return candidate
+    previous_index = ordered.index(previous)
+    candidate_index = ordered.index(candidate or previous)
+    if candidate_index == previous_index:
+        return previous
+    thresholds = hysteresis[previous]
+    if candidate_index > previous_index:
+        return candidate if value >= thresholds.get("up", 101.0) else previous
+    return candidate if value < thresholds.get("down", -1.0) else previous
 
 
 def apply_regime_hysteresis(
@@ -258,21 +302,13 @@ def apply_regime_hysteresis(
 ) -> str | None:
     """Keep a regime until its configured exit threshold is crossed."""
 
-    value = _number(score)
-    if value is None:
-        return previous_regime
-    candidate = classify_regime(value)
-    previous = str(previous_regime or "").upper()
-    if previous not in REGIME_ORDER:
-        return candidate
-    previous_index = REGIME_ORDER.index(previous)
-    candidate_index = REGIME_ORDER.index(candidate or previous)
-    if candidate_index == previous_index:
-        return previous
-    thresholds = REGIME_HYSTERESIS[previous]
-    if candidate_index > previous_index:
-        return candidate if value >= thresholds.get("up", 101.0) else previous
-    return candidate if value < thresholds.get("down", -1.0) else previous
+    return apply_regime_hysteresis_with_bounds(
+        score,
+        previous_regime,
+        lower_bounds=REGIME_LOWER_BOUNDS,
+        hysteresis=REGIME_HYSTERESIS,
+        order=REGIME_ORDER,
+    )
 
 
 def smooth_score(

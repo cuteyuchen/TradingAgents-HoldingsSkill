@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -10,13 +9,12 @@ from sqlalchemy.orm import Session
 
 from .availability import build_replay_availability_manifest
 from .calibration import build_calibration_evidence
-from .config import CALIBRATION_ENGINE_VERSION, MAX_BOOTSTRAP_ITERATIONS, normalise_scope
+from .config import CALIBRATION_ENGINE_VERSION, MAX_BOOTSTRAP_ITERATIONS
 from .models import BacktestRun, CalibrationReport
 from .runner import (
     cancel_backtest_run,
     get_backtest_run,
     list_backtest_runs,
-    run_backtest,
     load_backtest_rows,
 )
 from .replay import ReplayDataQualityError
@@ -89,7 +87,15 @@ def create_calibration_report(
 ) -> CalibrationReport:
     if bootstrap_iterations <= 0 or bootstrap_iterations > MAX_BOOTSTRAP_ITERATIONS:
         raise ValueError("invalid_bootstrap_iterations")
-    case_rows = list(cases or [])
+    if cases is None:
+        if backtest_run.status != "COMPLETED":
+            raise ValueError("calibration_requires_completed_backtest_run")
+        try:
+            case_rows = load_backtest_rows(db, run=backtest_run)
+        except (ReplayDataQualityError, ValueError):
+            case_rows = []
+    else:
+        case_rows = list(cases)
     evidence = build_calibration_evidence(
         case_rows,
         target_parameter=target_parameter,
@@ -143,6 +149,8 @@ def create_calibration_report(
             "selection_rule": evidence.get("selection_rule"),
             "quality_gate": evidence.get("quality_gate"),
             "folds": evidence.get("folds"),
+            "global_final_test": evidence.get("global_final_test"),
+            "validation_isolation": evidence.get("validation_isolation"),
             "no_auto_apply": True,
         },
         calibration_version=CALIBRATION_ENGINE_VERSION,
@@ -156,44 +164,26 @@ def run_calibration(
     db: Session,
     *,
     target_parameter: str,
-    start_date: date,
-    end_date: date,
-    replay_mode: str = "PRODUCTION_REPLAY",
-    scope: str | None = None,
-    user_id: int | None = None,
-    portfolio_id: int | None = None,
-    horizons: Iterable[int] | None = None,
+    backtest_run: BacktestRun,
     parameter_grid: Iterable[Any] | None = None,
     cases: Iterable[dict[str, Any]] | None = None,
     random_seed: int = 0,
     bootstrap_iterations: int = 500,
 ) -> CalibrationReport:
-    effective_scope = normalise_scope(scope) if scope is not None else _scope_for_parameter(target_parameter)
-    run = run_backtest(
-        db,
-        scope=effective_scope,
-        replay_mode=replay_mode,
-        start_date=start_date,
-        end_date=end_date,
-        user_id=user_id,
-        portfolio_id=portfolio_id,
-        horizons=horizons,
-        experiment_config={"target_parameter": target_parameter, "parameter_grid": list(parameter_grid or [])},
-        random_seed=random_seed,
-        bootstrap_iterations=bootstrap_iterations,
-    )
-    effective_cases = list(cases) if cases is not None else []
-    if cases is None and run.status not in {"INVALIDATED", "FAILED", "CANCELLED"}:
-        try:
-            effective_cases = load_backtest_rows(db, run=run)
-        except (ReplayDataQualityError, ValueError):
-            effective_cases = []
+    """Build a report only from an already completed BacktestRun.
+
+    Calibration never starts a Backtest itself; the durable server worker owns
+    all backtest execution.
+    """
+
+    if backtest_run.status != "COMPLETED":
+        raise ValueError("calibration_requires_completed_backtest_run")
     report = create_calibration_report(
         db,
-        backtest_run=run,
+        backtest_run=backtest_run,
         target_parameter=target_parameter,
         parameter_grid=parameter_grid,
-        cases=effective_cases,
+        cases=cases,
         random_seed=random_seed,
         bootstrap_iterations=bootstrap_iterations,
     )
@@ -219,7 +209,6 @@ def get_calibration_report(db: Session, *, report_id: int, user_id: int | None =
 
 __all__ = [
     "build_replay_availability_manifest",
-    "run_backtest",
     "get_backtest_run",
     "list_backtest_runs",
     "cancel_backtest_run",

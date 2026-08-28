@@ -104,9 +104,9 @@ def test_market_backtest_uses_future_all_a_index_without_live_io():
         _calendar(db, days)
         db.add(MarketScoreSnapshot(
             snapshot_id="score-80", market="CN", trade_date=days[0],
-            # Persisted timestamps are UTC-naive in the application. 02:00 UTC
-            # is the 10:00 Shanghai close-checkpoint candidate.
-            captured_at=datetime(2026, 6, 1, 2, tzinfo=UTC), display_score=80, raw_score=80,
+            # Persisted timestamps are UTC-naive in the application. 06:55 UTC
+            # is the 14:55 Shanghai close-window candidate.
+            captured_at=datetime(2026, 6, 1, 6, 55, tzinfo=UTC), display_score=80, raw_score=80,
             regime="RISK_ON", quality_status="VALID",
         ))
         for index, day in enumerate(days):
@@ -462,13 +462,98 @@ def test_research_api_enforces_owner_input_and_run_controls():
         foreign_portfolio = {**base_payload, "scope": "CANDIDATE", "portfolio_id": portfolio_b_id}
         assert client.post("/api/v3/research/backtests", json=foreign_portfolio).status_code == 404
 
-        heartbeat = client.post(f"/api/v3/research/backtests/{run_a_id}/heartbeat")
-        assert heartbeat.status_code == 200
-        assert heartbeat.json()["status"] == "RUNNING"
+        assert client.post(f"/api/v3/research/backtests/{run_a_id}/heartbeat").status_code in {404, 405}
         cancelled = client.post(f"/api/v3/research/backtests/{run_a_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "CANCELLED"
-        assert client.post(f"/api/v3/research/backtests/{run_b_id}/heartbeat").status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_calibration_api_requires_completed_run_and_never_starts_a_backtest():
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy.pool import StaticPool
+
+    from app.database import Base, get_db
+    from app.main import app
+    from app.v2_dependencies import get_current_user
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    day = date(2026, 8, 26)
+    with Session(engine) as db:
+        user = User(email="calibration-api@example.com", username="calibration-api", password_hash="hash")
+        db.add(user)
+        db.flush()
+        portfolio = Portfolio(user_id=user.id, name="Calibration API")
+        db.add(portfolio)
+        db.flush()
+        running = BacktestRun(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            scope="MARKET",
+            replay_mode="PRODUCTION_REPLAY",
+            start_date=day,
+            end_date=day,
+            status="RUNNING",
+            data_hash="r" * 64,
+            calculation_key="calibration-api-running",
+            lease_expires_at=datetime(2026, 8, 26, 10),
+        )
+        completed = BacktestRun(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            scope="MARKET",
+            replay_mode="PRODUCTION_REPLAY",
+            start_date=day,
+            end_date=day,
+            status="COMPLETED",
+            quality_status="FULL",
+            leakage_status="PASS",
+            data_hash="c" * 64,
+            calculation_key="calibration-api-completed",
+            horizons_json=[1],
+        )
+        db.add_all([running, completed])
+        db.commit()
+        user_id = user.id
+        running_id = running.id
+        completed_id = completed.id
+        run_count = db.query(BacktestRun).count()
+
+    def override_db():
+        with Session(engine) as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id, status="active")
+    client = TestClient(app)
+    try:
+        payload = {
+            "backtest_run_id": running_id,
+            "target_parameter": "candidate.action_entry_min",
+            "bootstrap_iterations": 1,
+        }
+        assert client.post("/api/v3/research/calibrations", json=payload).status_code == 409
+
+        completed_payload = {
+            "backtest_run_id": completed_id,
+            "target_parameter": "candidate.action_entry_min",
+            "parameter_grid": [60, 65, 70],
+            "bootstrap_iterations": 1,
+        }
+        response = client.post("/api/v3/research/calibrations", json=completed_payload)
+        assert response.status_code == 200
+        assert response.json()["backtest_run_id"] == completed_id
+        with Session(engine) as db:
+            assert db.query(BacktestRun).count() == run_count
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_current_user, None)

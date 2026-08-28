@@ -175,17 +175,11 @@ export const api = {
     bootstrap_iterations?: number
   }) => request<BacktestRun>('/api/v3/research/backtests', { method: 'POST', body: payload }),
   cancelBacktest: (id: number) => request<BacktestRun>(`/api/v3/research/backtests/${id}/cancel`, { method: 'POST' }),
-  heartbeatBacktest: (id: number) => request<BacktestRun>(`/api/v3/research/backtests/${id}/heartbeat`, { method: 'POST' }),
   listCalibrations: (portfolioId?: number) => request<CalibrationReport[]>(`/api/v3/research/calibrations${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`),
   getCalibration: (id: number) => request<CalibrationReport>(`/api/v3/research/calibrations/${id}`),
   createCalibration: (payload: {
-    start_date: string
-    end_date: string
+    backtest_run_id: number
     target_parameter: string
-    replay_mode?: ReplayMode
-    scope?: ResearchScope | null
-    portfolio_id?: number | null
-    horizons?: number[]
     parameter_grid?: Array<number | string>
     random_seed?: number
     bootstrap_iterations?: number

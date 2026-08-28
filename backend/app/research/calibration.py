@@ -8,6 +8,8 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from typing import Any
 
+from ..market.engine.config import REGIME_ORDER
+from ..market.engine.score import apply_regime_hysteresis_with_bounds
 from .config import (
     CALIBRATION_ENGINE_VERSION,
     MAX_GRID_SIZE,
@@ -259,6 +261,8 @@ def recommend_calibration(
 ) -> str:
     """Apply conservative evidence rules and return only the four legal recommendations."""
 
+    if target_parameter and _is_weight_or_ablation(target_parameter):
+        return "INSUFFICIENT_EVIDENCE"
     sample_counts = sample_counts or {}
     total_cases = int(sample_counts.get("case_count", max(_sample_count(train), _sample_count(validation), _sample_count(test))))
     total_dates = int(sample_counts.get("trade_date_count", 0))
@@ -466,15 +470,65 @@ def _recomputed_portfolio_fit(row: Mapping[str, Any], config: Mapping[str, Any])
     return round(sum(available[key] * weights[key] for key in weights), 4)
 
 
-def _market_eligible(row: Mapping[str, Any], variant: Any) -> bool:
-    score = _number(row.get("market_score"))
+def _simulated_market_regime_by_date(
+    rows: Iterable[Mapping[str, Any]],
+    config: Mapping[str, Any],
+) -> dict[date, str | None]:
+    """Replay the production hysteresis state machine over sequential dates."""
+
+    market = config.get("market") if isinstance(config.get("market"), Mapping) else {}
+    lower_bounds = market.get("regime_lower_bounds") if isinstance(market.get("regime_lower_bounds"), Mapping) else {}
+    hysteresis = market.get("regime_hysteresis") if isinstance(market.get("regime_hysteresis"), Mapping) else {}
+    order = tuple(dict.fromkeys([*REGIME_ORDER, *lower_bounds.keys()]))
+    score_by_date: dict[date, float] = {}
+    for row in rows:
+        day = _date_value(row.get("trade_date"))
+        if not isinstance(day, date) or day in score_by_date:
+            continue
+        score = _number(row.get("market_score"))
+        if score is not None:
+            score_by_date[day] = score
+    state: dict[date, str | None] = {}
+    previous: str | None = None
+    for day in sorted(score_by_date):
+        previous = apply_regime_hysteresis_with_bounds(
+            score_by_date[day],
+            previous,
+            lower_bounds=lower_bounds,
+            hysteresis=hysteresis,
+            order=order,
+        )
+        state[day] = previous
+    return state
+
+
+def _market_eligible(
+    row: Mapping[str, Any],
+    variant: Any,
+    *,
+    regime_state: Mapping[date, str | None] | None,
+    target_regime: str | None = None,
+    regime_order: Iterable[str] = REGIME_ORDER,
+) -> bool:
+    """Evaluate one day against a simulated regime, never a raw score cut."""
+
+    day = _date_value(row.get("trade_date"))
+    if not isinstance(day, date) or regime_state is None:
+        return False
+    simulated = regime_state.get(day)
+    order = tuple(dict.fromkeys(regime_order))
+    target = str(target_regime or variant).upper()
+    try:
+        simulated_index = order.index(simulated)
+        target_index = order.index(target)
+    except ValueError:
+        return False
     quality = str(row.get("market_quality", row.get("quality_status")) or "MISSING").upper()
     return (
-        score is not None
+        simulated_index >= target_index
         and quality in {"VALID", "DEGRADED"}
         and bool(row.get("market_available", True))
         and not bool(row.get("market_frozen"))
-        and score >= float(variant)
     )
 
 
@@ -484,13 +538,25 @@ def production_gate_predicate(
     target_parameter: str,
     variant: Any,
     production_config: Mapping[str, Any] | None = None,
+    regime_state: Mapping[date, str | None] | None = None,
 ) -> bool:
     """Re-run the complete production eligibility predicate for one variant."""
 
     path = _normalise_parameter(target_parameter)
     config = _variant_config(production_config or current_production_config(), path, variant)
-    if _parameter_kind(path) == "MARKET_REGIME_THRESHOLD" or path.startswith("market."):
-        return _market_eligible(row, variant)
+    if _parameter_kind(path) == "MARKET_REGIME_THRESHOLD":
+        lower_bounds = (config.get("market") if isinstance(config.get("market"), Mapping) else {}).get("regime_lower_bounds") or {}
+        order = tuple(dict.fromkeys([*REGIME_ORDER, *lower_bounds.keys()]))
+        target_regime = path.rsplit(".", 1)[-1]
+        return _market_eligible(
+            row,
+            variant,
+            regime_state=regime_state,
+            target_regime=target_regime,
+            regime_order=order,
+        )
+    if path.startswith("market."):
+        return False
 
     candidate = config.get("candidate") if isinstance(config.get("candidate"), Mapping) else {}
     kind = _parameter_kind(path)
@@ -559,6 +625,7 @@ def evaluate_threshold_variants(
     variants: Iterable[float],
     target_parameter: str | None = None,
     production_config: Mapping[str, Any] | None = None,
+    regime_states: Mapping[Any, Mapping[date, str | None]] | None = None,
     value_key: str = "excess_return",
     bootstrap_iterations: int = 500,
     seed: int = 0,
@@ -566,9 +633,17 @@ def evaluate_threshold_variants(
     rows = [dict(row) for row in cases]
     target = target_parameter or field or ""
     use_production_gate = target_parameter is not None or production_config is not None
+    is_market_regime = target and _parameter_kind(target) == "MARKET_REGIME_THRESHOLD"
     result = []
     for value in variants:
         if use_production_gate:
+            state_map = None
+            if is_market_regime:
+                if regime_states is not None:
+                    state_map = regime_states.get(value)
+                if state_map is None:
+                    variant_config = _variant_config(production_config or current_production_config(), target, value)
+                    state_map = _simulated_market_regime_by_date(rows, variant_config)
             selected = [
                 row for row in rows
                 if production_gate_predicate(
@@ -576,6 +651,7 @@ def evaluate_threshold_variants(
                     target_parameter=target,
                     variant=value,
                     production_config=production_config,
+                    regime_state=state_map,
                 )
             ]
         else:
@@ -666,6 +742,20 @@ def build_calibration_evidence(
 
         splits = chronological_splits([value for value in dates if isinstance(value, date)])
     split_list = list(splits)
+    kind = _parameter_kind(path)
+    regime_states: dict[Any, dict[date, str | None]] | None = None
+    if kind == "MARKET_REGIME_THRESHOLD":
+        regime_states = {
+            value: _simulated_market_regime_by_date(rows, _variant_config(config, path, value))
+            for value in grid
+        }
+    global_final_test_dates = tuple(dict.fromkeys(
+        item
+        for split in split_list
+        if hasattr(split, "global_final_test_dates")
+        for item in split.global_final_test_dates
+    ))
+    use_global_test = bool(global_final_test_dates)
     fold_records: list[dict[str, Any]] = []
     all_train_rows: list[dict[str, Any]] = []
     all_validation_rows: list[dict[str, Any]] = []
@@ -684,6 +774,7 @@ def build_calibration_evidence(
                 target_parameter=path,
                 variants=grid,
                 production_config=config,
+                regime_states=regime_states,
                 seed=seed + int(split.fold),
                 bootstrap_iterations=bootstrap_iterations,
             )
@@ -693,6 +784,7 @@ def build_calibration_evidence(
                 target_parameter=path,
                 variants=grid,
                 production_config=config,
+                regime_states=regime_states,
                 seed=seed + int(split.fold),
                 bootstrap_iterations=bootstrap_iterations,
             )
@@ -733,7 +825,7 @@ def build_calibration_evidence(
         fold_records.append({
             "fold": 0,
             "status": "DIAGNOSTIC_ONLY",
-            "train": {"variants": evaluate_threshold_variants(rows, field=field, target_parameter=path, variants=grid, production_config=config, seed=seed, bootstrap_iterations=bootstrap_iterations)},
+            "train": {"variants": evaluate_threshold_variants(rows, field=field, target_parameter=path, variants=grid, production_config=config, regime_states=regime_states, seed=seed, bootstrap_iterations=bootstrap_iterations)},
             "validation": {"variants": []},
             "selected_challenger": current,
             "selection_source": "NONE",
@@ -751,6 +843,7 @@ def build_calibration_evidence(
         target_parameter=path,
         variants=grid,
         production_config=config,
+        regime_states=regime_states,
         seed=seed,
         bootstrap_iterations=bootstrap_iterations,
     )
@@ -769,26 +862,49 @@ def build_calibration_evidence(
             and challenger_metric > baseline_value
         )
 
-    # The fixed challenger is now applied to every held-out test fold.  Test
-    # rows are not materialised until this point, so no held-out evidence can
-    # influence local or final challenger selection.
-    for index, split in enumerate(split_list):
-        if not hasattr(split, "test_dates"):
-            continue
-        test_dates = set(split.test_dates)
-        test_rows = [row for row in rows if _date_value(row.get("trade_date")) in test_dates]
-        all_test_rows.extend(test_rows)
+    # The fixed challenger is now applied exactly once to the global final
+    # holdout.  New walk-forward splits never assign those dates to train or
+    # validation, so held-out evidence cannot influence challenger selection.
+    global_final_test: dict[str, Any] | None = None
+    if use_global_test:
+        final_test_date_set = set(global_final_test_dates)
+        all_test_rows = [row for row in rows if _date_value(row.get("trade_date")) in final_test_date_set]
         test_variants = evaluate_threshold_variants(
-            test_rows,
+            all_test_rows,
             field=field,
             target_parameter=path,
             variants=[current, challenger_value],
             production_config=config,
-            seed=seed + int(split.fold),
+            regime_states=regime_states,
+            seed=seed,
             bootstrap_iterations=bootstrap_iterations,
         )
-        if index < len(fold_records):
-            fold_records[index]["test"] = {"variants": test_variants}
+        global_final_test = {
+            "variants": test_variants,
+            "trade_date_count": len(global_final_test_dates),
+            "case_count": len(all_test_rows),
+        }
+    else:
+        # Legacy custom splits may still carry per-fold test windows.  They
+        # are read only after the final challenger is fixed.
+        for index, split in enumerate(split_list):
+            if not hasattr(split, "test_dates"):
+                continue
+            test_dates = set(split.test_dates)
+            test_rows = [row for row in rows if _date_value(row.get("trade_date")) in test_dates]
+            all_test_rows.extend(test_rows)
+            test_variants = evaluate_threshold_variants(
+                test_rows,
+                field=field,
+                target_parameter=path,
+                variants=[current, challenger_value],
+                production_config=config,
+                regime_states=regime_states,
+                seed=seed + int(split.fold),
+                bootstrap_iterations=bootstrap_iterations,
+            )
+            if index < len(fold_records):
+                fold_records[index]["test"] = {"variants": test_variants}
 
     aggregate_train = evaluate_threshold_variants(
         all_train_rows,
@@ -796,6 +912,7 @@ def build_calibration_evidence(
         target_parameter=path,
         variants=[current, challenger_value],
         production_config=config,
+        regime_states=regime_states,
         seed=seed,
         bootstrap_iterations=bootstrap_iterations,
     )
@@ -805,6 +922,7 @@ def build_calibration_evidence(
         target_parameter=path,
         variants=[current, challenger_value],
         production_config=config,
+        regime_states=regime_states,
         seed=seed,
         bootstrap_iterations=bootstrap_iterations,
     )
@@ -814,6 +932,7 @@ def build_calibration_evidence(
         target_parameter=path,
         variants=[current, challenger_value],
         production_config=config,
+        regime_states=regime_states,
         seed=seed,
         bootstrap_iterations=bootstrap_iterations,
     )
@@ -858,6 +977,8 @@ def build_calibration_evidence(
         "censored_sample": is_censored,
         "challenger_expands_sample": challenger_expands,
         "expanded_range_case_count": expanded_range_case_count,
+        "experiment_status": "DIAGNOSTIC_ONLY" if kind in {"FACTOR_ABLATION", "WEIGHT_PERTURBATION"} else "CALIBRATION_EVIDENCE",
+        "market_regime_replay": "HYSTERESIS_STATE_REPLAY" if kind == "MARKET_REGIME_THRESHOLD" else None,
         "quality_reasons": sorted(set(quality_reasons)),
         "availability_manifest_hash": availability_manifest.get("data_hash") if availability_manifest else None,
     }
@@ -865,16 +986,18 @@ def build_calibration_evidence(
         "case_count": len(rows),
         "trade_date_count": len(dates),
         "fold_count": len(fold_records),
-        "tested_fold_count": sum(1 for fold in fold_records if fold.get("test") is not None),
+        "tested_fold_count": 1 if use_global_test else sum(1 for fold in fold_records if fold.get("test") is not None),
         "train_case_count": len(all_train_rows),
         "validation_case_count": len(all_validation_rows),
         "test_case_count": len(all_test_rows),
         "train_trade_date_count": len({_date_value(row.get("trade_date")) for row in all_train_rows}),
         "validation_trade_date_count": len({_date_value(row.get("trade_date")) for row in all_validation_rows}),
         "test_trade_date_count": len({_date_value(row.get("trade_date")) for row in all_test_rows}),
+        "global_final_test_trade_date_count": len(global_final_test_dates) if use_global_test else 0,
     }
     fold_directions = [bool(item.get("direction")) for item in fold_records]
     final_fold_directions = [bool(item.get("final_challenger_direction")) for item in fold_records]
+    diagnostic_only = kind in {"FACTOR_ABLATION", "WEIGHT_PERTURBATION"}
     recommendation = recommend_calibration(
         baseline=baseline_train,
         challenger=challenger_train,
@@ -892,8 +1015,12 @@ def build_calibration_evidence(
         quality_reasons=quality_reasons,
         replay_capability=replay_capability,
     )
-    if len(dates) < 252:
+    if len(dates) < 252 or diagnostic_only:
         recommendation = "INSUFFICIENT_EVIDENCE"
+    selection_dates = {value for row in selection_rows if isinstance(value := _date_value(row.get("trade_date")), date)}
+    train_dates_used = {value for row in all_train_rows if isinstance(value := _date_value(row.get("trade_date")), date)}
+    validation_dates_used = {value for row in all_validation_rows if isinstance(value := _date_value(row.get("trade_date")), date)}
+    final_test_set = set(global_final_test_dates)
     return {
         "calibration_version": CALIBRATION_ENGINE_VERSION,
         "target_parameter": target_parameter,
@@ -915,12 +1042,25 @@ def build_calibration_evidence(
         "quality_gate": quality_gate,
         "sample_counts": sample_counts,
         "recommendation": recommendation,
-        "selection_rule": "EVERY_FOLD_TRAIN_SELECTS; EVERY_FOLD_VALIDATION_EVALUATES; AGGREGATE_VALIDATION_EVIDENCE; FIXED_CHALLENGER; FOLD_TEST_READ_AFTER_SELECTION",
+        "selection_rule": (
+            "GLOBAL_FINAL_HOLDOUT; EVERY_FOLD_TRAIN_SELECTS; EVERY_FOLD_VALIDATION_EVALUATES; AGGREGATE_VALIDATION_EVIDENCE; FIXED_CHALLENGER; GLOBAL_TEST_READ_ONCE"
+            if use_global_test
+            else "EVERY_FOLD_TRAIN_SELECTS; EVERY_FOLD_VALIDATION_EVALUATES; AGGREGATE_VALIDATION_EVIDENCE; FIXED_CHALLENGER; FOLD_TEST_READ_AFTER_SELECTION"
+        ),
+        "validation_isolation": {
+            "global_final_test_date_count": len(final_test_set),
+            "train_overlap_dates": sorted(value.isoformat() for value in train_dates_used & final_test_set),
+            "validation_overlap_dates": sorted(value.isoformat() for value in validation_dates_used & final_test_set),
+            "selection_overlap_dates": sorted(value.isoformat() for value in selection_dates & final_test_set),
+        },
+        "global_final_test": global_final_test,
         "no_auto_apply": True,
         "known_limitations": [
             "Calibration is evidence for human review, not an optimizer or production mutation.",
-            "Walk-forward train rows overlap by design; fold-level direction and date counts remain explicit.",
-            "Local fold challengers are selected from train windows; final challenger validation directions are reported separately.",
+            "The last 63 trading dates form one global final holdout; it is read exactly once after challenger selection.",
+            "Walk-forward train rows overlap by design; no train, validation, or selection row ever reuses the global final holdout.",
+            "Factor ablation and weight perturbation are diagnostic-only until a full PIT universe permits complete downstream recomputation.",
+            "Market regime calibration replays production hysteresis state transitions in date order; it never reduces eligibility to score >= threshold.",
         ],
     }
 

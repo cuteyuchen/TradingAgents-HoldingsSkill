@@ -21,18 +21,17 @@ from ..research.config import (
 )
 from ..research.service import (
     build_replay_availability_manifest,
+    create_calibration_report,
     get_backtest_run,
     get_calibration_report,
     list_backtest_runs,
     list_calibration_reports,
-    run_calibration,
     serialize_calibration_report,
 )
 from ..research.runner import (
     cancel_backtest_run,
     dispatch_queued_backtest_runs,
     enqueue_backtest_run,
-    heartbeat_backtest_run,
     serialize_backtest_run,
 )
 from ..v2_dependencies import get_current_user
@@ -105,13 +104,8 @@ class BacktestRequest(BaseModel):
 
 
 class CalibrationRequest(BaseModel):
-    start_date: date
-    end_date: date
+    backtest_run_id: int = Field(ge=1)
     target_parameter: str = Field(min_length=1, max_length=128)
-    replay_mode: Literal["PRODUCTION_REPLAY", "DETERMINISTIC_RECOMPUTE", "BAR_ONLY_DIAGNOSTIC"] = "PRODUCTION_REPLAY"
-    scope: Literal["MARKET", "CANDIDATE", "PORTFOLIO_DECISION", "MEMORY_DECISION", "BAR_FACTOR"] | None = None
-    portfolio_id: int | None = Field(default=None, ge=1)
-    horizons: list[int] | None = None
     parameter_grid: list[float | int | str] | None = Field(default=None, max_length=MAX_GRID_SIZE)
     random_seed: int = Field(default=0, ge=0, le=2_147_483_647)
     bootstrap_iterations: int = Field(default=500, ge=1, le=MAX_BOOTSTRAP_ITERATIONS)
@@ -215,41 +209,30 @@ def cancel_backtest(
     return serialize_backtest_run(row)
 
 
-@router.post("/backtests/{run_id}/heartbeat")
-def heartbeat_backtest(
-    run_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    row = heartbeat_backtest_run(db, run_id=run_id, user_id=current_user.id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Backtest run not found.")
-    db.commit()
-    return serialize_backtest_run(row)
-
-
 @router.post("/calibrations")
 def create_calibration(
     payload: CalibrationRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    _portfolio(db, user_id=current_user.id, portfolio_id=payload.portfolio_id)
+    run = get_backtest_run(db, run_id=payload.backtest_run_id, user_id=current_user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest run not found.")
+    if run.status != "COMPLETED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Calibration requires a COMPLETED backtest run.",
+        )
     try:
-        report = run_calibration(
+        report = create_calibration_report(
             db,
+            backtest_run=run,
             target_parameter=payload.target_parameter,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            replay_mode=payload.replay_mode,
-            scope=payload.scope,
-            user_id=current_user.id,
-            portfolio_id=payload.portfolio_id,
-            horizons=payload.horizons,
             parameter_grid=payload.parameter_grid,
             random_seed=payload.random_seed,
             bootstrap_iterations=payload.bootstrap_iterations,
         )
+        db.commit()
         return serialize_calibration_report(report)
     except ValueError as exc:
         db.rollback()

@@ -32,6 +32,7 @@ from app.research.runner import (
     heartbeat_backtest_run,
 )
 from app.research.splits import ResearchSplit
+from app.research.splits import chronological_splits
 
 
 def _db() -> Session:
@@ -73,9 +74,17 @@ def _candidate_row(day: date, *, opportunity: float = 80.0, entry: float = 70.0)
     }
 
 
-def test_walk_forward_uses_all_folds_and_reads_tests_after_fixed_selection():
+def test_walk_forward_uses_all_folds_and_reads_global_test_after_fixed_selection():
     start = date(2024, 1, 1)
     rows = [_candidate_row(start + timedelta(days=index)) for index in range(600)]
+    splits = chronological_splits([start + timedelta(days=index) for index in range(600)])
+    final_dates = set(splits[0].global_final_test_dates)
+    assert len(splits) >= 2
+    assert len(final_dates) == 63
+    for split in splits:
+        assert split.test_dates == ()
+        assert not (set(split.train_dates) & final_dates)
+        assert not (set(split.validation_dates) & final_dates)
     evidence = build_calibration_evidence(
         rows,
         target_parameter="candidate.action_entry_min",
@@ -84,11 +93,16 @@ def test_walk_forward_uses_all_folds_and_reads_tests_after_fixed_selection():
     )
 
     assert evidence["sample_counts"]["fold_count"] >= 2
-    assert evidence["sample_counts"]["tested_fold_count"] == evidence["sample_counts"]["fold_count"]
+    assert evidence["sample_counts"]["tested_fold_count"] == 1
+    assert evidence["sample_counts"]["global_final_test_trade_date_count"] == 63
     assert len(evidence["folds"]) == evidence["sample_counts"]["fold_count"]
     assert len(evidence["fold_directions"]) == evidence["sample_counts"]["fold_count"]
-    assert all(item["test"] is not None for item in evidence["folds"])
-    assert evidence["selection_rule"].startswith("EVERY_FOLD_TRAIN_SELECTS")
+    assert all(item["test"] is None for item in evidence["folds"])
+    assert evidence["global_final_test"] is not None
+    assert evidence["selection_rule"].startswith("GLOBAL_FINAL_HOLDOUT")
+    assert evidence["validation_isolation"]["train_overlap_dates"] == []
+    assert evidence["validation_isolation"]["validation_overlap_dates"] == []
+    assert evidence["validation_isolation"]["selection_overlap_dates"] == []
 
 
 def test_each_fold_selects_local_challenger_from_train_before_validation_evidence():
@@ -200,6 +214,44 @@ def test_market_regime_threshold_maps_to_score_and_moves_hysteresis_pair():
     assert changed["market"]["regime_lower_bounds"]["RISK_ON"] == 65.0
     assert changed["market"]["regime_hysteresis"]["NEUTRAL"]["up"] == 62.0
     assert changed["market"]["regime_hysteresis"]["RISK_ON"] == {"down": 62.0, "up": 83.0}
+
+
+def test_market_regime_calibration_replays_hysteresis_state_not_raw_score_cut():
+    config = {
+        "market": {
+            "regime_lower_bounds": {
+                "STRONG_RISK_OFF": 0.0,
+                "RISK_OFF": 21.0,
+                "NEUTRAL": 41.0,
+                "RISK_ON": 61.0,
+                "STRONG_RISK_ON": 81.0,
+            },
+            "regime_hysteresis": {
+                "STRONG_RISK_OFF": {"up": 23.0},
+                "RISK_OFF": {"down": 18.0, "up": 43.0},
+                "NEUTRAL": {"down": 38.0, "up": 63.0},
+                "RISK_ON": {"down": 58.0, "up": 83.0},
+                "STRONG_RISK_ON": {"down": 78.0},
+            },
+        }
+    }
+    rows = [
+        {"trade_date": date(2026, 1, 1), "entity_id": "2026-01-01", "market_score": 70.0, "excess_return": 0.02, "market_quality": "VALID"},
+        {"trade_date": date(2026, 1, 2), "entity_id": "2026-01-02", "market_score": 60.0, "excess_return": 0.03, "market_quality": "VALID"},
+        {"trade_date": date(2026, 1, 3), "entity_id": "2026-01-03", "market_score": 55.0, "excess_return": 0.01, "market_quality": "VALID"},
+    ]
+    variants = evaluate_threshold_variants(
+        rows,
+        target_parameter="market.regime_lower_bounds.RISK_ON",
+        variants=[61, 65],
+        production_config=config,
+        bootstrap_iterations=1,
+    )
+
+    # Under the production state machine the 60-score day stays RISK_ON at the
+    # current boundary (down=58), but the raised boundary moves it to NEUTRAL.
+    assert variants[0]["eligible_case_ids"] == ["2026-01-01", "2026-01-02"]
+    assert variants[1]["eligible_case_ids"] == ["2026-01-01"]
 
 
 def test_cost_model_reads_phase_e_settings_and_does_not_add_slippage():
@@ -357,9 +409,40 @@ def test_running_backtest_heartbeat_prevents_stale_reclaim():
         db.commit()
         dispatch_queued_backtest_runs(db, start_workers=False)
         before = run.lease_expires_at
-        heartbeat_backtest_run(db, run_id=run.id)
+        heartbeat_backtest_run(db, run_id=run.id, generation=1)
         db.commit()
         assert run.lease_expires_at > before
+    finally:
+        db.close()
+
+
+def test_old_worker_generation_cannot_renew_a_reclaimed_lease():
+    db = _db()
+    try:
+        run = create_backtest_run(
+            db,
+            scope="MARKET",
+            replay_mode="PRODUCTION_REPLAY",
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            horizons=[1],
+            bootstrap_iterations=1,
+        )
+        db.commit()
+        dispatch_queued_backtest_runs(db, start_workers=False)
+        assert run.attempt_count == 1
+        run.lease_expires_at = datetime(2026, 6, 1, 9)
+        db.commit()
+        dispatch_queued_backtest_runs(db, start_workers=False)
+        assert run.status == "RUNNING"
+        assert run.attempt_count == 2
+        lease_before = run.lease_expires_at
+
+        heartbeat_backtest_run(db, run_id=run.id, generation=1)
+        db.commit()
+        db.refresh(run)
+        assert run.attempt_count == 2
+        assert run.lease_expires_at == lease_before
     finally:
         db.close()
 
@@ -376,6 +459,15 @@ def test_market_daily_replay_uses_one_close_canonical_observation_per_day():
     assert [row.snapshot_id for row in canonical] == ["close"]
     assert len(cases) == 1
     assert cases[0].entity_id == "close"
+
+
+def test_market_daily_canonical_close_never_falls_back_to_morning_snapshot():
+    day = date(2026, 6, 1)
+    rows = [
+        SimpleNamespace(id=1, snapshot_id="morning", trade_date=day, captured_at=datetime(2026, 6, 1, 1, 35, tzinfo=UTC), raw_score=60, display_score=60, regime="NEUTRAL", confidence=80, quality_status="VALID", score_config_version="v", calculation_version="v"),
+        SimpleNamespace(id=2, snapshot_id="after-close", trade_date=day, captured_at=datetime(2026, 6, 1, 7, 30, tzinfo=UTC), raw_score=90, display_score=90, regime="STRONG_RISK_ON", confidence=80, quality_status="VALID", score_config_version="v", calculation_version="v"),
+    ]
+    assert canonical_market_score_rows(rows) == []
 
 
 def test_intraday_candidate_h1_uses_close_and_defers_extremes_to_next_session():
