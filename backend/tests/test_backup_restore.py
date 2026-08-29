@@ -30,6 +30,7 @@ from app.system.backup import (
     verify_backup,
 )
 from app.system.startup import run_pre_upgrade_guard
+from app.system.release import code_head_revision
 
 
 def _seed_db(path: Path, *, revision: str = "20260827_0017") -> None:
@@ -153,7 +154,7 @@ def test_pre_upgrade_backup_requirement(backup_env):
     assert requires_pre_upgrade_backup() is True
     conn = sqlite3.connect(str(backup_env / "advisor.db"))
     try:
-        conn.execute("UPDATE alembic_version SET version_num='20260828_0019'")
+        conn.execute("UPDATE alembic_version SET version_num=?", (code_head_revision(),))
         conn.commit()
     finally:
         conn.close()

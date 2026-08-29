@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from .health import operational_health, readiness
+from .health import operational_health, readiness, shadow_status
 from .logging import redact_object, tail_logs
 from .release import build_release_metadata
 from .startup import collect_startup_recovery_report
@@ -71,7 +71,26 @@ def _jobs_payload(db: Session) -> dict[str, Any]:
             "occurred_at, attempt_count",
             "id",
         )
+    payload["shadow"] = _shadow_payload(db)
     return payload
+
+
+def _shadow_payload(db: Session) -> dict[str, Any]:
+    """Expose aggregate shadow diagnostics without portfolio or broker details."""
+    summary = shadow_status(db)
+    return {
+        "status": summary.get("status"),
+        "reason": summary.get("reason"),
+        "active_generation_ids": summary.get("active_generation_ids") or [],
+        "pending_intent_count": summary.get("pending_intents", 0),
+        "blocked_intent_count": summary.get("blocked_intents", 0),
+        "expired_pending_intent_count": summary.get("expired_pending_intents", 0),
+        "failed_evaluation_count": summary.get("failed_evaluations", 0),
+        "oldest_pending_age_seconds": summary.get("oldest_pending_age_seconds"),
+        "last_daily_snapshot": summary.get("last_daily_snapshot"),
+        "last_validation_run": summary.get("last_validation_at"),
+        "maintenance_authority": summary.get("maintenance_authority"),
+    }
 
 
 def build_diagnostic_bundle(db: Session | None = None) -> dict[str, Any]:

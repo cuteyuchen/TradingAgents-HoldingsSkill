@@ -644,3 +644,251 @@ export interface ArchiveContext {
   latest_by_code: Record<string, any>
   same_day_advice: any[]
 }
+
+export interface ShadowPosition {
+  id: number
+  code: string
+  name?: string | null
+  security_type?: string | null
+  etf_category?: string | null
+  quantity: number
+  sellable_quantity: number
+  average_cost: number
+  current_mark?: number | null
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  last_mark_at?: string | null
+  acquired_decision_ids?: number[]
+  metadata?: Record<string, unknown>
+}
+
+export interface ShadowAccount {
+  id: number
+  user_id: number
+  source_portfolio_id: number
+  name: string
+  status: string
+  mode: string
+  base_currency: string
+  paper_only: true
+  initialized_from_snapshot_id?: number | null
+  initialized_at: string
+  starting_cash: number
+  current_cash: number
+  reserved_cash: number
+  shadow_generation: number
+  execution_contract_version: string
+  expires_policy: string
+  version: number
+  created_at: string
+  paused_at?: string | null
+  closed_at?: string | null
+  pending_intent_count: number
+  shadow_state?: { cash: number; ledger_entry_count: number; as_of?: string | null }
+  positions: ShadowPosition[]
+}
+
+export interface ShadowDecision {
+  id: number
+  portfolio_id: number
+  trade_date: string
+  decision_kind: string
+  decision_checkpoint?: string | null
+  trigger_type?: string | null
+  trigger_event_id?: number | null
+  trigger_priority?: string | null
+  source_analysis_job_id?: number | null
+  source_analysis_run_id?: number | null
+  portfolio_snapshot_id?: number | null
+  parameter_set_version?: string | null
+  parameter_set_hash?: string | null
+  runtime_contract_version: string
+  decision_contract_version: string
+  final_action: string
+  market_regime?: string | null
+  market_score?: number | null
+  market_quality?: string | null
+  portfolio_quality?: string | null
+  confidence: number
+  data_coverage?: number | null
+  decision_finalized_at: string
+  captured_at: string
+  quality_status: string
+  live_evidence_eligibility: string
+  observation_hash: string
+  calculation_key: string
+  [key: string]: any
+}
+
+export interface ShadowOutcome {
+  id: number
+  decision_observation_id: number
+  shadow_account_id?: number | null
+  shadow_generation?: number | null
+  target_type: string
+  target_key: string
+  recommended_action: string
+  horizon_trading_days: number
+  reference_trade_date?: string | null
+  reference_at?: string | null
+  reference_price?: number | null
+  reference_price_basis?: string | null
+  target_trade_date?: string | null
+  target_price?: number | null
+  forward_return?: number | null
+  benchmark_return?: number | null
+  excess_return?: number | null
+  mfe?: number | null
+  mae?: number | null
+  drawdown?: number | null
+  direction?: string | null
+  execution_eligible?: boolean | null
+  shadow_filled?: boolean | null
+  fill_delay_seconds?: number | null
+  fill_drift?: number | null
+  candidate_opportunity_cost?: number | null
+  drawdown_avoided?: number | null
+  risk_off_correct?: boolean | null
+  status: string
+  quality_status: string
+  live_evidence_eligibility: string
+  next_due_date?: string | null
+  computed_at?: string | null
+}
+
+export interface ShadowDecisionDetail extends ShadowDecision {
+  reason_codes?: string[]
+  selected_actions?: Array<Record<string, unknown>>
+  selected_candidate_ids?: number[]
+  source_lineage?: Record<string, unknown>
+  created_at?: string | null
+  execution?: { intents: ShadowOrder[]; fills: ShadowFill[] }
+  outcomes?: ShadowOutcome[]
+  actual_alignment?: Array<{
+    id: number
+    code: string
+    side: string
+    status: string
+    actual_trade_ledger_id?: number | null
+    matched_at?: string | null
+    time_delta_seconds?: number | null
+    quantity_ratio?: number | null
+    window_start?: string | null
+    window_end?: string | null
+    source_refs?: Record<string, unknown>
+  }>
+}
+
+export interface ShadowOrder {
+  id: number
+  shadow_account_id: number
+  shadow_generation: number
+  decision_observation_id: number
+  action_index: number
+  code: string
+  security_type?: string | null
+  side: string
+  target_qty?: number | null
+  target_notional?: number | null
+  target_weight?: number | null
+  decision_reference_price?: number | null
+  decision_reference_basis?: string | null
+  decision_finalized_at: string
+  earliest_executable_at: string
+  status: string
+  reason_codes: string[]
+  created_at: string
+  expires_at: string
+  idempotency_key: string
+}
+
+export interface ShadowFill {
+  id: number
+  order_intent_id: number
+  shadow_account_id: number
+  shadow_generation: number
+  code: string
+  side: string
+  quantity: number
+  price: number
+  gross_amount: number
+  commission: number
+  tax: number
+  total_cost: number
+  price_basis: string
+  quote_observation_id: number
+  quote_captured_at: string
+  fill_at: string
+  fill_quality: string
+  execution_delay_seconds?: number | null
+  execution_delay_price_drift?: number | null
+  slippage_not_modeled: true
+  [key: string]: any
+}
+
+export interface ShadowDailySnapshot {
+  id: number
+  account_id: number
+  shadow_generation: number
+  trade_date: string
+  cash: number
+  market_value: number
+  total_equity: number
+  daily_return?: number | null
+  cumulative_return?: number | null
+  drawdown?: number | null
+  turnover: number
+  position_count: number
+  action_count: number
+  no_action_count: number
+  benchmark_return?: number | null
+  excess_return?: number | null
+  market_regime?: string | null
+  price_basis?: string | null
+  price_basis_compatible: boolean
+  [key: string]: any
+}
+
+export interface ShadowPerformance {
+  account_id: number
+  shadow_generation: number
+  status: string
+  paper_only: true
+  execution_contract_version: string
+  current_cash: number
+  reserved_cash: number
+  current_equity?: number | null
+  cumulative_return?: number | null
+  benchmark_return?: number | null
+  excess_return?: number | null
+  max_drawdown?: number | null
+  turnover: number
+  transaction_cost: number
+  position_count: number
+  action_count: number
+  no_action_count: number
+  decision_count: number
+  fill_count: number
+  sample_days: number
+  snapshots: ShadowDailySnapshot[]
+}
+
+export interface ShadowValidation {
+  user_id: number
+  portfolio_id?: number | null
+  live_sample_days: number
+  decision_count: number
+  cohorts: Array<{
+    cohort: Record<string, unknown>
+    decision_count: number
+    action_count: number
+    no_action_count: number
+    blocked_count: number
+    sample_days: number
+    completed_outcome_count: number
+    mean_excess_return?: number | null
+    evidence_status: string
+  }>
+  historical_backtest_included: false
+  limitations: string[]
+}

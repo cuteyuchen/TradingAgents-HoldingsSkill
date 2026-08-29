@@ -157,6 +157,43 @@ Phase K makes the self-hosted deployment observable without changing investment 
 - A system health `BLOCKED` state is not a sell signal. Provider outage is reflected in operational health, while liveness stays true so Docker does not restart-loop solely because a provider is temporarily unavailable.
 - All Phase H/I/J lease recovery, worker fencing, and governance fail-close behavior remains authoritative. Phase K only observes and reports recovery; it does not add a second scheduler or a second job queue.
 
+## Live Decision Validation and Shadow Mode (Phase N)
+
+When the production analysis path is connected to the Phase N validation layer,
+the final decision remains the server-owned `AnalysisRun.structured_result_json.result`
+after the Portfolio Decision Gate. Capture it as an immutable
+`LiveDecisionObservation` with its checkpoint or trigger lineage, finalized time,
+parameter/runtime/prompt/model lineage, and observation hash. Candidate `ACTION`
+is never a final trade instruction; only a final Portfolio `ACTION` may create a
+paper `ShadowOrderIntent`. `NO_ACTION` is a first-class observation and outcome.
+
+Shadow mode is strictly paper-only. It must never call a broker, write a real
+Trade Ledger, change a confirmed PortfolioSnapshot, change real holdings or
+broker cash, or feed Shadow positions back into production analysis. Shadow
+accounts are initialized explicitly from a confirmed snapshot and evolve in an
+isolated generation-bound append-only ledger. Rebase creates a new generation;
+it does not overwrite prior evidence or continuously synchronize the real
+portfolio.
+
+Paper execution is deterministic and does not call the LLM. A fill may use only
+the first persisted `LiveQuoteObservation` whose application-captured timestamp
+is strictly after `decision_finalized_at`, has exact time precision, valid or
+policy-allowed degraded quality, an active instrument, positive price, and no
+blocking suspension or limit condition. A 15:10 decision waits for the next
+trading session; it never fills from the same-day close or the decision
+reference price. Missing, stale, inexact, or provider-outage quotes leave the
+intent pending or expired. Stock T+1, conservative unknown ETF settlement,
+legal lot size, Shadow cash, Shadow constraints, and the Phase E transaction
+cost helper remain authoritative.
+
+Keep Decision Observation, Order Intent, Fill, Ledger, Daily Snapshot, Outcome,
+and Actual Alignment as separate facts. Actual Alignment may inspect only
+confirmed Trade Ledger timestamps within the documented window; it must not
+infer user intent from holdings differences. Live validation is independent of
+Historical Research and never auto-applies calibration, thresholds, factors, or
+model changes. Paper PnL is a sample-period validation result, not a guarantee
+of future performance.
+
 ## Quality-First Workflow
 
 Target routine execution time is about 10 minutes, but this is a progress

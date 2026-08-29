@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from app.system.release import code_head_revision
+
 
 def _upgrade(backend_dir: Path, database_path: Path, revision: str) -> None:
     env = os.environ.copy()
@@ -45,7 +47,7 @@ def test_deployed_phase_h_0015_upgrades_to_current_head(tmp_path):
     _upgrade(backend_dir, database_path, "head")
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260828_0019",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (code_head_revision(),)
         for table, columns in {
             "daily_review_runs": {"lease_expires_at", "attempt_count"},
             "daily_operational_checkpoints": {"lease_expires_at"},
@@ -68,4 +70,15 @@ def test_deployed_phase_h_0015_upgrades_to_current_head(tmp_path):
             "etf_metadata_history",
             "price_basis_metadata",
             "historical_data_sync_runs",
+        } <= tables
+        assert {
+            "live_decision_observations",
+            "live_quote_observations",
+            "shadow_accounts",
+            "shadow_order_intents",
+            "shadow_fills",
+            "shadow_ledger_entries",
+            "shadow_daily_snapshots",
+            "live_decision_outcomes",
+            "decision_actual_alignments",
         } <= tables

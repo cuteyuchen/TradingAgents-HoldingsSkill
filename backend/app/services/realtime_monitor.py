@@ -21,6 +21,7 @@ from ..trigger_models import TriggerPlan
 from ..triggers.engine import TriggerDetection, evaluate_holding_plan, evaluate_market_scores
 from ..triggers.resolution import create_trigger_analysis_job
 from ..triggers.service import apply_detection, detection_would_confirm, expire_unmatched_detections
+from ..shadow_models import ShadowAccount, ShadowOrderIntent
 from ..v2_models import PortfolioSnapshot
 from .market_engine import MarketEngine
 from .market_snapshot_service import collect_snapshot_quotes
@@ -153,8 +154,28 @@ class RealtimeMonitor:
                 key: {str(row.code) for row in snapshot.holdings if row.code}
                 for key, snapshot in holdings_by_portfolio.items()
             }
-            codes = list(dict.fromkeys(row.target_key for row in active_plans))
+            codes = list(dict.fromkeys(
+                [code for values in holding_codes_by_portfolio.values() for code in values]
+                + [row.target_key for row in active_plans]
+                + [row.code for row in db.query(ShadowOrderIntent.code).join(
+                    ShadowAccount,
+                    ShadowOrderIntent.shadow_account_id == ShadowAccount.id,
+                ).filter(
+                    ShadowOrderIntent.status.in_(("PENDING", "PARTIAL")),
+                    ShadowAccount.status == "ACTIVE",
+                    *( [ShadowAccount.user_id == user_id] if user_id is not None else [] ),
+                    *( [ShadowAccount.source_portfolio_id == portfolio_id] if portfolio_id is not None else [] ),
+                ).all()]
+            ))
             quotes = self._holding_quotes(codes) if codes else {}
+            if not dry_run:
+                summary["shadow"] = self._persist_shadow_quotes_and_process(
+                    now=now,
+                    codes=codes,
+                    quotes=quotes,
+                    user_id=user_id,
+                    portfolio_id=portfolio_id,
+                )
             matched_keys: set[str] = set()
             evaluated_plans: list[TriggerPlan] = []
             pending_holding: list[tuple[TriggerPlan, TriggerDetection]] = []
@@ -314,6 +335,52 @@ class RealtimeMonitor:
             }
         except Exception:
             return {}
+
+    def _persist_shadow_quotes_and_process(
+        self,
+        *,
+        now: datetime,
+        codes: list[str],
+        quotes: dict[str, NormalizedQuote],
+        user_id: int | None,
+        portfolio_id: int | None,
+    ) -> dict[str, Any]:
+        """Persist the monitor's bounded quote sample and advance paper fills.
+
+        Shadow writes use a separate session so a validation failure cannot
+        roll back TriggerEvent or scheduler facts from the monitor tick.
+        """
+
+        shadow_db = self.session_factory()
+        try:
+            from ..shadow.service import persist_live_quote_observation, process_pending_shadow_intents
+
+            persisted = 0
+            for code in codes:
+                quote = quotes.get(code)
+                if quote is None:
+                    continue
+                _, created = persist_live_quote_observation(
+                    shadow_db,
+                    quote,
+                    captured_at=now,
+                    captured_at_precision="EXACT",
+                )
+                persisted += int(created)
+            fills = process_pending_shadow_intents(
+                shadow_db,
+                now=now,
+                user_id=user_id,
+                portfolio_id=portfolio_id,
+            )
+            shadow_db.commit()
+            return {"status": "ok", "quotes_persisted": persisted, "fills": fills}
+        except Exception as exc:  # noqa: BLE001
+            shadow_db.rollback()
+            logger.exception("Shadow quote persistence/fill processing failed")
+            return {"status": "degraded", "error": str(exc)[:300], "quotes_persisted": 0, "fills": {}}
+        finally:
+            shadow_db.close()
 
     @staticmethod
     def _as_utc(value: datetime | None) -> datetime | None:

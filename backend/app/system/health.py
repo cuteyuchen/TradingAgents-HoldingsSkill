@@ -252,6 +252,134 @@ def worker_recovery_status(db: Session) -> dict[str, Any]:
     }
 
 
+def _shadow_db_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+def _shadow_db_datetime_text(value: Any) -> str | None:
+    parsed = _shadow_db_datetime(value)
+    return parsed.isoformat() if parsed is not None else (str(value) if value else None)
+
+
+def shadow_status(db: Session) -> dict[str, Any]:
+    """Return aggregate shadow health without exposing portfolio details."""
+    required = (
+        "shadow_accounts",
+        "shadow_order_intents",
+        "live_decision_outcomes",
+        "shadow_daily_snapshots",
+    )
+    missing = sorted(name for name in required if not table_exists(db, name))
+    empty: dict[str, Any] = {
+        "schema_installed": not missing,
+        "active_shadow_accounts": 0,
+        "active_generation_ids": [],
+        "pending_intents": 0,
+        "blocked_intents": 0,
+        "expired_pending_intents": 0,
+        "failed_evaluations": 0,
+        "oldest_pending_created_at": None,
+        "oldest_pending_age_seconds": None,
+        "last_daily_snapshot": None,
+        "last_validation_at": None,
+        "maintenance_authority": "existing_scheduler",
+    }
+    if missing:
+        return {
+            "status": "DEGRADED",
+            "reason": "shadow_schema_not_installed",
+            "missing_tables": missing,
+            **empty,
+        }
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    try:
+        active_accounts = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_accounts WHERE status = 'ACTIVE'"
+        )).scalar_one() or 0)
+        active_generations = [
+            int(value)
+            for value in db.execute(text(
+                "SELECT shadow_generation FROM shadow_accounts "
+                "WHERE status = 'ACTIVE' ORDER BY id"
+            )).scalars().all()
+            if value is not None
+        ]
+        pending = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_order_intents "
+            "WHERE status IN ('PENDING', 'PARTIAL')"
+        )).scalar_one() or 0)
+        blocked = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_order_intents WHERE status = 'BLOCKED'"
+        )).scalar_one() or 0)
+        expired_pending = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_order_intents "
+            "WHERE status IN ('PENDING', 'PARTIAL') AND expires_at < :now"
+        ), {"now": now}).scalar_one() or 0)
+        failed_evaluations = int(db.execute(text(
+            "SELECT COUNT(*) FROM live_decision_outcomes "
+            "WHERE status IN ('FAILED', 'ERROR')"
+        )).scalar_one() or 0)
+        oldest_pending = db.execute(text(
+            "SELECT MIN(created_at) FROM shadow_order_intents "
+            "WHERE status IN ('PENDING', 'PARTIAL')"
+        )).scalar_one_or_none()
+        last_snapshot = db.execute(text(
+            "SELECT trade_date, created_at FROM shadow_daily_snapshots "
+            "ORDER BY trade_date DESC, created_at DESC LIMIT 1"
+        )).mappings().first()
+        last_validation = db.execute(text(
+            "SELECT MAX(computed_at) FROM live_decision_outcomes "
+            "WHERE computed_at IS NOT NULL"
+        )).scalar_one_or_none()
+    except Exception:  # noqa: BLE001
+        return {
+            "status": "DEGRADED",
+            "reason": "shadow_health_unavailable",
+            "missing_tables": [],
+            **empty,
+        }
+
+    oldest_dt = _shadow_db_datetime(oldest_pending)
+    oldest_age = max(0.0, (now - oldest_dt).total_seconds()) if oldest_dt else None
+    reasons: list[str] = []
+    if expired_pending:
+        reasons.append("EXPIRED_PENDING_INTENTS")
+    if failed_evaluations:
+        reasons.append("FAILED_OUTCOME_EVALUATIONS")
+    return {
+        "status": "DEGRADED" if reasons else "OK",
+        "reason": ";".join(reasons) if reasons else None,
+        "missing_tables": [],
+        "schema_installed": True,
+        "active_shadow_accounts": active_accounts,
+        "active_generation_ids": active_generations,
+        "pending_intents": pending,
+        "blocked_intents": blocked,
+        "expired_pending_intents": expired_pending,
+        "failed_evaluations": failed_evaluations,
+        "oldest_pending_created_at": _shadow_db_datetime_text(oldest_pending),
+        "oldest_pending_age_seconds": round(oldest_age, 3) if oldest_age is not None else None,
+        "last_daily_snapshot": {
+            "trade_date": str(last_snapshot["trade_date"]) if last_snapshot else None,
+            "created_at": _shadow_db_datetime_text(last_snapshot["created_at"]) if last_snapshot else None,
+        } if last_snapshot else None,
+        "last_validation_at": _shadow_db_datetime_text(last_validation),
+        "maintenance_authority": "existing_scheduler",
+    }
+
+
 def backup_status() -> dict[str, Any]:
     freshness = backup_freshness()
     return {
@@ -369,6 +497,7 @@ def operational_health(db: Session | None = None) -> dict[str, Any]:
             "scheduler": scheduler_status(),
             "realtime_monitor": monitor_status(),
             "worker_recovery": worker_recovery_status(session),
+            "shadow": shadow_status(session),
         }
         severity = {"OK": 0, "UNKNOWN": 1, "DEGRADED": 2, "BLOCKED": 3}
         overall = max(
@@ -397,5 +526,6 @@ __all__ = [
     "readiness",
     "scheduler_status",
     "schema_status",
+    "shadow_status",
     "worker_recovery_status",
 ]

@@ -331,6 +331,32 @@ def _dispatch_research_backtests(db: Session) -> None:
         logger.exception("research backtest worker dispatch failed")
 
 
+def _run_shadow_maintenance(*, now_utc: datetime) -> None:
+    """Advance the paper-only validation layer under the existing scheduler."""
+
+    shadow_db = SessionLocal()
+    try:
+        from ..shadow.service import maintain_shadow
+
+        local = now_utc.astimezone(CHINA_TZ)
+        result = maintain_shadow(shadow_db, as_of=now_utc)
+        shadow_db.commit()
+        if result.get("fills", {}).get("filled") or result.get("outcomes", {}).get("completed"):
+            logger.info(
+                "shadow_maintenance fills=%s outcomes=%s snapshots=%s",
+                result.get("fills"),
+                result.get("outcomes"),
+                len(result.get("snapshots") or []),
+            )
+    except Exception:
+        shadow_db.rollback()
+        # Shadow is a validation subsystem.  Its failure must not block
+        # production AnalysisJob creation or the existing daily workflow.
+        logger.exception("shadow maintenance failed local=%s", now_utc.astimezone(CHINA_TZ).isoformat())
+    finally:
+        shadow_db.close()
+
+
 def _sync_monitor_lifecycle(now_utc: datetime, *, calendar: TradingCalendarService) -> None:
     """Restart-safe monitor lifecycle driven by the same scheduler clock."""
 
@@ -482,6 +508,7 @@ def tick_schedules() -> None:
                 schedule.next_run_at = next_run(schedule, now_utc, db=db)
             db.commit()
             return
+        _run_shadow_maintenance(now_utc=now_utc)
         if not calendar_row.is_open:
             for schedule in rows:
                 schedule.next_run_at = next_run(schedule, now_utc, db=db)

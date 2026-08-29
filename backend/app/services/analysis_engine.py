@@ -1836,6 +1836,35 @@ def run_analysis_job(job_id: int) -> None:
         finally:
             memory_db.close()
 
+        # Live Decision Observation is a validation-side effect.  It runs in
+        # its own session after the authoritative AnalysisRun commit so a
+        # shadow schema/worker failure can never roll back the production
+        # decision or make the analysis endpoint fail.
+        shadow_db = SessionLocal()
+        try:
+            from ..shadow.service import capture_live_decision_observation
+
+            persisted_run = shadow_db.query(AnalysisRun).filter(AnalysisRun.id == run.id).first()
+            observation = (
+                capture_live_decision_observation(shadow_db, persisted_run)
+                if persisted_run is not None
+                else None
+            )
+            shadow_db.commit()
+            if observation is not None:
+                logger.info(
+                    "shadow_observation portfolio=%s analysis_run=%s observation=%s action=%s",
+                    job.portfolio_id,
+                    run.id,
+                    observation.id,
+                    observation.final_action,
+                )
+        except Exception:
+            shadow_db.rollback()
+            logger.exception("Live Decision Observation capture failed for analysis run %s", run.id)
+        finally:
+            shadow_db.close()
+
         # Realtime triggers are resolved only after the authoritative AnalysisRun
         # exists.  Standard/Deep runs may also refresh explicit structured plans;
         # natural-language conditions remain report-only.

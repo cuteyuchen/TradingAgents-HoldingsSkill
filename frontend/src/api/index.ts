@@ -38,6 +38,14 @@ import type {
   ResearchScope,
   ReplayMode,
   Schedule,
+  ShadowAccount,
+  ShadowDailySnapshot,
+  ShadowDecision,
+  ShadowDecisionDetail,
+  ShadowFill,
+  ShadowOrder,
+  ShadowPerformance,
+  ShadowValidation,
   TokenPair,
   User,
 } from './types'
@@ -153,6 +161,67 @@ export const api = {
   listRuns: (portfolioId?: number) => request<AnalysisRunSummary[]>(`/api/v2/analysis/runs${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`),
   getRun: (id: number) => request<AnalysisRunDetail>(`/api/v2/analysis/runs/${id}`),
   compareRun: (id: number) => request<Record<string, unknown>>(`/api/v2/analysis/runs/${id}/comparison`),
+
+  listShadowAccounts: (portfolioId?: number) => request<ShadowAccount[]>(
+    `/api/v3/shadow/accounts${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`,
+  ),
+  createShadowAccount: (payload: { portfolio_id: number; snapshot_id?: number | null; name?: string }) =>
+    request<ShadowAccount>('/api/v3/shadow/accounts', { method: 'POST', body: payload }),
+  getShadowAccount: (accountId: number) => request<ShadowAccount>(`/api/v3/shadow/accounts/${accountId}`),
+  pauseShadowAccount: (accountId: number) => request<ShadowAccount>(`/api/v3/shadow/accounts/${accountId}/pause`, { method: 'POST' }),
+  resumeShadowAccount: (accountId: number) => request<ShadowAccount>(`/api/v3/shadow/accounts/${accountId}/resume`, { method: 'POST' }),
+  rebaseShadowAccount: (accountId: number, snapshotId?: number | null) => request<ShadowAccount>(
+    `/api/v3/shadow/accounts/${accountId}/rebase`,
+    { method: 'POST', body: { snapshot_id: snapshotId ?? null, acknowledge: true } },
+  ),
+  listShadowDecisions: (params: { portfolio_id?: number; account_id?: number; final_action?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
+    if (params.account_id) query.set('account_id', String(params.account_id))
+    if (params.final_action) query.set('final_action', params.final_action)
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<ShadowDecision[]>(`/api/v3/shadow/decisions${suffix}`)
+  },
+  getShadowDecision: (observationId: number) => request<ShadowDecisionDetail>(`/api/v3/shadow/decisions/${observationId}`),
+  alignShadowDecision: (observationId: number) => request<{ items: ShadowDecisionDetail['actual_alignment'] }>(
+    `/api/v3/shadow/decisions/${observationId}/actual-alignment`,
+    { method: 'POST' },
+  ),
+  listShadowOrders: (params: { account_id?: number; portfolio_id?: number; generation?: number; status?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.account_id) query.set('account_id', String(params.account_id))
+    if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
+    if (params.generation) query.set('generation', String(params.generation))
+    if (params.status) query.set('status', params.status)
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<ShadowOrder[]>(`/api/v3/shadow/orders${suffix}`)
+  },
+  listShadowFills: (params: { account_id?: number; portfolio_id?: number; generation?: number; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.account_id) query.set('account_id', String(params.account_id))
+    if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
+    if (params.generation) query.set('generation', String(params.generation))
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<ShadowFill[]>(`/api/v3/shadow/fills${suffix}`)
+  },
+  getShadowPerformance: (accountId: number, generation?: number) => request<ShadowPerformance>(
+    `/api/v3/shadow/performance?account_id=${accountId}${generation ? `&generation=${generation}` : ''}`,
+  ),
+  getShadowValidation: (portfolioId?: number) => request<ShadowValidation>(
+    `/api/v3/shadow/validation${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`,
+  ),
+  listShadowDailySnapshots: (params: { account_id?: number; portfolio_id?: number; generation?: number; limit?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.account_id) query.set('account_id', String(params.account_id))
+    if (params.portfolio_id) query.set('portfolio_id', String(params.portfolio_id))
+    if (params.generation) query.set('generation', String(params.generation))
+    if (params.limit) query.set('limit', String(params.limit))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request<ShadowDailySnapshot[]>(`/api/v3/shadow/daily${suffix}`)
+  },
 
   listSchedules: () => request<Schedule[]>('/api/v2/schedules'),
   createSchedule: (payload: Record<string, unknown>) => request<Schedule>('/api/v2/schedules', { method: 'POST', body: payload }),

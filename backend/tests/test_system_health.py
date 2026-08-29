@@ -23,6 +23,7 @@ from app.system.health import (
     require_runtime_ready_for_risk_work,
     run_quick_check,
     schema_status,
+    shadow_status,
 )
 from app.system.logging import RequestIDMiddleware, configure_logging, redact_text
 from app.system.release import build_release_metadata, schema_state
@@ -211,6 +212,23 @@ def test_database_status_defers_heavy_quick_check(monkeypatch):
         assert called["count"] == 0
         assert result["checks"]["database"]["quick_check_source"] == "deferred"
         assert result["checks"]["database"]["status"] == "OK"
+    finally:
+        db.close()
+
+
+def test_shadow_status_is_optional_and_aggregate_only(monkeypatch):
+    db = _full_db()
+    try:
+        monkeypatch.setattr(
+            "app.system.health.table_exists",
+            lambda _db, name: name != "shadow_accounts",
+        )
+        result = shadow_status(db)
+        assert result["status"] == "DEGRADED"
+        assert result["reason"] == "shadow_schema_not_installed"
+        assert result["schema_installed"] is False
+        assert result["active_shadow_accounts"] == 0
+        assert "shadow_accounts" in result["missing_tables"]
     finally:
         db.close()
 

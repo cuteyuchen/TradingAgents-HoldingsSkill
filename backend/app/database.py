@@ -49,6 +49,7 @@ def init_db() -> None:
         research,
         candidates,
         portfolio_models,
+        shadow_models,
         trigger_models,
         v2_models,
     )

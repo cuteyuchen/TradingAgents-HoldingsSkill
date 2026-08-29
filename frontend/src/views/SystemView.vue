@@ -260,6 +260,7 @@ onMounted(() => void load())
             <div><span>Monitor</span><span>{{ health.components.realtime_monitor?.status }}</span></div>
             <div><span>Recovery</span><span>{{ health.components.worker_recovery?.status }} · {{ recovery ? Object.values(recovery.counts).reduce((a, b) => a + b, 0) : '—' }} stale</span></div>
             <div><span>Backup</span><span>{{ health.components.backup?.status }} · {{ health.components.backup?.backup_count || 0 }}</span></div>
+            <div><span>Shadow</span><span>{{ health.components.shadow?.status }} · {{ health.components.shadow?.pending_intents || 0 }} pending / {{ health.components.shadow?.blocked_intents || 0 }} blocked</span></div>
           </div>
         </section>
       </div>
