@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-08-29T18:19:12",
+  "scope": "MARKET",
+  "symbols": 500,
+  "decision_dates": 60,
+  "warmup_trading_days": 130,
+  "seed_row_counts": {
+    "calendar_days": 130,
+    "cohort_days": 60,
+    "symbols": 500,
+    "classification_rows": 30000,
+    "status_rows": 30000,
+    "valuation_rows": 30000,
+    "basis_rows": 30000,
+    "bar_rows": 65000
+  },
+  "seed_seconds": 5.981,
+  "wall_seconds": 309.89,
+  "rss_peak_mb": 1998.05,
+  "sql_select_count": 191,
+  "dataset_query_count": 420,
+  "date_count": 60,
+  "capability": "PARTIAL_PIT_RECOMPUTE",
+  "deterministic_hash": "a2fd55ee20654334e46d43144a188e104b28c93bc435dd858998825be3963177",
+  "missing_inputs": [],
+  "partial_inputs": [
+    "daily_bars",
+    "historical_security_state"
+  ],
+  "limitations": [
+    "historical industry/diffusion input is not persisted; market is PARTIAL unless industry history is complete"
+  ]
+}

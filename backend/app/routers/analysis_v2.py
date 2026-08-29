@@ -12,11 +12,23 @@ from sqlalchemy.orm import Session
 from ..database import SessionLocal, get_db
 from ..decision_contract import canonicalize_analysis_mode
 from ..services.analysis_engine import run_analysis_job
+from ..services.analysis_admission import active_portfolio_analysis
+from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk_work
 from ..v2_dependencies import get_current_user
 from ..v2_models import AnalysisJob, AnalysisRun, PortfolioSnapshot, User
 from ..v2_schemas import AnalysisJobCreate, AnalysisJobResponse, AnalysisRunDetail, AnalysisRunSummary
 
 router = APIRouter(prefix="/api/v2/analysis", tags=["v2-analysis"])
+
+
+def _require_ready(db: Session) -> None:
+    try:
+        require_runtime_ready_for_risk_work(db)
+    except RuntimeNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
 
 def _get_job(db: Session, user_id: int, job_id: int) -> AnalysisJob:
@@ -84,6 +96,7 @@ def create_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AnalysisJobResponse:
+    _require_ready(db)
     snapshot = (
         db.query(PortfolioSnapshot)
         .filter(
@@ -95,14 +108,10 @@ def create_job(
     )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Confirmed snapshot not found.")
-    running = (
-        db.query(AnalysisJob)
-        .filter(
-            AnalysisJob.user_id == current_user.id,
-            AnalysisJob.snapshot_id == snapshot.id,
-            AnalysisJob.status.in_(["queued", "running", "retrying"]),
-        )
-        .first()
+    running = active_portfolio_analysis(
+        db,
+        user_id=current_user.id,
+        portfolio_id=snapshot.portfolio_id,
     )
     if running:
         return _job_response(running)
@@ -157,6 +166,7 @@ def retry_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AnalysisJobResponse:
+    _require_ready(db)
     row = _get_job(db, current_user.id, job_id)
     if row.status not in {"failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Only failed or cancelled jobs can be retried.")

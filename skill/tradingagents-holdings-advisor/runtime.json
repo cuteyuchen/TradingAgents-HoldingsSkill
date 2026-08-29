@@ -1,7 +1,7 @@
 {
   "name": "tradingagents-holdings-advisor",
-  "version": "2.1.0",
-  "prompt_version": "2026-08-22",
+  "version": "2.4.0",
+  "prompt_version": "2026-08-26",
   "description": "Portfolio-aware A-share and ETF holdings analysis runtime contract.",
   "current_holdings_precedence": [
     "confirmed_portfolio_snapshot",
@@ -19,6 +19,7 @@
     "risk_revision",
     "final_quote_refresh",
     "portfolio_manager_final",
+    "memory_context",
     "persistence_and_notification"
   ],
   "rules": [
@@ -35,10 +36,28 @@
     "Remove every candidate whose code is already present in current holdings; preserve any supported add or conditional-add verdict in the holding action plan.",
     "Final quote-sensitive fields must be refreshed immediately before the final portfolio decision.",
     "The system provides research assistance only, never promises returns, and never executes brokerage orders.",
-    "Total portfolio exposure is a risk input, not a universal fixed hard gate; until Dynamic Risk Budget exists, do not force a trade or cash raise solely because exposure crosses one fixed percentage."
+    "Total portfolio exposure is a risk input, not a universal fixed hard gate; until Dynamic Risk Budget exists, do not force a trade or cash raise solely because exposure crosses one fixed percentage.",
+    "Portfolio Engine constraints are deterministic facts: stock 20% and classified sector/theme ETF 30% caps constrain new risk, available_qty constrains sellable quantity, and a FROZEN market state blocks actionable risk increases without forcing a sell."
+    ,"Phase F deterministic Candidate Engine is authoritative for new-position candidates: it owns universe eligibility, scores, Entry, risk/reward, Portfolio Fit, Decision Edge, ranking, and WATCHLIST/READY/ACTION stages."
+    ,"Analysis modes must use the Candidate Engine context: fast reads only a recent reliable CandidateRun; standard/deep may run the local-cache scan; candidate scanning must not fan out per-security network requests."
+    ,"CandidateRun quality uses the structural candidate denominator before data exclusions: quote/bar coverage >=98% is NORMAL, 95%-<98% is DEGRADED, <95% is BLOCKED_FOR_ACTION; MISSING closes READY and ACTION, and BLOCKED_FOR_ACTION closes ACTION."
+    ,"A daily_bar_cache_close_proxy is observation/diagnostic evidence only. It preserves quote provenance and can never produce an intraday ACTION candidate."
+    ,"The model may explain or veto a deterministic ACTION candidate, but it may not invent a code, promote READY/WATCHLIST, alter deterministic scores, or turn a held security into a new-position candidate."
+    ,"Market FROZEN, MISSING, or INVALID, insufficient factor coverage, low Entry, low risk/reward, weak Portfolio Fit, or insufficient Decision Edge means no new-risk ACTION; ACTION=0 is normal."
+    ,"Historical Memory is advisory evidence only: current deterministic Market, Portfolio, Candidate, Data Quality, and Decision Gates always take precedence. Do not copy a historical action because it was profitable, and do not reverse a valid current action merely because a historical case lost."
+    ,"Decision Memory preserves immutable decision snapshots, confirmed user execution facts, deterministic trading-day Outcomes, and descriptive Daily Reviews. It never changes Candidate, Portfolio, Market, Hard Cap, Risk Gate, or prompt weights."
+    ,"Daily Workflow is deterministic orchestration over existing Market, Portfolio, Candidate, Trigger, Analysis, Ledger, and Memory facts. It does not create a second scheduler, execute broker orders, or turn Dashboard reads into recomputation."
+    ,"The Daily Investment Workbench is read-only: Candidate ACTION is not a final buy instruction, Trigger is a request for re-analysis, and Portfolio Gate remains the final authority. Data outages pause new risk and do not force automatic sales of existing holdings."
+    ,"Daily Review is idempotent and may be refreshed in place when late Outcomes, revised Outcome sources, or Ledger revisions arrive; refreshes preserve the same ReviewRun identity and increment refresh_count."
+    ,"Material notifications use explicit severity (INFO, IMPORTANT, ACTION_REQUIRED, CRITICAL), event dedupe keys, and cooldowns. Regime changes, Candidate stage transitions, confirmed P0/P1 Triggers, provider outages, and NO_ACTION resolutions are meaningful events; repeated unchanged observations are not."
+    ,"Historical Calibration is evidence only. Calibration never modifies live production parameters automatically, and CONSIDER_CHANGE means the change is worth human review, not that it is applied."
+    ,"Only an explicitly activated ParameterSetVersion changes future production behavior. Approval creates an immutable APPROVED version; activation is a separate explicit step, and the model cannot approve, activate, or roll back parameter versions."
+    ,"Rollback is an explicit audited governance operation that creates a new version; it never reactivates an old row, and it is never triggered automatically by performance."
+    ,"A running Market, Candidate, Analysis, or Backtest keeps the parameter snapshot it started with. New runs read the active immutable parameter set and record its lineage."
+    ,"A standard parameter proposal must bind to the current ACTIVE snapshot: calibration current/challenger values and the originating Backtest parameter version/hash must match, otherwise the proposal is rejected. Manual proposals are always MANUAL_EXCEPTION and require explicit risk acknowledgement."
   ],
   "decision_contract": {
-    "version": "2.1.0",
+    "version": "2.4.0",
     "default_portfolio_action": "no_action",
     "candidates": {
       "min": 0,
@@ -49,7 +68,7 @@
     "hard_caps": {
       "stock": 0.20,
       "sector_theme_etf": 0.30,
-      "deterministic_enforcement": false
+      "deterministic_enforcement": true
     },
     "horizons": {
       "short": {
@@ -94,6 +113,48 @@
     "13:05": "Fast review of midday sector rotation and morning-signal validation.",
     "14:30": "Standard late-session overnight-carry and risk control.",
     "15:10": "Deep daily review and final portfolio consistency check."
+  },
+  "daily_workflow": {
+    "timezone": "Asia/Shanghai",
+    "states": [
+      "PRE_MARKET_MAINTENANCE",
+      "PRE_MARKET_READY",
+      "AUCTION",
+      "MORNING_SESSION",
+      "LUNCH_BREAK",
+      "AFTERNOON_SESSION",
+      "LATE_SESSION",
+      "MARKET_CLOSED",
+      "POST_CLOSE_ANALYSIS",
+      "DAILY_REVIEW",
+      "DAY_COMPLETE",
+      "NON_TRADING_DAY"
+    ],
+    "fixed_checkpoints": {
+      "08:45": "Data Maintenance",
+      "09:20": "Pre-market Snapshot",
+      "09:25": "Auction Observation",
+      "09:30": "Realtime Monitor Start",
+      "11:30": "Morning Snapshot and lunch pause",
+      "15:00": "Realtime Monitor stop and close snapshot",
+      "15:30": "Memory Maintenance and Daily Review",
+      "20:30": "Optional critical-event hook only"
+    },
+    "recovery": {
+      "restart_safe": true,
+      "analysis_catch_up_minutes": 15,
+      "review_catch_up": true,
+      "checkpoint_idempotent": true
+    }
+  },
+  "notification_semantics": {
+    "severity": ["INFO", "IMPORTANT", "ACTION_REQUIRED", "CRITICAL"],
+    "dedupe": true,
+    "cooldown": true,
+    "candidate_action_is_not_order": true,
+    "trigger_is_not_order": true,
+    "provider_total_outage_blocks_new_risk": true,
+    "no_action_is_successful_result": true
   },
   "upstream_references": [
     "TauricResearch/TradingAgents",

@@ -27,7 +27,7 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)  # skill run time
-    checkpoint: Mapped[str | None] = mapped_column(String(16), index=True)  # 09:25/10:00/12:00/14:30
+    checkpoint: Mapped[str | None] = mapped_column(String(16), index=True)  # 09:35/10:30/13:05/14:30/15:10
     holdings_source: Mapped[str | None] = mapped_column(String(32))  # screenshot/typed/history
     data_quality_grade: Mapped[str | None] = mapped_column(String(4))  # A-F
 
@@ -287,7 +287,7 @@ class Watchlist(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
     name: Mapped[str | None] = mapped_column(String(64))
-    cadence: Mapped[str | None] = mapped_column(String(64))  # e.g. 09:25/10:00/12:00/14:30
+    cadence: Mapped[str | None] = mapped_column(String(64))  # e.g. 09:35/10:30/13:05/14:30/15:10
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 

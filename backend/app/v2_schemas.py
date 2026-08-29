@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator
 
 from .decision_contract import canonicalize_analysis_mode
+from .market.codes import normalize_security_code
 
 ModelPurpose = Literal["vision", "analysis", "deep_analysis"]
 
@@ -168,12 +169,7 @@ class HoldingInput(BaseModel):
     @field_validator("code", mode="before")
     @classmethod
     def normalize_code(cls, value: Any) -> str:
-        if value is None:
-            return ""
-        value = str(value)
-        text = value.strip().upper()
-        digits = "".join(ch for ch in text if ch.isdigit())
-        return digits[-6:] if len(digits) >= 6 else text
+        return normalize_security_code(value)
 
 
 class ParsedHoldingsPayload(BaseModel):
