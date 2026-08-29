@@ -27,6 +27,7 @@ from ..market.engine.score import build_market_score_snapshot, calculate_confide
 from ..market.codes import normalize_security_code
 from ..research.replay import ReplayCase
 from ..services.market_engine import _history_coverage_codes, _included_quality
+from .capability import combine_capabilities
 from .config import (
     MARKET_HISTORY_LOOKBACK_TRADING_DAYS,
     RECOMPUTE_ENGINE_VERSION,
@@ -148,6 +149,7 @@ def recompute_market_dates(
     *,
     dates: Iterable[date],
     parameter_snapshot: Mapping[str, Any] | None,
+    capability_ceiling: str | None = None,
 ) -> list[HistoricalMarketRecomputeResult]:
     """Sequentially recompute Market Score with production smoothing/hysteresis.
 
@@ -316,6 +318,8 @@ def recompute_market_dates(
             and quality in {"VALID", "DEGRADED"}
             else RecomputeCapability.PARTIAL_PIT_RECOMPUTE
         )
+        if capability_ceiling is not None:
+            capability = combine_capabilities(capability, capability_ceiling)
         if day in requested_set:
             results.append(HistoricalMarketRecomputeResult(
                 trade_date=day,

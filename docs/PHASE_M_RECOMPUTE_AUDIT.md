@@ -142,3 +142,8 @@ These limitations are honest capability labels, not engine failures.
   `UNSUPPORTED` writes `leakage_status=PASS`. PARTIAL is then rejected by the
   calibration capability gate, while `FULL_PIT_EQUIVALENT` + PASS can enter
   the formal calibration evidence gate.
+- Capability ceiling: `combine_capabilities()` merges the manifest, Market,
+  Candidate and Portfolio capabilities and keeps the worst level. The manifest
+  is the authoritative ceiling, so a per-date Market result that reaches FULL
+  can never upgrade a PARTIAL manifest; the nested `market_result.capability`
+  is capped to the same final level.

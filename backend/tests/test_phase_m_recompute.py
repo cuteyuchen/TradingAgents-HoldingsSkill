@@ -823,4 +823,124 @@ def test_full_pit_equivalent_with_pass_leakage_reaches_calibration_gate() -> Non
     assert recommendation != "INSUFFICIENT_EVIDENCE"
 
 
+def _fake_market_result(day: date, *, capability: str = "FULL_PIT_EQUIVALENT"):
+    from app.recompute.market import HistoricalMarketRecomputeResult
+
+    return HistoricalMarketRecomputeResult(
+        trade_date=day,
+        raw_score=60.0,
+        display_score=60.0,
+        regime="NEUTRAL",
+        confidence=80.0,
+        quality_status="VALID",
+        is_frozen=False,
+        freeze_reason=None,
+        universe={},
+        metrics={},
+        components={},
+        coverage=1.0,
+        history_coverage=100.0,
+        median_index=1000.0,
+        warmup_start=day,
+        warmup_days=90,
+        warmup_complete=True,
+        capability=capability,
+    )
+
+
+def test_combine_capabilities_never_upgrades_manifest() -> None:
+    from app.recompute.capability import combine_capabilities
+
+    assert combine_capabilities("PARTIAL_PIT_RECOMPUTE", "FULL_PIT_EQUIVALENT") == "PARTIAL_PIT_RECOMPUTE"
+    assert combine_capabilities("FULL_PIT_EQUIVALENT", "FULL_PIT_EQUIVALENT") == "FULL_PIT_EQUIVALENT"
+    assert combine_capabilities("FULL_PIT_EQUIVALENT", "PARTIAL_PIT_RECOMPUTE", "FULL_PIT_EQUIVALENT") == "PARTIAL_PIT_RECOMPUTE"
+    assert combine_capabilities("LEAKAGE_BLOCKED", "DATA_GAP") == "DATA_GAP"
+    assert combine_capabilities("UNSUPPORTED", "FULL_PIT_EQUIVALENT") == "UNSUPPORTED"
+
+
+def test_market_internal_full_never_upgrades_partial_manifest(monkeypatch) -> None:
+    from app.research.calibration import recommend_calibration
+    from app.research.models import BacktestRun
+    from app.research.runner import _final_leakage_status
+
+    db = _db()
+    try:
+        days, _ = _seed_pit_dataset(db)
+        db.commit()
+        day = days[-1]
+
+        def fake_market_dates(dataset, *, dates, parameter_snapshot, capability_ceiling=None):
+            return [_fake_market_result(value, capability="FULL_PIT_EQUIVALENT") for value in dates]
+
+        monkeypatch.setattr("app.recompute.engine.recompute_market_dates", fake_market_dates)
+        facts = _run_recompute(db, scope="MARKET", start_date=day, end_date=day)
+        assert facts["recompute_summary"]["capability"] == "PARTIAL_PIT_RECOMPUTE"
+        assert facts["recompute_cases"][0].facts["capability"] == "PARTIAL_PIT_RECOMPUTE"
+
+        run = BacktestRun(
+            scope="MARKET",
+            replay_mode="DETERMINISTIC_RECOMPUTE",
+            start_date=day,
+            end_date=day,
+            data_hash="c" * 64,
+            calculation_key="phase-m-ceiling-partial",
+            data_manifest_json={"recompute_capability": {"capability": "PARTIAL_PIT_RECOMPUTE"}},
+        )
+        assert _final_leakage_status(run, facts) == "PASS"
+        assert recommend_calibration(
+            baseline={"median": 0.01},
+            challenger={"median": 0.02},
+            train={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+            validation={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+            test={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+            robustness={"status": "ROBUST_PLATEAU"},
+            sample_counts={"case_count": 252, "trade_date_count": 252},
+            quality_status="VALID",
+            leakage_status="PASS",
+            replay_capability="PARTIAL_PIT_RECOMPUTE",
+        ) == "INSUFFICIENT_EVIDENCE"
+    finally:
+        db.close()
+
+
+def test_capability_combine_allows_full_when_manifest_and_market_full(monkeypatch) -> None:
+    from app.recompute.context import HistoricalRecomputeContext
+    from app.recompute.engine import cohort_recompute_summary, recompute_deterministic_scope
+
+    db = _db()
+    try:
+        days, _ = _seed_pit_dataset(db)
+        db.commit()
+        day = days[-1]
+
+        def fake_market_dates(dataset, *, dates, parameter_snapshot, capability_ceiling=None):
+            return [_fake_market_result(value, capability="FULL_PIT_EQUIVALENT") for value in dates]
+
+        def fake_manifest(*args, **kwargs):
+            return {
+                "capability": "FULL_PIT_EQUIVALENT",
+                "missing_inputs": [],
+                "partial_inputs": [],
+                "limitations": [],
+                "coverage": {},
+            }
+
+        monkeypatch.setattr("app.recompute.engine.recompute_market_dates", fake_market_dates)
+        monkeypatch.setattr("app.recompute.engine.build_recompute_capability_manifest", fake_manifest)
+        context = HistoricalRecomputeContext(
+            scope="MARKET",
+            trade_date=day,
+            start_date=day,
+            end_date=day,
+            replay_mode="DETERMINISTIC_RECOMPUTE",
+        )
+        results = recompute_deterministic_scope(db, context=context, parameter_snapshot=None, config_hash=None)
+        assert len(results) == 1
+        assert results[0].capability == "FULL_PIT_EQUIVALENT"
+        assert results[0].market_result["capability"] == "FULL_PIT_EQUIVALENT"
+        assert cohort_recompute_summary(results)["capability"] == "FULL_PIT_EQUIVALENT"
+    finally:
+        db.close()
+
+
 __all__: list[str] = []

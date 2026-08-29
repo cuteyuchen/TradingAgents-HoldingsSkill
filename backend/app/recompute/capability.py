@@ -161,6 +161,37 @@ def _engine_capability(scope: str, items: Mapping[str, Any], partial_inputs: lis
     return RecomputeCapability.DIAGNOSTIC_ONLY
 
 
+_CAPABILITY_BLOCKED = (
+    str(RecomputeCapability.DATA_GAP),
+    str(RecomputeCapability.LEAKAGE_BLOCKED),
+    str(RecomputeCapability.UNSUPPORTED),
+)
+
+
+def combine_capabilities(*values: Any) -> str:
+    """Return the most conservative capability across all upstream constraints.
+
+    The manifest is the authoritative ceiling: a local engine result can never
+    upgrade a PARTIAL / DIAGNOSTIC_ONLY / blocked manifest. Blocked values keep
+    the same DATA_GAP > LEAKAGE_BLOCKED > UNSUPPORTED precedence used by the
+    cohort summary so the per-date and cohort labels stay consistent.
+    """
+
+    seen = {str(value) for value in values if value not in (None, "")}
+    if not seen:
+        return str(RecomputeCapability.DATA_GAP)
+    for blocked in _CAPABILITY_BLOCKED:
+        if blocked in seen:
+            return blocked
+    if str(RecomputeCapability.DIAGNOSTIC_ONLY) in seen:
+        return str(RecomputeCapability.DIAGNOSTIC_ONLY)
+    if str(RecomputeCapability.PARTIAL_PIT_RECOMPUTE) in seen:
+        return str(RecomputeCapability.PARTIAL_PIT_RECOMPUTE)
+    if seen == {str(RecomputeCapability.FULL_PIT_EQUIVALENT)}:
+        return str(RecomputeCapability.FULL_PIT_EQUIVALENT)
+    return str(RecomputeCapability.PARTIAL_PIT_RECOMPUTE)
+
+
 def _daily_bar_manifest_item(
     db: Session,
     *,
@@ -251,4 +282,4 @@ def _price_basis_manifest_item(
     }
 
 
-__all__ = ["build_recompute_capability_manifest"]
+__all__ = ["build_recompute_capability_manifest", "combine_capabilities"]

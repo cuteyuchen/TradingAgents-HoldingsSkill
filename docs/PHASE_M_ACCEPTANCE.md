@@ -97,6 +97,12 @@ PORTFOLIO_DECISION 同时重算 Market + Candidate + Portfolio gate：
 partial/missing inputs、coverage、parameter_version、config_hash、
 universe_version、price_basis、limitations。
 
+Capability 只能合并、不能升级：`combine_capabilities()` 统一取所有上游
+约束（manifest / Market / Candidate / Portfolio）中最差等级。manifest 是
+权威上限，manifest=PARTIAL 时即使 Market 内部逐日结果达到 FULL，最终
+date/cohort capability 仍为 PARTIAL；nested `market_result.capability` 也
+应用同一 ceiling，避免顶层 PARTIAL、内部显示 FULL。
+
 ## 6. PIT Input Manifest
 
 Market required inputs：
@@ -163,6 +169,8 @@ leakage_status 与 replay_capability 分离：
   仍因 replay_capability=PARTIAL 返回 `INSUFFICIENT_EVIDENCE`；
 - `FULL_PIT_EQUIVALENT` + leakage PASS + quality/sample/robustness 全部通过
   才有资格进入正式 Calibration evidence gate；
+- 只有 manifest 与所有 engine 结果同时 FULL，FULL 才可能被写入；PARTIAL
+  manifest 永远无法被逐日 Market 结果升级成 FULL；
 - `DIAGNOSTIC_ONLY` / `DATA_GAP` / `LEAKAGE_BLOCKED` / `UNSUPPORTED` 不能
   作为正式 Calibration 证据；
 - Phase M 不绕过 Phase J governance，无 Auto Apply。
@@ -262,6 +270,9 @@ query count 也在结果中记录。完整测试已证明 20×10 / 50×30 / 120�
   capability 返回 INSUFFICIENT_EVIDENCE；
 - FULL_PIT_EQUIVALENT + leakage PASS 不再被 runner 固定
   LEAKAGE_BLOCKED 无条件拒绝；
+- manifest=PARTIAL + market internal=FULL → final/cohort 仍 PARTIAL，
+  nested market_result 也 PARTIAL，Calibration 仍 INSUFFICIENT_EVIDENCE；
+- manifest=FULL + market internal=FULL → final 允许 FULL_PIT_EQUIVALENT；
 - future fundamental revision 发布前不可见；
 - missing flow/industry：unavailable != 0、capability != FULL；
 - warmup 不完整不能 FULL；
@@ -310,5 +321,5 @@ query count 也在结果中记录。完整测试已证明 20×10 / 50×30 / 120�
 Phase M 核心目标已实现：`DETERMINISTIC_RECOMPUTE` 真正从 PIT 事实重走生产
 算法，所有 PARTIAL / DATA_GAP / LEAKAGE_BLOCKED 均诚实标注，不伪造 FULL。
 Phase M.1 final integrity seal 已落地：held candidate isolation、true
-market warmup replay、leakage/capability separation 三项修复完成，并补上
-对应回归测试。
+market warmup replay、leakage/capability separation、capability ceiling
+合并（manifest 永不被升级）四项修复完成，并补上对应回归测试。

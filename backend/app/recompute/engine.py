@@ -13,7 +13,7 @@ from typing import Any, Iterable, Mapping
 
 from ..research.replay import ReplayCase, content_hash
 from .candidate import HistoricalCandidateRecomputeResult, recompute_candidate_dates
-from .capability import build_recompute_capability_manifest
+from .capability import build_recompute_capability_manifest, combine_capabilities
 from .config import (
     RECOMPUTE_ENGINE_VERSION,
     RECOMPUTE_SCHEMA_VERSION,
@@ -192,19 +192,7 @@ def _portfolio_case(result: Mapping[str, Any], source_ids: Iterable[str]) -> Rep
 def _cohort_capability(
     results: Iterable[DeterministicRecomputeResult],
 ) -> str:
-    values = {str(result.capability) for result in results}
-    if not values:
-        return str(RecomputeCapability.DATA_GAP)
-    if values == {str(RecomputeCapability.FULL_PIT_EQUIVALENT)}:
-        return str(RecomputeCapability.FULL_PIT_EQUIVALENT)
-    for blocked in (
-        RecomputeCapability.DATA_GAP,
-        RecomputeCapability.LEAKAGE_BLOCKED,
-        RecomputeCapability.UNSUPPORTED,
-    ):
-        if str(blocked) in values:
-            return str(blocked)
-    return str(RecomputeCapability.PARTIAL_PIT_RECOMPUTE)
+    return combine_capabilities(*(result.capability for result in results))
 
 
 def _result_hash(payload: dict[str, Any]) -> str:
@@ -302,6 +290,7 @@ def recompute_deterministic_scope(
             dataset,
             dates=requested,
             parameter_snapshot=parameter_snapshot,
+            capability_ceiling=capability,
         )
     if include_candidates:
         candidate_results = recompute_candidate_dates(
@@ -327,13 +316,15 @@ def recompute_deterministic_scope(
         market = market_by_date.get(day)
         candidates = candidate_by_date.get(day)
         portfolio = portfolio_by_date.get(day)
-        date_capability = capability
-        if market is not None:
-            date_capability = market.capability
-        if candidates is not None and candidates.capability != RecomputeCapability.FULL_PIT_EQUIVALENT:
-            date_capability = candidates.capability
-        if portfolio is not None and portfolio.capability != RecomputeCapability.FULL_PIT_EQUIVALENT:
-            date_capability = portfolio.capability
+        date_capability = combine_capabilities(
+            capability,
+            market.capability if market is not None else None,
+            candidates.capability if candidates is not None else None,
+            portfolio.capability if portfolio is not None else None,
+        )
+        market_payload = market.as_dict() if market is not None else None
+        if market_payload is not None:
+            market_payload["capability"] = date_capability
         results.append(_build_result(
             dataset=dataset,
             manifest=manifest,
@@ -342,7 +333,7 @@ def recompute_deterministic_scope(
             trade_date=day,
             capability=date_capability,
             parameter_snapshot=parameter_snapshot,
-            market_result=market.as_dict() if market else None,
+            market_result=market_payload,
             candidate_result=candidates.as_dict() if candidates else None,
             portfolio_result=portfolio.as_dict() if portfolio else None,
         ))

@@ -121,6 +121,10 @@ Phase M.1 final integrity seal:
   recompute writes `leakage_status=PASS`; PARTIAL is still rejected by the
   Calibration capability gate, and only FULL_PIT_EQUIVALENT + PASS may enter
   the formal Calibration evidence gate.
+- Capability ceiling: the final capability is the worst of manifest / Market /
+  Candidate / Portfolio (`combine_capabilities`). A PARTIAL manifest can never
+  be upgraded to FULL by a per-date Market result, and the nested
+  `market_result.capability` is capped to the same level.
 
 ## Parameter Governance (Phase J)
 
