@@ -8,7 +8,7 @@
 | --- | --- |
 | Baseline SHA | `208936d8ec973e82873054d3c39779aa16f9015e` |
 | Branch | `codex/phase-n-live-shadow-validation` |
-| Final SHA | 待本地提交后记录 |
+| Final SHA | `29795647225f48075706c85075651db00c002616`（Phase N 实现提交） |
 | PR | `#5`，开始开发时仍为 OPEN |
 | Runtime / Decision Contract | `2.4.0` / `2.4.0` |
 | Shadow Execution Contract | `shadow-execution-v1` |
