@@ -42,11 +42,17 @@ MarketScoreSnapshot 作为输入。
 2. 用历史 bars 重算 breadth/trend/liquidity/profitability/diffusion/
    crowding/tail-risk 组件；
 3. raw score → smoothing → regime/hysteresis 按时间顺序重放；
-4. 记录 warmup_start / warmup_days / warmup_complete；
-5. coverage < 0.95 时按生产语义 MISSING/freeze。
+4. warmup 窗口从 `warmup_start_date` 起真正顺序预跑，先建立 component
+   percentile history、smoothing、hysteresis、median index 的连续状态，
+   再丢弃 warmup outputs，只输出 requested dates；
+5. 记录 warmup_start / warmup_days / warmup_complete；
+6. coverage < 0.95 时按生产语义 MISSING/freeze。
 
 Persisted `MarketScoreSnapshot` 只用于对比验证，不是 recompute input。
 Smoothing 不偷用 persisted prev smoothed score。
+
+因此同一 target date 的 Market result/hash 不依赖用户从哪一天开始回测，
+只要 warmup source 相同，先跑整个 warmup 窗口再进入 requested window。
 
 ## 3. Candidate Recomputed
 
@@ -59,6 +65,9 @@ CANDIDATE scope 从 PIT universe 重新扫描：
 - 每个候选真实重算 Opportunity / Entry / R/R / Portfolio Fit /
   Held Comparison / Transaction Cost / Decision Edge / Ranking /
   Watch/Ready/Action stage。
+- Held isolation：历史持仓只进入 cross-sectional percentile 和 held
+  opportunity baseline，绝不进入 new-position prefilter / Watch / Ready /
+  Action candidate pool；prefilter 只从 `eligible_codes` 取行。
 - 输出 `factor_audit`：factor_name/value/available/source/coverage/
   effective_weight/missing_reason。
 
@@ -146,9 +155,16 @@ PARTIAL 永远不显示成“完整回测”。
 
 ## 11. Calibration Eligibility
 
-- FULL 可以作为强 Calibration evidence；
-- PARTIAL V1 默认 diagnostic only，不能直接 `CONSIDER_CHANGE`；
-- DIAGNOSTIC_ONLY 不允许创建 Standard Proposal；
+leakage_status 与 replay_capability 分离：
+
+- 成功完成的 DETERMINISTIC_RECOMPUTE 且 capability 不是
+  `DATA_GAP` / `LEAKAGE_BLOCKED` / `UNSUPPORTED` → `leakage_status=PASS`；
+- PARTIAL_PIT_RECOMPUTE 的 leakage 可以 PASS，但 Calibration evidence gate
+  仍因 replay_capability=PARTIAL 返回 `INSUFFICIENT_EVIDENCE`；
+- `FULL_PIT_EQUIVALENT` + leakage PASS + quality/sample/robustness 全部通过
+  才有资格进入正式 Calibration evidence gate；
+- `DIAGNOSTIC_ONLY` / `DATA_GAP` / `LEAKAGE_BLOCKED` / `UNSUPPORTED` 不能
+  作为正式 Calibration 证据；
 - Phase M 不绕过 Phase J governance，无 Auto Apply。
 
 ## 12. Deterministic Hash
@@ -176,6 +192,9 @@ SHA-256，排除 runtime timestamp、DB auto id、query_count。
 - recompute cases 进入 `_load_replay_rows`，Market/Candidate outcome 照常评估；
 - DETERMINISTIC_RECOMPUTE 不受 persisted top-subset censoring 限制；
   `censored_sample=False`，Calibration 不再自动按 CANDIDATE 判定 censored。
+- 成功路径 `leakage_status` 由 `_final_leakage_status` 计算：capability
+  blocked 才写 `LEAKAGE_BLOCKED`，否则 PASS；PARTIAL 由 capability gate 拒绝，
+  不再因为 replay_mode 本身被无条件标成 leakage failure。
 
 ## 15. Runner Stages
 
@@ -206,14 +225,16 @@ Research endpoints。
 - Scope：MARKET deterministic recompute
 - 规模：500 symbols × 60 decision dates
 - Warmup：130 trading days（65,000 QFQ bars）
+- 执行范围：130 个 warmup trading days 全部顺序预跑后丢弃，只输出
+  60 个 requested dates
 - Seed 数据：30000 classification + 30000 trading status + 30000 valuation +
   30000 price basis + 65000 bars
 - SQL SELECT 数：191（固定规模，不随 N×D 增长）
 - Dataset query count 总和：420（60 dates × 7 次固定 dataset 查询）
-- Wall time：293.1s（含内存采样线程，Windows / Python 3.13）
-- RSS peak：约 2008.7 MB
+- Wall time：309.9s（含内存采样线程，Windows / Python 3.13）
+- RSS peak：约 1998.1 MB
 - Capability：`PARTIAL_PIT_RECOMPUTE`
-- Deterministic hash：`e76d7c5decaa8a2fde1390ad64563bdd8a7d1ecd28195548cbcf257df68ab554`
+- Deterministic hash：`a2fd55ee20654334e46d43144a188e104b28c93bc435dd858998825be3963177`
 
 两次独立运行 hash 相同。完整测试还验证了 20×10 / 50×30 / 120×60 的
 SELECT 数均约为 191，证明查询数不随 securities × dates 爆炸。
@@ -234,6 +255,13 @@ query count 也在结果中记录。完整测试已证明 20×10 / 50×30 / 120�
 - ignored persisted CandidateRun/CandidateScore/MarketScoreSnapshot；
 - deterministic hash 稳定 + frozen parameter version/hash；
 - 历史持仓按 confirmed snapshot 排除/重新进入；
+- 当前持有 code 绝不进入 recompute candidate pool（held isolation）；
+- 同一 target date + 相同 warmup，不同 requested start 的 Market
+  result/hash 一致（warmup 真正预跑）；
+- PARTIAL recompute 无 look-ahead → leakage PASS，但 Calibration 仍因
+  capability 返回 INSUFFICIENT_EVIDENCE；
+- FULL_PIT_EQUIVALENT + leakage PASS 不再被 runner 固定
+  LEAKAGE_BLOCKED 无条件拒绝；
 - future fundamental revision 发布前不可见；
 - missing flow/industry：unavailable != 0、capability != FULL；
 - warmup 不完整不能 FULL；
@@ -281,3 +309,6 @@ query count 也在结果中记录。完整测试已证明 20×10 / 50×30 / 120�
 
 Phase M 核心目标已实现：`DETERMINISTIC_RECOMPUTE` 真正从 PIT 事实重走生产
 算法，所有 PARTIAL / DATA_GAP / LEAKAGE_BLOCKED 均诚实标注，不伪造 FULL。
+Phase M.1 final integrity seal 已落地：held candidate isolation、true
+market warmup replay、leakage/capability separation 三项修复完成，并补上
+对应回归测试。

@@ -339,11 +339,11 @@ def recompute_candidate_dates(
                 "portfolio_confidence": 0.0,
             }
 
-        scoring_rows: list[dict[str, Any]] = []
+        eligible_rows: list[dict[str, Any]] = []
         for code in eligible_codes:
             state = states.get(code) or {}
             security_type = "ETF" if code in etf_codes else "STOCK"
-            scoring_rows.append({
+            eligible_rows.append({
                 "code": code,
                 "name": state.get("name"),
                 "security_type": security_type,
@@ -357,10 +357,11 @@ def recompute_candidate_dates(
                 "quote_provenance": "EOD_CLOSE_PROXY",
             })
         held_codes = sorted(code for code in held if code in states)
+        held_rows: list[dict[str, Any]] = []
         for code in held_codes:
             state = states.get(code) or {}
             security_type = str(state.get("security_type") or "STOCK").upper()
-            scoring_rows.append({
+            held_rows.append({
                 "code": code,
                 "name": state.get("name"),
                 "security_type": security_type,
@@ -373,6 +374,11 @@ def recompute_candidate_dates(
                 "limit_down": False,
                 "quote_provenance": "EOD_CLOSE_PROXY",
             })
+        # Held rows feed the cross-sectional percentile and held-opportunity
+        # baseline only. Like production, the new-position prefilter reads the
+        # eligible universe exclusively so a current holding can never surface
+        # as a WATCHLIST / READY / ACTION candidate.
+        scoring_rows = [*eligible_rows, *held_rows]
         cross_sectional = candidate_service._cross_sectional(scoring_rows, as_of=cutoff, live=False)
         held_scores = _held_score_rows(
             held_codes,
@@ -385,14 +391,14 @@ def recompute_candidate_dates(
             as_of=cutoff,
             config=config,
         )
-        for row in scoring_rows:
+        for row in eligible_rows:
             row["cheap_score"] = candidate_service._cheap_score(row)
         stocks = sorted(
-            (row for row in scoring_rows if str(row.get("security_type") or "").upper() == "STOCK"),
+            (row for row in eligible_rows if str(row.get("security_type") or "").upper() == "STOCK"),
             key=lambda row: (-float(row.get("cheap_score") or 0.0), str(row.get("code") or "")),
         )[: config.stock_prefilter_limit]
         etfs = sorted(
-            (row for row in scoring_rows if str(row.get("security_type") or "").upper() == "ETF"),
+            (row for row in eligible_rows if str(row.get("security_type") or "").upper() == "ETF"),
             key=lambda row: (-float(row.get("cheap_score") or 0.0), str(row.get("code") or "")),
         )[: config.etf_prefilter_limit]
         prefiltered = [*stocks, *etfs]

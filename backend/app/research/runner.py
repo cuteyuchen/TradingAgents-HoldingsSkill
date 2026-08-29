@@ -7,7 +7,7 @@ import json
 import threading
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -1068,6 +1068,34 @@ def _recompute_summary(
     }
 
 
+def _final_leakage_status(run: BacktestRun, facts: Mapping[str, Any] | None = None) -> str:
+    """Separate PIT leakage from recompute capability.
+
+    A successfully completed deterministic recompute has already passed the PIT
+    availability gate, so it is leak-safe unless its capability is a
+    data/leakage blocker. PARTIAL remains PARTIAL and is later rejected by the
+    calibration capability gate; it is not a leakage failure.
+    """
+
+    if run.replay_mode == "PRODUCTION_REPLAY":
+        return "PASS"
+    if run.replay_mode != "DETERMINISTIC_RECOMPUTE":
+        return "LEAKAGE_BLOCKED"
+    summary = facts.get("recompute_summary") if isinstance(facts, Mapping) and isinstance(facts.get("recompute_summary"), Mapping) else {}
+    manifest = facts.get("recompute_manifest") if isinstance(facts, Mapping) and isinstance(facts.get("recompute_manifest"), Mapping) else {}
+    data_manifest = run.data_manifest_json if isinstance(run.data_manifest_json, dict) else {}
+    recompute_manifest = data_manifest.get("recompute_capability") if isinstance(data_manifest.get("recompute_capability"), Mapping) else {}
+    capability = str(
+        summary.get("capability")
+        or manifest.get("capability")
+        or recompute_manifest.get("capability")
+        or ""
+    )
+    if capability and capability not in {"DATA_GAP", "LEAKAGE_BLOCKED", "UNSUPPORTED"}:
+        return "PASS"
+    return "LEAKAGE_BLOCKED"
+
+
 def serialize_backtest_run(row: BacktestRun) -> dict[str, Any]:
     return _serialize(row)
 
@@ -1177,7 +1205,7 @@ def execute_backtest_run(
                 "sample_count": len(valid_rows),
                 "unique_trade_dates": len(dates),
                 "quality_status": quality_status,
-                "leakage_status": "PASS" if run.replay_mode == "PRODUCTION_REPLAY" else "LEAKAGE_BLOCKED",
+                "leakage_status": _final_leakage_status(run, facts),
                 "failure_counts_json": dict(failure_counts),
                 "known_limitations_json": sorted(set(limitations)),
                 "result_summary_json": {

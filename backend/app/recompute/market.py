@@ -149,7 +149,13 @@ def recompute_market_dates(
     dates: Iterable[date],
     parameter_snapshot: Mapping[str, Any] | None,
 ) -> list[HistoricalMarketRecomputeResult]:
-    """Sequentially recompute Market Score with production smoothing/hysteresis."""
+    """Sequentially recompute Market Score with production smoothing/hysteresis.
+
+    Every date from the dataset warmup window through the end date is executed
+    in order so component percentile history, smoothing, hysteresis and median
+    index carry real prior state into the requested window. Warmup outputs are
+    discarded; only ``dates`` are returned.
+    """
 
     lower_bounds, hysteresis = market_regime_settings(parameter_snapshot)
     previous_display_score: float | None = None
@@ -158,8 +164,18 @@ def recompute_market_dates(
     index_values: list[float] = []
     history_samples: dict[str, dict[str, list[float]]] = {}
     results: list[HistoricalMarketRecomputeResult] = []
+    processed_days = 0
+    requested_dates = list(dates)
+    requested_set = set(requested_dates)
+    internal_dates = [
+        day for day in dataset.calendar_dates
+        if dataset.warmup_start_date <= day <= dataset.end_date
+    ]
+    for day in requested_dates:
+        if day not in internal_dates:
+            internal_dates.append(day)
 
-    for day in dates:
+    for day in internal_dates:
         cutoff = eod_cutoff(day)
         available_cutoff = cutoff.replace(tzinfo=UTC)
         states = dataset.lifecycle_states(day, cutoff)
@@ -282,14 +298,13 @@ def recompute_market_dates(
                     continue
                 samples.setdefault(str(metric_name), []).append(number)
 
-        prior_days = [value for value in dataset.calendar_dates if value < day]
         sample_counts = [
             len(values)
             for component_samples in history_samples.values()
             for values in component_samples.values()
         ]
         warmup_complete = bool(
-            len(prior_days) >= PERCENTILE_MIN_SAMPLES
+            processed_days >= PERCENTILE_MIN_SAMPLES
             and sample_counts
             and min(sample_counts) >= PERCENTILE_MIN_SAMPLES
         )
@@ -301,27 +316,29 @@ def recompute_market_dates(
             and quality in {"VALID", "DEGRADED"}
             else RecomputeCapability.PARTIAL_PIT_RECOMPUTE
         )
-        results.append(HistoricalMarketRecomputeResult(
-            trade_date=day,
-            raw_score=_round_score(score.raw_score),
-            display_score=_round_score(score.display_score),
-            regime=score.regime,
-            confidence=round(float(score.confidence or 0.0), 2),
-            quality_status=score.quality_status,
-            is_frozen=score.is_frozen,
-            freeze_reason=score.freeze_reason,
-            universe=universe.as_dict(),
-            metrics=metrics,
-            components={name: component.to_dict() for name, component in components.items()},
-            coverage=coverage,
-            history_coverage=history_coverage,
-            median_index=median_index,
-            warmup_start=dataset.warmup_start_date,
-            warmup_days=len(prior_days),
-            warmup_complete=warmup_complete,
-            capability=str(capability),
-            source_ids=tuple(dataset.source_ids()),
-        ))
+        if day in requested_set:
+            results.append(HistoricalMarketRecomputeResult(
+                trade_date=day,
+                raw_score=_round_score(score.raw_score),
+                display_score=_round_score(score.display_score),
+                regime=score.regime,
+                confidence=round(float(score.confidence or 0.0), 2),
+                quality_status=score.quality_status,
+                is_frozen=score.is_frozen,
+                freeze_reason=score.freeze_reason,
+                universe=universe.as_dict(),
+                metrics=metrics,
+                components={name: component.to_dict() for name, component in components.items()},
+                coverage=coverage,
+                history_coverage=history_coverage,
+                median_index=median_index,
+                warmup_start=dataset.warmup_start_date,
+                warmup_days=processed_days,
+                warmup_complete=warmup_complete,
+                capability=str(capability),
+                source_ids=tuple(dataset.source_ids()),
+            ))
+        processed_days += 1
     return results
 
 

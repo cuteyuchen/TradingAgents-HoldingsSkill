@@ -123,3 +123,22 @@ historical ETF metadata and valuation availability. Constituent breadth is
 - Any scope with missing `source_available_at` or mixed RAW/QFQ price basis.
 
 These limitations are honest capability labels, not engine failures.
+
+## 11. Phase M.1 final integrity seal
+
+- Held candidate isolation: held rows feed `_cross_sectional` and
+  `held_opportunity_baseline` only. The new-position prefilter reads the
+  eligible universe exclusively, matching production
+  `candidates/service.py`; a current holding can never surface as a
+  WATCHLIST / READY / ACTION candidate.
+- True market warmup replay: `recompute_market_dates` executes every calendar
+  day from `warmup_start_date` through `end_date` in sequence so component
+  percentile history, smoothing, hysteresis and median index carry real prior
+  state into the requested window. Warmup outputs are discarded; only
+  requested dates are returned, and a target date's result/hash is independent
+  of the requested start.
+- Leakage vs capability separation: a successfully completed deterministic
+  recompute whose capability is outside `DATA_GAP` / `LEAKAGE_BLOCKED` /
+  `UNSUPPORTED` writes `leakage_status=PASS`. PARTIAL is then rejected by the
+  calibration capability gate, while `FULL_PIT_EQUIVALENT` + PASS can enter
+  the formal calibration evidence gate.

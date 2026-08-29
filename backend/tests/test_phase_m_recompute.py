@@ -685,4 +685,142 @@ def test_candidate_scope_uses_historical_snapshot_not_today_holdings() -> None:
         db.close()
 
 
+def test_held_code_never_enters_new_position_candidate_pool() -> None:
+    db = _db()
+    try:
+        days, codes = _seed_pit_dataset(db)
+        user_id, portfolio_id = _seed_portfolio(
+            db,
+            holdings_by_time=[(datetime(2025, 4, 1, 12, 0), [codes[1]])],
+            email="phase-m-held-pool@example.com",
+        )
+        db.commit()
+        from app.recompute.candidate import recompute_candidate_dates
+        from app.recompute.dataset import load_recompute_pit_dataset
+
+        dataset = load_recompute_pit_dataset(
+            db,
+            start_date=days[-1],
+            end_date=days[-1],
+            market="CN",
+            lookback_trading_days=750,
+            include_candidates=True,
+            include_portfolio=True,
+            portfolio_id=portfolio_id,
+        )
+        results = recompute_candidate_dates(
+            dataset,
+            dates=[days[-1]],
+            market_results=[],
+            parameter_snapshot=None,
+        )
+        assert len(results) == 1
+        held_code = codes[1]
+        candidate_codes = {row["code"] for row in results[0].candidates}
+        assert held_code not in candidate_codes
+        assert results[0].universe["exclusions"]["stock"].get("UNIVERSE_HELD", 0) == 1
+        assert any(row["code"] == held_code for row in results[0].held_scores)
+    finally:
+        db.close()
+
+
+def test_market_target_result_is_independent_of_requested_start_with_warmup() -> None:
+    db = _db()
+    try:
+        days, _ = _seed_pit_dataset(db, stock_count=20, day_count=90)
+        db.commit()
+        from app.recompute.dataset import load_recompute_pit_dataset
+        from app.recompute.market import recompute_market_dates
+
+        target = days[-1]
+        earlier_start = days[-16]
+        dataset = load_recompute_pit_dataset(
+            db,
+            start_date=earlier_start,
+            end_date=target,
+            market="CN",
+            lookback_trading_days=750,
+        )
+        short = recompute_market_dates(dataset, dates=[target], parameter_snapshot=None)
+        long_dates = [day for day in days if earlier_start <= day <= target]
+        long = recompute_market_dates(dataset, dates=long_dates, parameter_snapshot=None)
+        short_target = short[0].as_dict()
+        long_target = next(row.as_dict() for row in long if row.trade_date == target)
+        assert short_target == long_target
+        assert short_target["warmup_days"] == len(days) - 1
+    finally:
+        db.close()
+
+
+def test_partial_recompute_leakage_pass_but_capability_blocks_calibration() -> None:
+    from app.research.calibration import recommend_calibration
+    from app.research.models import BacktestRun
+    from app.research.runner import _final_leakage_status
+
+    run = BacktestRun(
+        scope="MARKET",
+        replay_mode="DETERMINISTIC_RECOMPUTE",
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 1, 2),
+        data_hash="a" * 64,
+        calculation_key="phase-m-partial-gate",
+        data_manifest_json={"recompute_capability": {"capability": "PARTIAL_PIT_RECOMPUTE"}},
+    )
+    assert _final_leakage_status(
+        run,
+        {"recompute_summary": {"capability": "PARTIAL_PIT_RECOMPUTE"}},
+    ) == "PASS"
+    recommendation = recommend_calibration(
+        baseline={"median": 0.01},
+        challenger={"median": 0.02},
+        train={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+        validation={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+        test={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+        robustness={"status": "ROBUST_PLATEAU"},
+        sample_counts={"case_count": 252, "trade_date_count": 252},
+        quality_status="VALID",
+        leakage_status="PASS",
+        replay_capability="PARTIAL_PIT_RECOMPUTE",
+    )
+    assert recommendation == "INSUFFICIENT_EVIDENCE"
+    assert _final_leakage_status(
+        run,
+        {"recompute_summary": {"capability": "LEAKAGE_BLOCKED"}},
+    ) == "LEAKAGE_BLOCKED"
+
+
+def test_full_pit_equivalent_with_pass_leakage_reaches_calibration_gate() -> None:
+    from app.research.calibration import recommend_calibration
+    from app.research.models import BacktestRun
+    from app.research.runner import _final_leakage_status
+
+    run = BacktestRun(
+        scope="MARKET",
+        replay_mode="DETERMINISTIC_RECOMPUTE",
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 1, 2),
+        data_hash="b" * 64,
+        calculation_key="phase-m-full-gate",
+        data_manifest_json={"recompute_capability": {"capability": "FULL_PIT_EQUIVALENT"}},
+    )
+    assert _final_leakage_status(
+        run,
+        {"recompute_summary": {"capability": "FULL_PIT_EQUIVALENT"}},
+    ) == "PASS"
+    recommendation = recommend_calibration(
+        baseline={"median": 0.01},
+        challenger={"median": 0.02},
+        train={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+        validation={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+        test={"baseline": {"median": 0.01}, "challenger": {"median": 0.02}},
+        robustness={"status": "ROBUST_PLATEAU"},
+        sample_counts={"case_count": 252, "trade_date_count": 252},
+        quality_status="FULL",
+        leakage_status="PASS",
+        replay_capability="FULL_PIT_EQUIVALENT",
+        fold_directions=[True, True, True],
+    )
+    assert recommendation != "INSUFFICIENT_EVIDENCE"
+
+
 __all__: list[str] = []

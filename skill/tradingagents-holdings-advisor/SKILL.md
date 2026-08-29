@@ -108,6 +108,20 @@ calls live providers, and never calls the model client.
   parameters never reinterpret old dates.
 - Recompute never auto-applies parameters and never auto-trades.
 
+Phase M.1 final integrity seal:
+
+- Held isolation: historical holdings participate in cross-sectional
+  percentiles and the held-opportunity baseline only; they never enter the
+  new-position prefilter / Watch / Ready / Action pool.
+- True warmup replay: Market recompute runs every trading day from
+  `warmup_start_date` through `end_date` before emitting requested dates, so
+  smoothing / hysteresis / component history / median index carry real prior
+  state and a target date's result does not depend on the requested start.
+- Leakage vs capability separation: a successful leak-safe deterministic
+  recompute writes `leakage_status=PASS`; PARTIAL is still rejected by the
+  Calibration capability gate, and only FULL_PIT_EQUIVALENT + PASS may enter
+  the formal Calibration evidence gate.
+
 ## Parameter Governance (Phase J)
 
 Phase J makes parameter changes a versioned, human-reviewed operation. Research proposes, humans approve, governance versions, production consumes, and rollback stays possible. There is no auto-apply and no auto-trade path in governance.
