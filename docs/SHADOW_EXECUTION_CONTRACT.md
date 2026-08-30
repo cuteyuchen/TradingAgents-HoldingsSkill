@@ -39,6 +39,17 @@
 系统只能使用应用捕获并持久化的 quote 证明未来时间。provider 的 source
 timestamp、旧 close、reference price、latest-only 数据都不能单独作为成交依据。
 
+### As-Of Mark Visibility
+
+当估值带有 `as_of`/cutoff 时，DailyBar 和 benchmark 记录必须同时满足：
+`available_at` 非空、`available_at <= cutoff`，并通过对应质量检查；LiveQuote
+必须满足 `captured_at <= cutoff`、时间精度和质量检查。`available_at=NULL` 表示
+无法证明 DailyBar/benchmark 在历史时点可见，不得在 as-of 查询中视为随时可见。
+决策日 Portfolio reference equity 优先使用 `captured_at <= decision_finalized_at`
+的合法 LiveQuote；后来写入的当日 EOD DailyBar 不得倒灌到盘中 reference equity。
+如果没有可证明的 mark，必须记录 `SHADOW_MARK_DATA_GAP`，保持
+`PENDING/DATA_GAP`，不得计算 Portfolio outcome。
+
 ### Intraday
 
 盘中决策从 `decision_finalized_at` 之后的第一个合法 quote 开始等待和成交。
@@ -106,9 +117,11 @@ Median benchmark 独立计算，不能用 benchmark 代替 portfolio return。�
 blocked/expired 状态推导；无 future quote 不得标记为 true。Validation summary
 按 target 与 horizon 分桶，不跨样本混成一个 mean。
 
-每日 Shadow snapshot 对每个非零持仓必须有可靠 DailyBar/LiveQuote mark；任一
-持仓缺 mark 时 fail-close 为 `SHADOW_MARK_DATA_GAP`，不得发布虚假 equity。
-Benchmark 缺失保持 `None`，对应 excess 也保持 `None`，不得按 0% 累计。
+每日 Shadow snapshot 对每个非零持仓必须有可靠且对 snapshot cutoff 可见的
+DailyBar/LiveQuote mark；任一持仓缺 mark 时 fail-close 为
+`SHADOW_MARK_DATA_GAP`，不得发布虚假 equity。Benchmark 同样必须通过质量与
+`available_at` 可见性检查；缺失保持 `None`，对应 excess 也保持 `None`，不得
+按 0% 累计。
 
 `DecisionActualAlignment` 只匹配确认的 `TradeLedgerEntry`，使用同 code/side
 和当前交易日加下一个交易日的 timestamp window。它只增加研究维度，不修改

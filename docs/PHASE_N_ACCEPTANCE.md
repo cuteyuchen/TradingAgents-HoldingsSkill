@@ -19,6 +19,10 @@
   fill/status 事实推导；summary 按 target/horizon 分桶。
 - 非零持仓缺 mark 时 `SHADOW_MARK_DATA_GAP` fail-close；benchmark 缺失保持
   `None`，不按 0% 累计。
+- as-of 估值只接受 `available_at` 非空且不晚于 cutoff 的 DailyBar、LiveQuote
+  或 benchmark；`available_at=NULL` 不再被视为历史时点可见。决策日 reference
+  equity 优先使用 cutoff 前的合法 LiveQuote，无法证明 mark 可见时保持
+  `SHADOW_MARK_DATA_GAP`，不发布 Portfolio outcome。
 
 ## Release Identity
 
@@ -26,8 +30,8 @@
 | --- | --- |
 | Baseline SHA | `208936d8ec973e82873054d3c39779aa16f9015e` |
 | Branch | `codex/phase-n-live-shadow-validation` |
-| Final SHA | `d566ffd`（Phase N.1 Integrity Seal 实现提交；Phase N 基线实现为 `29795647225f48075706c85075651db00c002616`） |
-| PR | `#5`，开始开发时仍为 OPEN |
+| Final SHA | `3da5849`（Phase N.1 Final As-Of Mark Seal；Phase N.1 Integrity Seal 实现为 `d566ffd`；Phase N 基线实现为 `29795647225f48075706c85075651db00c002616`） |
+| PR | 待创建 |
 | Runtime / Decision Contract | `2.4.0` / `2.4.0` |
 | Shadow Execution Contract | `shadow-execution-v1` |
 | Migration | `20260829_0020_live_shadow_validation.py`，down revision `20260828_0019` |
@@ -73,13 +77,13 @@
 
 | 检查项 | 当前状态 |
 | --- | --- |
-| Phase N专项测试 | 已通过 16 项：既有 Phase N 回归 + N.1 条件加仓、卖出阻断、Portfolio equity/benchmark、future quote eligibility、mark fail-close、benchmark fail-close、target/horizon summary |
-| Existing backend regression | 已通过 `419 passed`、58 warnings；其中 migration/backup 断言已更新为跟随真实 `code_head`，并增加 Shadow health 缺表/已安装 schema 聚合测试 |
+| Phase N专项测试 | 已通过 `19 passed`：既有 Phase N 回归 + N.1 条件加仓、卖出阻断、Portfolio equity/benchmark、future quote eligibility、mark fail-close、benchmark fail-close、target/horizon summary，以及最终 as-of mark visibility 回归 |
+| Existing backend regression | 已通过 `422 passed`、58 warnings；其中 migration/backup 断言已更新为跟随真实 `code_head`，并增加 Shadow health 缺表/已安装 schema 聚合测试 |
 | Alembic current/upgrade | 已通过：`20260829_0020 (head)`；`upgrade head` 幂等成功 |
 | Frontend typecheck | 已通过 `npm run typecheck` |
 | Frontend build | 已通过 `npm run build`；仅有 Vite 大 chunk warning |
-| Docker build | 未完成：本机 Docker Desktop Linux engine daemon 未运行，Docker CLI 无法连接 `dockerDesktopLinuxEngine`；不是 Dockerfile 构建错误 |
-| GitHub CI | 本地未触发，状态待 CI/PR 页面确认 |
+| Docker build | 已通过 |
+| GitHub CI | PR 创建前尚无 workflow run，待远端 PR CI 确认 |
 
 ## Explicit Non-Features
 
