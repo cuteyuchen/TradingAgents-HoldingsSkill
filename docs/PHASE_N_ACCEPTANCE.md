@@ -31,7 +31,7 @@
 | Baseline SHA | `208936d8ec973e82873054d3c39779aa16f9015e` |
 | Branch | `codex/phase-n-live-shadow-validation` |
 | Final SHA | `3da5849`（Phase N.1 Final As-Of Mark Seal；Phase N.1 Integrity Seal 实现为 `d566ffd`；Phase N 基线实现为 `29795647225f48075706c85075651db00c002616`） |
-| PR | 待创建 |
+| PR | `#6`（OPEN，目标 `main`） |
 | Runtime / Decision Contract | `2.4.0` / `2.4.0` |
 | Shadow Execution Contract | `shadow-execution-v1` |
 | Migration | `20260829_0020_live_shadow_validation.py`，down revision `20260828_0019` |
