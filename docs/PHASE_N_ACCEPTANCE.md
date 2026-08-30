@@ -2,6 +2,24 @@
 
 验收日期：2026-08-29
 
+## Phase N.1 Integrity Seal
+
+验收日期：2026-08-30
+
+当前结论：`PASS`
+
+本次只收口 Shadow Execution 与 Outcome Integrity：
+
+- `conditional_add` 继续记录 Observation/Outcome，但 V1 标记
+  `CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED`，不创建即时普通 BUY Intent。
+- Shadow 可卖数量不足时记录 `BLOCKED_BY_SHADOW_SELLABLE_QTY`，不制造
+  synthetic partial fill。
+- Portfolio Outcome 使用对应 Shadow Account + Generation 的 reference/target
+  equity；benchmark 独立计算；`execution_eligible` 由 Intent、future quote、
+  fill/status 事实推导；summary 按 target/horizon 分桶。
+- 非零持仓缺 mark 时 `SHADOW_MARK_DATA_GAP` fail-close；benchmark 缺失保持
+  `None`，不按 0% 累计。
+
 ## Release Identity
 
 | 项目 | 值 |
@@ -26,8 +44,8 @@
 | Shadow Account | 显式创建；从 confirmed `PortfolioSnapshot` 复制一次现金和持仓 |
 | Generation / Rebase | 每次 rebase 增加 generation；旧事实保留，不自动同步真实组合 |
 | Real Portfolio Isolation | Shadow ledger/state 不写真实 snapshot、holding、broker cash 或 Trade Ledger |
-| Intent | 只跟随最终 `ACTION`；Candidate ACTION 或 `NO_ACTION` 不绕过最终 Gate |
-| Fill | Intent 与 Fill 分离；没有 broker API、手工 paper order 或 LLM fill path |
+| Intent | 只跟随最终 `ACTION`；Candidate ACTION 或 `NO_ACTION` 不绕过最终 Gate；`conditional_add` 在 V1 不创建普通 Intent |
+| Fill | Intent 与 Fill 分离；没有 broker API、手工 paper order 或 LLM fill path；V1 不主动制造 partial fill |
 | Future Quote | 只接受持久化 `LiveQuoteObservation`，`captured_at > decision_finalized_at`、`EXACT`、合法质量和价格 |
 | EOD / Intraday | 15:10 决策推迟到下一个交易日开盘；盘中只看完成之后的 quote |
 | Quote Persistence | 复用现有 monitor 采集相关持仓、决策标的和 pending intent 标的，不新增第二行情线程 |
@@ -38,13 +56,13 @@
 | Lot / Costs | 复用 SecurityMaster lot size；成本复用 Phase E `transaction_cost_estimate()` |
 | Slippage | `slippage_not_modeled=true`；只显示 execution delay/drift，不伪造滑点 |
 | Ledger / State | append-only ledger；materialized state 可按 generation rebuild |
-| Daily Snapshot | 每日收盘快照，记录 cash/equity/return/drawdown/benchmark/basis |
+| Daily Snapshot | 每日收盘快照，记录 cash/equity/return/drawdown/benchmark/basis；持仓缺 mark 时 fail-close |
 | Benchmark | Phase C All-A Median Index |
-| Outcomes | 1/5/10/20/60 trading days；Outcome 与 Fill 分离 |
+| Outcomes | 1/5/10/20/60 trading days；Portfolio return 来自 Shadow equity，benchmark 独立；Outcome 与 Fill 分离 |
 | NO_ACTION | 独立 observation/outcome；可计算市场下跌回避，不以收益 0 代替 |
 | Candidate Veto | Candidate ACTION 被 Final NO_ACTION 否决时记录 `CANDIDATE_VETO` outcome，不创建 intent |
 | Actual Alignment | 只匹配确认 Trade Ledger timestamp，不从 holdings diff 猜测 |
-| Cohort | parameter hash、decision/runtime contract、shadow generation 分 cohort，不混算回测 |
+| Cohort | parameter hash、decision/runtime contract、shadow generation 分 cohort；target/horizon 独立统计，不混算回测 |
 | Scheduler / Worker | 接入现有唯一 scheduler；分析完成、quote 更新和 EOD maintenance 使用独立 session |
 | Failure Isolation | Shadow 失败记录日志并降级，不阻断生产分析/风险决策 |
 | Shadow Health / Diagnostics | System Health 增加 Shadow 汇总状态；诊断包包含 active generation、pending/blocked、过期意图、失败 evaluation、最近快照/验证时间，不暴露持仓明细或 broker identifier |
@@ -55,8 +73,8 @@
 
 | 检查项 | 当前状态 |
 | --- | --- |
-| Phase N专项测试 | 已通过 8 项：观察幂等/不可变、未来 quote、15:10、停牌/涨跌停、现金隔离、T+1、手数/成本、NO_ACTION/veto、rebase、API ownership |
-| Existing backend regression | 已通过 `412 passed`、60 warnings；其中 migration/backup 断言已更新为跟随真实 `code_head`，并增加 Shadow health 缺表/已安装 schema 聚合测试 |
+| Phase N专项测试 | 已通过 16 项：既有 Phase N 回归 + N.1 条件加仓、卖出阻断、Portfolio equity/benchmark、future quote eligibility、mark fail-close、benchmark fail-close、target/horizon summary |
+| Existing backend regression | 已通过 `419 passed`、58 warnings；其中 migration/backup 断言已更新为跟随真实 `code_head`，并增加 Shadow health 缺表/已安装 schema 聚合测试 |
 | Alembic current/upgrade | 已通过：`20260829_0020 (head)`；`upgrade head` 幂等成功 |
 | Frontend typecheck | 已通过 `npm run typecheck` |
 | Frontend build | 已通过 `npm run build`；仅有 Vite 大 chunk warning |

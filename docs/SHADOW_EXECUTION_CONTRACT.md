@@ -20,8 +20,11 @@
 `structured_result_json["result"]`，并以 `decision_gate` 的最终组合动作作为
 `LiveDecisionObservation.final_action`。Candidate `ACTION` 不等于最终动作。
 
-只有 `final_action=ACTION` 才能生成 `ShadowOrderIntent`。`NO_ACTION` 不生成
-intent，但必须生成独立的 `LiveDecisionOutcome` 样本。
+只有 `final_action=ACTION` 且动作可被 V1 无条件执行时才能生成
+`ShadowOrderIntent`。`conditional_add` 继续记录 Observation/Outcome，但 V1
+不支持把触发条件降级成即时 BUY，必须标记
+`CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED` 且不生成普通 intent。`NO_ACTION`
+也不生成 intent，但必须生成独立的 `LiveDecisionOutcome` 样本。
 
 ## Time And Quote Proof
 
@@ -52,7 +55,10 @@ timestamp、旧 close、reference price、latest-only 数据都不能单独作�
 
 Intent 生命周期为：
 
-`PENDING -> FILLED | PARTIAL | BLOCKED | EXPIRED | SUPERSEDED`
+`PENDING -> FILLED | BLOCKED | EXPIRED | SUPERSEDED`
+
+V1 不主动生成 synthetic `PARTIAL`。历史兼容字段可以保留，但 Shadow 自身
+持仓不足不能猜测部分成交。
 
 暂停账户不推进成交；generation 不匹配的旧 intent 标记为
 `SUPERSEDED`。常见阻断原因包括：
@@ -61,7 +67,7 @@ Intent 生命周期为：
 - `QUOTE_TIME_NOT_EXACT`、`QUOTE_INVALID`、`QUOTE_DATA_GAP`
 - `SUSPENDED`、`INSTRUMENT_INACTIVE`
 - `BLOCKED_BY_LIMIT_UP`、`BLOCKED_BY_LIMIT_DOWN`
-- `SHADOW_CASH_BLOCKED`、`SHADOW_SELLABLE_QTY_BLOCKED`
+- `SHADOW_CASH_BLOCKED`、`BLOCKED_BY_SHADOW_SELLABLE_QTY`
 - `LOT_SIZE_BLOCKED`、`BLOCKED_BY_SHADOW_CONSTRAINT`
 
 涨停买入和跌停卖出不得按限制价假装成交。停牌在有效期内等待后续合法
@@ -73,7 +79,8 @@ quote；恢复前不成交。
 - Stock 买入采用 T+1；当 ETF 没有权威 T+0/T+1 元数据时采用
   `T_PLUS_1_CONSERVATIVE`。
 - 买入只消耗 Shadow 自己的可用现金；真实账户现金永远不可借用。
-- 卖出只使用 Shadow 自己的 `sellable_quantity`，不足时记录 partial 或 block。
+- 卖出只使用 Shadow 自己的 `sellable_quantity`；请求数量超过可卖数量时记录
+  `BLOCKED_BY_SHADOW_SELLABLE_QTY`，不生成 fill。
 - commission、minimum commission 和 sell tax 直接复用 Phase E
   `transaction_cost_estimate()`。
 - V1 不建模滑点和盘口冲击；记录 `slippage_not_modeled=true`，并可展示
@@ -91,8 +98,17 @@ quote；恢复前不成交。
 ## Outcomes And Alignment
 
 `LiveDecisionOutcome` 独立于 fill，按 1/5/10/20/60 个交易日评估 security、
-portfolio、NO_ACTION 和 Candidate Veto。交易日来自 `TradingCalendar`，未来
-close 仅用于 outcome evaluation，不是 fill source。
+portfolio、NO_ACTION 和 Candidate Veto。Portfolio forward return 必须使用对应
+Shadow Account + Generation 在 reference 时点与目标交易日的 equity；All-A
+Median benchmark 独立计算，不能用 benchmark 代替 portfolio return。交易日
+来自 `TradingCalendar`，未来 close 仅用于 outcome evaluation，不是 fill source。
+`execution_eligible` 只由真实 Shadow Intent、合法 future quote 和最终 fill/
+blocked/expired 状态推导；无 future quote 不得标记为 true。Validation summary
+按 target 与 horizon 分桶，不跨样本混成一个 mean。
+
+每日 Shadow snapshot 对每个非零持仓必须有可靠 DailyBar/LiveQuote mark；任一
+持仓缺 mark 时 fail-close 为 `SHADOW_MARK_DATA_GAP`，不得发布虚假 equity。
+Benchmark 缺失保持 `None`，对应 excess 也保持 `None`，不得按 0% 累计。
 
 `DecisionActualAlignment` 只匹配确认的 `TradeLedgerEntry`，使用同 code/side
 和当前交易日加下一个交易日的 timestamp window。它只增加研究维度，不修改

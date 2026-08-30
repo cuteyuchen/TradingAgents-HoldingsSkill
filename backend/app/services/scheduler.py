@@ -348,6 +348,8 @@ def _run_shadow_maintenance(*, now_utc: datetime) -> None:
                 result.get("outcomes"),
                 len(result.get("snapshots") or []),
             )
+        if result.get("degraded"):
+            logger.warning("shadow_maintenance degraded snapshot_errors=%s", result.get("snapshot_errors"))
     except Exception:
         shadow_db.rollback()
         # Shadow is a validation subsystem.  Its failure must not block

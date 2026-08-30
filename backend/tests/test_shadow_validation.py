@@ -32,12 +32,16 @@ from app.portfolio_models import TradeLedgerEntry
 from app.shadow.service import (
     capture_live_decision_observation,
     create_shadow_account,
+    create_shadow_daily_snapshot,
     ensure_shadow_order_intents,
     evaluate_live_outcomes,
+    maintain_shadow,
     persist_live_quote_observation,
     process_pending_shadow_intents,
     rebase_shadow_account,
     rebuild_shadow_state,
+    shadow_account_performance,
+    validation_summary,
 )
 from app.system.health import shadow_status
 from app.shadow_models import (
@@ -45,6 +49,7 @@ from app.shadow_models import (
     LiveDecisionOutcome,
     LiveQuoteObservation,
     ShadowFill,
+    ShadowDailySnapshot,
     ShadowLedgerEntry,
     ShadowOrderIntent,
 )
@@ -256,11 +261,11 @@ def _run(
     return run
 
 
-def _action(code: str = "600001", *, price: float = 10.0, qty: float = 100.0, side: str = "BUY", security_type: str = "STOCK") -> dict:
+def _action(code: str = "600001", *, price: float = 10.0, qty: float = 100.0, side: str = "BUY", security_type: str = "STOCK", action: str | None = None) -> dict:
     return {
         "code": code,
         "name": code,
-        "action": "buy" if side == "BUY" else "sell",
+        "action": action or ("buy" if side == "BUY" else "sell"),
         "side": side,
         "target_qty": qty,
         "reference_price": price,
@@ -363,6 +368,79 @@ def test_1510_uses_no_same_day_close_and_requires_future_quote(db: Session) -> N
     assert fill.quote_observation_id == future.id
     assert fill.price == 11.0
     assert fill.quote_captured_at > observation.decision_finalized_at
+
+
+def test_conditional_add_is_observation_only_until_v1_condition_execution_exists(db: Session) -> None:
+    day = date(2026, 8, 20)
+    _calendar(db, [day, date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db, cash=10_000.0)
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+    run = _run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 6, 0),
+        actions=[_action(price=10.0, qty=100.0, action="conditional_add") | {"trigger": {"operator": "lte", "value": 9.5}}],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=True)
+    assert observation is not None
+    assert "CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED" in observation.final_reason_codes_json
+    assert ensure_shadow_order_intents(db, observation, account=account) == []
+    assert db.scalar(select(ShadowOrderIntent.id).where(ShadowOrderIntent.decision_observation_id == observation.id)) is None
+    assert db.scalar(select(LiveDecisionOutcome.id).where(
+        LiveDecisionOutcome.decision_observation_id == observation.id,
+        LiveDecisionOutcome.target_type == "SECURITY",
+    )) is not None
+
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6, 1), price=9.0)
+    result = process_pending_shadow_intents(db, now=datetime(2026, 8, 20, 6, 2), account_id=account.id)
+    assert result["fills"] == []
+    assert db.scalar(select(ShadowFill.id).where(ShadowFill.shadow_account_id == account.id)) is None
+
+
+def test_sell_quantity_above_shadow_sellable_is_blocked_without_partial_fill(db: Session) -> None:
+    day = date(2026, 8, 20)
+    _calendar(db, [day, date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(
+        db,
+        cash=0.0,
+        holdings=[{"code": "600001", "qty": 1000, "available_qty": 600, "price": 10.0, "cost": 10.0}],
+    )
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+    run = _run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 6, 0),
+        actions=[_action(side="SELL", qty=1000.0)],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    assert observation is not None
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6, 1), price=10.0)
+
+    result = process_pending_shadow_intents(db, now=datetime(2026, 8, 20, 6, 2), account_id=account.id)
+    db.refresh(intent)
+    assert result["fills"] == []
+    assert result["partial"] == 0
+    assert result["blocked"] == 1
+    assert intent.status == "BLOCKED"
+    assert "BLOCKED_BY_SHADOW_SELLABLE_QTY" in intent.reason_codes_json
+    assert db.scalar(select(ShadowFill.id).where(ShadowFill.order_intent_id == intent.id)) is None
 
 
 def test_quote_guards_handle_stale_inexact_suspension_and_limit(db: Session) -> None:
@@ -518,16 +596,267 @@ def test_no_action_outcome_and_candidate_veto_are_first_class(db: Session) -> No
     outcomes = db.scalars(select(LiveDecisionOutcome).where(LiveDecisionOutcome.decision_observation_id == observation.id)).all()
     assert {item.target_type for item in outcomes} == {"PORTFOLIO", "CANDIDATE_VETO"}
 
+    create_shadow_daily_snapshot(db, account, trade_date=days[0], as_of=datetime(2026, 8, 20, 7, 0))
+    create_shadow_daily_snapshot(db, account, trade_date=days[1], as_of=datetime(2026, 8, 21, 7, 0))
+
     result = evaluate_live_outcomes(db, as_of=datetime(2026, 8, 21, 8, 0), observation_id=observation.id)
     assert result["completed"] == 2
     portfolio_outcome = next(item for item in outcomes if item.target_type == "PORTFOLIO" and item.horizon_trading_days == 1)
     veto_outcome = next(item for item in outcomes if item.target_type == "CANDIDATE_VETO" and item.horizon_trading_days == 1)
-    assert portfolio_outcome.forward_return == pytest.approx(-0.05)
+    assert portfolio_outcome.forward_return == pytest.approx(0.0)
+    assert portfolio_outcome.excess_return == pytest.approx(0.05)
     assert portfolio_outcome.drawdown_avoided == pytest.approx(0.05)
     assert portfolio_outcome.risk_off_correct is True
     assert veto_outcome.candidate_opportunity_cost == pytest.approx(0.2)
     assert veto_outcome.shadow_filled is False
     assert account.shadow_generation == 1
+
+
+def test_portfolio_outcome_uses_shadow_equity_and_independent_benchmark(db: Session) -> None:
+    day = date(2026, 8, 20)
+    target_day = date(2026, 8, 21)
+    _calendar(db, [day, target_day])
+    user, portfolio, snapshot = _portfolio(db, cash=10_000.0)
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+    db.add_all([
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=day,
+            median_return=0.0,
+            index_value=100.0,
+            eligible_count=1,
+            quality_status="VALID",
+        ),
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=target_day,
+            median_return=0.01,
+            index_value=101.0,
+            eligible_count=1,
+            quality_status="VALID",
+        ),
+        ShadowDailySnapshot(
+            shadow_account_id=account.id,
+            shadow_generation=1,
+            trade_date=day,
+            cash=10_000.0,
+            market_value=0.0,
+            total_equity=10_000.0,
+        ),
+        ShadowDailySnapshot(
+            shadow_account_id=account.id,
+            shadow_generation=1,
+            trade_date=target_day,
+            cash=10_400.0,
+            market_value=0.0,
+            total_equity=10_400.0,
+        ),
+    ])
+    run = _run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 6, 0),
+        actions=[],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=True)
+    assert observation is not None
+
+    result = evaluate_live_outcomes(db, as_of=datetime(2026, 8, 21, 8, 0), observation_id=observation.id)
+    assert result["completed"] == 1
+    outcome = db.scalar(select(LiveDecisionOutcome).where(
+        LiveDecisionOutcome.decision_observation_id == observation.id,
+        LiveDecisionOutcome.target_type == "PORTFOLIO",
+        LiveDecisionOutcome.horizon_trading_days == 1,
+    ))
+    assert outcome is not None
+    assert outcome.forward_return == pytest.approx(0.04)
+    assert outcome.benchmark_return == pytest.approx(0.01)
+    assert outcome.excess_return == pytest.approx(0.03)
+
+
+def test_execution_eligibility_requires_intent_and_future_quote(db: Session) -> None:
+    day = date(2026, 8, 20)
+    target_day = date(2026, 8, 21)
+    _calendar(db, [day, target_day])
+    user, portfolio, snapshot = _portfolio(db, cash=10_000.0)
+    create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+    db.add_all([
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=day,
+            median_return=0.0,
+            index_value=100.0,
+            eligible_count=1,
+            quality_status="VALID",
+        ),
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=target_day,
+            median_return=0.1,
+            index_value=110.0,
+            eligible_count=1,
+            quality_status="VALID",
+        ),
+        DailyBarCache(
+            market="CN",
+            exchange="SSE",
+            code="600001",
+            trade_date=target_day,
+            open=11.0,
+            high=11.0,
+            low=11.0,
+            close=11.0,
+            adjustment="QFQ",
+            provider="test",
+            quality_status="VALID",
+        ),
+    ])
+    db.flush()
+    action = _action(price=10.0, qty=100.0)
+    action["reference_price_basis"] = "QFQ"
+    run = _run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 6, 0),
+        actions=[action],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=True)
+    assert observation is not None
+    intent = db.scalar(select(ShadowOrderIntent).where(ShadowOrderIntent.decision_observation_id == observation.id))
+    assert intent is not None
+
+    evaluate_live_outcomes(db, as_of=datetime(2026, 8, 21, 8, 0), observation_id=observation.id)
+    outcome = db.scalar(select(LiveDecisionOutcome).where(
+        LiveDecisionOutcome.decision_observation_id == observation.id,
+        LiveDecisionOutcome.target_type == "SECURITY",
+        LiveDecisionOutcome.horizon_trading_days == 1,
+    ))
+    assert outcome is not None
+    assert outcome.execution_eligible is False
+    assert outcome.source_refs_json["execution"]["status"] == "WAITING_FOR_FUTURE_QUOTE"
+
+
+def test_shadow_snapshot_does_not_publish_equity_when_position_mark_is_missing(db: Session) -> None:
+    day = date(2026, 8, 20)
+    _calendar(db, [day])
+    user, portfolio, snapshot = _portfolio(
+        db,
+        cash=20_000.0,
+        holdings=[{"code": "600001", "qty": 1000, "available_qty": 1000, "price": 80.0, "cost": 80.0}],
+    )
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+
+    with pytest.raises(RuntimeError, match="SHADOW_MARK_DATA_GAP"):
+        create_shadow_daily_snapshot(db, account, trade_date=day, as_of=datetime(2026, 8, 20, 7, 5))
+    assert db.scalar(select(ShadowDailySnapshot.id).where(
+        ShadowDailySnapshot.shadow_account_id == account.id,
+        ShadowDailySnapshot.trade_date == day,
+    )) is None
+
+    maintenance = maintain_shadow(db, as_of=datetime(2026, 8, 20, 7, 5), trade_date=day)
+    assert maintenance["degraded"] is True
+    assert maintenance["snapshot_errors"][0]["reason"].startswith("SHADOW_MARK_DATA_GAP")
+
+
+def test_shadow_performance_does_not_treat_missing_benchmark_as_zero(db: Session) -> None:
+    user, portfolio, snapshot = _portfolio(db, cash=10_000.0)
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+    db.add_all([
+        ShadowDailySnapshot(
+            shadow_account_id=account.id,
+            shadow_generation=1,
+            trade_date=date(2026, 8, 20),
+            cash=10_000.0,
+            total_equity=10_000.0,
+            benchmark_return=0.01,
+        ),
+        ShadowDailySnapshot(
+            shadow_account_id=account.id,
+            shadow_generation=1,
+            trade_date=date(2026, 8, 21),
+            cash=10_100.0,
+            total_equity=10_100.0,
+            benchmark_return=None,
+        ),
+    ])
+    db.flush()
+
+    performance = shadow_account_performance(db, account)
+    assert performance["benchmark_return"] is None
+    assert performance["excess_return"] is None
+    assert performance["performance_quality"] == "DATA_GAP"
+
+
+def test_validation_summary_separates_target_and_horizon_metrics(db: Session) -> None:
+    user, portfolio, snapshot = _portfolio(db, cash=10_000.0)
+    create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 5, 0),
+    )
+    run = _run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 6, 0),
+        actions=[_action()],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=True)
+    assert observation is not None
+    outcomes = db.scalars(select(LiveDecisionOutcome).where(
+        LiveDecisionOutcome.decision_observation_id == observation.id,
+    )).all()
+    for outcome in outcomes:
+        outcome.status = "COMPLETED"
+        outcome.excess_return = outcome.horizon_trading_days / 1000.0
+    db.flush()
+
+    summary = validation_summary(db, user_id=user.id, portfolio_id=portfolio.id)
+    cohort = summary["cohorts"][0]
+    buckets = cohort["outcomes_by_target_horizon"]
+    assert cohort["completed_outcome_count"] == 10
+    assert "mean_excess_return" not in cohort
+    assert len(buckets) == 10
+    assert {(
+        item["target_type"],
+        item["target_key"],
+        item["horizon_trading_days"],
+    ) for item in buckets} == {
+        ("PORTFOLIO", "PORTFOLIO", horizon) for horizon in (1, 5, 10, 20, 60)
+    } | {
+        ("SECURITY", "600001", horizon) for horizon in (1, 5, 10, 20, 60)
+    }
 
 
 def test_rebase_preserves_generation_and_supersedes_old_intent(db: Session) -> None:

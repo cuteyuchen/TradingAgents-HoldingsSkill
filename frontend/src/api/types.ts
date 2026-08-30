@@ -861,6 +861,7 @@ export interface ShadowPerformance {
   cumulative_return?: number | null
   benchmark_return?: number | null
   excess_return?: number | null
+  performance_quality?: string | null
   max_drawdown?: number | null
   turnover: number
   transaction_cost: number
@@ -886,7 +887,13 @@ export interface ShadowValidation {
     blocked_count: number
     sample_days: number
     completed_outcome_count: number
-    mean_excess_return?: number | null
+    outcomes_by_target_horizon: Array<{
+      target_type: string
+      target_key: string
+      horizon_trading_days: number
+      completed_outcome_count: number
+      mean_excess_return?: number | null
+    }>
     evidence_status: string
   }>
   historical_backtest_included: false

@@ -61,6 +61,8 @@ BUY_ACTIONS = frozenset({"add", "conditional_add", "new_position", "buy"})
 SELL_ACTIONS = frozenset({"reduce", "sell", "exit"})
 VALID_QUOTE_QUALITY = frozenset({"VALID", "DEGRADED"})
 FINAL_ACTIONS = frozenset({"ACTION", "NO_ACTION", "DECISION_BLOCKED"})
+CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED = "CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED"
+SHADOW_MARK_DATA_GAP = "SHADOW_MARK_DATA_GAP"
 
 
 def _utc_naive(value: datetime | None) -> datetime | None:
@@ -474,6 +476,7 @@ def _observation_values(
     market = _market_lineage(result, workflow, payload)
     actions = _action_rows(result, payload)
     candidate_vetoes = _candidate_vetoes(result, workflow)
+    conditional_actions = [row for row in actions if row.get("action") == "conditional_add"]
     candidate_run_id = _candidate_run_id(db, result, workflow, user_id=run.user_id, portfolio_id=job.portfolio_id)
     memory = db.execute(select(DecisionMemory).where(DecisionMemory.analysis_run_id == run.id)).scalar_one_or_none()
     provider, model_name = _model_lineage(db, run)
@@ -486,6 +489,8 @@ def _observation_values(
         *(str(item) for item in (gate_reasons or []) if item),
         *( ["QUALITY_BLOCKED"] if quality == "BLOCKED" else [] ),
     ]))
+    if conditional_actions:
+        reason_codes.append(CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED)
     checkpoint = str(job.checkpoint).strip() if job.checkpoint else None
     trigger_context = job.context_json if isinstance(job.context_json, Mapping) else {}
     calculation_key = ":".join([
@@ -516,6 +521,11 @@ def _observation_values(
         "analysis_mode": job.mode,
         "candidate_vetoes": candidate_vetoes,
     }
+    if conditional_actions:
+        source_lineage["shadow_execution"] = {
+            "conditional_action_execution": "UNSUPPORTED_V1",
+            "conditional_action_codes": [row.get("code") for row in conditional_actions],
+        }
     source_lineage = _json_safe(source_lineage)
     facts = {
         "user_id": run.user_id,
@@ -1002,6 +1012,8 @@ def ensure_shadow_order_intents(
     for index, raw in enumerate(observation.selected_actions_json or []):
         if not isinstance(raw, Mapping):
             continue
+        if _canonical_action(raw.get("action")) == "conditional_add":
+            continue
         code = normalize_security_code(raw.get("code"))
         side = str(raw.get("side") or "").upper()
         if not code or side not in {"BUY", "SELL"}:
@@ -1359,7 +1371,7 @@ def process_pending_shadow_intents(
     """Consume only the first eligible future persisted quote for each intent."""
 
     moment = _utc_naive(now) or _now()
-    query = select(ShadowOrderIntent).where(ShadowOrderIntent.status.in_(("PENDING", "PARTIAL")))
+    query = select(ShadowOrderIntent).where(ShadowOrderIntent.status == "PENDING")
     if user_id is not None or portfolio_id is not None:
         query = query.join(ShadowAccount, ShadowOrderIntent.shadow_account_id == ShadowAccount.id)
         if user_id is not None:
@@ -1454,7 +1466,6 @@ def process_pending_shadow_intents(
             _set_intent_reason(intent, "TARGET_SIZE_MISSING")
             summary["blocked"] += 1
             continue
-        partial_fill = False
         if intent.side == "BUY":
             quantity = _floor_lot(quantity, _lot_size(security, security_type))
             if quantity <= 0:
@@ -1466,13 +1477,14 @@ def process_pending_shadow_intents(
             sellable = float(position.get("sellable_quantity") or 0.0)
             if sellable <= 0:
                 intent.status = "BLOCKED"
-                _set_intent_reason(intent, "SHADOW_SELLABLE_QTY_BLOCKED")
+                _set_intent_reason(intent, "BLOCKED_BY_SHADOW_SELLABLE_QTY")
                 summary["blocked"] += 1
                 continue
             if quantity > sellable:
-                quantity = sellable
-                partial_fill = True
-                _set_intent_reason(intent, "SELLABLE_QTY_LIMIT")
+                intent.status = "BLOCKED"
+                _set_intent_reason(intent, "BLOCKED_BY_SHADOW_SELLABLE_QTY")
+                summary["blocked"] += 1
+                continue
         if quantity <= 0:
             intent.status = "BLOCKED"
             _set_intent_reason(intent, "QUANTITY_INVALID")
@@ -1574,18 +1586,11 @@ def process_pending_shadow_intents(
                 "settlement_policy": settlement_policy,
             },
         )
-        if partial_fill:
-            if intent.target_qty is not None:
-                intent.target_qty = max(0.0, float(intent.target_qty) - quantity)
-            elif intent.target_notional is not None:
-                intent.target_notional = max(0.0, float(intent.target_notional) - gross)
-            intent.status = "PARTIAL" if (intent.target_qty or intent.target_notional or intent.target_weight) else "FILLED"
-        else:
-            intent.status = "FILLED"
+        intent.status = "FILLED"
         _set_intent_reason(intent, "PAPER_FILLED_FROM_FUTURE_QUOTE")
         refresh_shadow_materialized_state(db, account, as_of=quote.captured_at)
         summary["fills"].append(fill.id)
-        summary["partial" if intent.status == "PARTIAL" else "filled"] += 1
+        summary["filled"] += 1
     db.flush()
     return summary
 
@@ -1732,13 +1737,128 @@ def _security_forward_metrics(
     return forward, max(closes) / reference_price - 1.0, min(closes) / reference_price - 1.0, float(target.close)
 
 
-def _shadow_fill_for_observation(db: Session, observation_id: int, target_key: str) -> ShadowFill | None:
-    return db.execute(select(ShadowFill).join(
-        ShadowOrderIntent, ShadowFill.order_intent_id == ShadowOrderIntent.id
-    ).where(
-        ShadowOrderIntent.decision_observation_id == observation_id,
-        ShadowFill.code == target_key,
-    ).order_by(ShadowFill.fill_at.asc(), ShadowFill.id.asc()).limit(1)).scalar_one_or_none()
+def _shadow_execution_evidence(
+    db: Session,
+    outcome: LiveDecisionOutcome,
+    *,
+    now: datetime,
+) -> tuple[bool, bool, ShadowFill | None, dict[str, Any]]:
+    """Derive execution eligibility from the isolated intent/fill facts."""
+
+    if outcome.target_type not in {"PORTFOLIO", "SECURITY"}:
+        return False, False, None, {"status": "NON_EXECUTABLE_TARGET"}
+    if outcome.shadow_account_id is None or outcome.shadow_generation is None:
+        return False, False, None, {"status": "SHADOW_ACCOUNT_DATA_GAP"}
+    query = select(ShadowOrderIntent).where(
+        ShadowOrderIntent.shadow_account_id == outcome.shadow_account_id,
+        ShadowOrderIntent.shadow_generation == outcome.shadow_generation,
+        ShadowOrderIntent.decision_observation_id == outcome.decision_observation_id,
+    )
+    if outcome.target_type == "SECURITY":
+        query = query.where(ShadowOrderIntent.code == outcome.target_key)
+    intents = db.execute(query.order_by(ShadowOrderIntent.id.asc())).scalars().all()
+    if not intents:
+        status = (
+            CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED
+            if outcome.recommended_action == "conditional_add"
+            else "NO_SHADOW_INTENT"
+        )
+        return False, False, None, {"status": status, "intent_ids": [], "fill_ids": []}
+
+    intent_by_id = {intent.id: intent for intent in intents}
+    fills = db.execute(select(ShadowFill).where(
+        ShadowFill.order_intent_id.in_(tuple(intent_by_id)),
+        ShadowFill.shadow_account_id == outcome.shadow_account_id,
+        ShadowFill.shadow_generation == outcome.shadow_generation,
+    ).order_by(ShadowFill.fill_at.asc(), ShadowFill.id.asc())).scalars().all()
+    fill = next(
+        (item for item in fills if intent_by_id.get(item.order_intent_id, None) is not None
+         and intent_by_id[item.order_intent_id].status == "FILLED"),
+        None,
+    )
+    if fill is not None:
+        return True, True, fill, {
+            "status": "FILLED",
+            "intent_ids": list(intent_by_id),
+            "fill_ids": [item.id for item in fills],
+        }
+
+    future_quote_count = sum(
+        len(_eligible_quotes(db, intent, now=now))
+        for intent in intents
+        if intent.status == "PENDING"
+    )
+    statuses = {str(intent.status or "").upper() for intent in intents}
+    if "PENDING" in statuses:
+        status = "FUTURE_QUOTE_AVAILABLE_UNFILLED" if future_quote_count else "WAITING_FOR_FUTURE_QUOTE"
+    elif "BLOCKED" in statuses:
+        status = "BLOCKED"
+    elif "EXPIRED" in statuses:
+        status = "EXPIRED"
+    elif "SUPERSEDED" in statuses:
+        status = "SUPERSEDED"
+    else:
+        status = "NO_SHADOW_FILL"
+    return False, False, None, {
+        "status": status,
+        "intent_ids": list(intent_by_id),
+        "intent_statuses": sorted(statuses),
+        "future_quote_count": future_quote_count,
+        "fill_ids": [item.id for item in fills],
+    }
+
+
+def _shadow_daily_snapshot_for_generation(
+    db: Session,
+    *,
+    account_id: int,
+    generation: int,
+    trade_date: date,
+) -> ShadowDailySnapshot | None:
+    return db.execute(select(ShadowDailySnapshot).where(
+        ShadowDailySnapshot.shadow_account_id == account_id,
+        ShadowDailySnapshot.shadow_generation == generation,
+        ShadowDailySnapshot.trade_date == trade_date,
+    )).scalar_one_or_none()
+
+
+def _shadow_equity_at(
+    db: Session,
+    account: ShadowAccount,
+    *,
+    generation: int,
+    as_of: datetime,
+) -> tuple[float | None, dict[str, Any]]:
+    """Mark one generation at a reference time without using future facts."""
+
+    cutoff = _utc_naive(as_of) or _now()
+    state = rebuild_shadow_state(db, account, generation=generation, as_of=cutoff)
+    market_value = 0.0
+    refs: dict[str, Any] = {}
+    missing_codes: list[str] = []
+    for code, item in state["positions"].items():
+        bar = _bar(db, code, _china_date(cutoff), as_of=cutoff)
+        price = _positive(bar.close) if bar else None
+        basis = str(bar.adjustment or "QFQ") if bar and price is not None else None
+        if price is not None:
+            refs[code] = {"daily_bar_id": bar.id, "basis": basis}
+        else:
+            price, basis, quote_id = _latest_mark(db, code, as_of=cutoff)
+            refs[code] = {"quote_observation_id": quote_id, "basis": basis}
+        if price is None:
+            missing_codes.append(code)
+            continue
+        market_value += float(item["quantity"]) * float(price)
+    if missing_codes:
+        return None, {
+            "status": SHADOW_MARK_DATA_GAP,
+            "missing_codes": missing_codes,
+            "marks": refs,
+        }
+    return float(state["cash"]) + market_value, {
+        "status": "VALID",
+        "marks": refs,
+    }
 
 
 def evaluate_live_outcomes(
@@ -1772,9 +1892,33 @@ def evaluate_live_outcomes(
             continue
         benchmark = _benchmark_return(db, observation.trade_date, outcome.target_trade_date)
         forward = mfe = mae = target_price = None
+        portfolio_evidence: dict[str, Any] | None = None
         if outcome.target_type == "PORTFOLIO":
-            forward = benchmark
-            target_price = None
+            account = db.get(ShadowAccount, outcome.shadow_account_id) if outcome.shadow_account_id is not None else None
+            if account is not None and outcome.shadow_generation is not None:
+                reference_equity, reference_evidence = _shadow_equity_at(
+                    db,
+                    account,
+                    generation=outcome.shadow_generation,
+                    as_of=observation.decision_finalized_at,
+                )
+                target_snapshot = _shadow_daily_snapshot_for_generation(
+                    db,
+                    account_id=account.id,
+                    generation=outcome.shadow_generation,
+                    trade_date=outcome.target_trade_date,
+                )
+                target_equity = _number(target_snapshot.total_equity) if target_snapshot is not None else None
+                portfolio_evidence = {
+                    "account_id": account.id,
+                    "shadow_generation": outcome.shadow_generation,
+                    "reference_equity": reference_equity,
+                    "reference": reference_evidence,
+                    "target_snapshot_id": target_snapshot.id if target_snapshot is not None else None,
+                    "target_equity": target_equity,
+                }
+                if reference_equity is not None and reference_equity > 0 and target_equity is not None:
+                    forward = target_equity / reference_equity - 1.0
         else:
             reference = outcome.reference_price
             if reference is not None:
@@ -1786,8 +1930,22 @@ def evaluate_live_outcomes(
                     float(reference),
                     outcome.reference_price_basis,
                 )
+        execution_eligible, shadow_filled, fill, execution_evidence = _shadow_execution_evidence(
+            db,
+            outcome,
+            now=moment,
+        )
+        outcome.execution_eligible = execution_eligible
+        outcome.shadow_filled = shadow_filled
+        outcome.fill_delay_seconds = fill.execution_delay_seconds if fill else None
+        outcome.fill_drift = fill.execution_delay_price_drift if fill else None
+        source_refs = dict(outcome.source_refs_json or {})
+        source_refs["execution"] = execution_evidence
+        if portfolio_evidence is not None:
+            source_refs["portfolio_equity"] = portfolio_evidence
+        outcome.source_refs_json = source_refs
         if outcome.target_type == "PORTFOLIO":
-            incomplete = benchmark is None
+            incomplete = forward is None or benchmark is None
         else:
             incomplete = forward is None
         if incomplete:
@@ -1802,15 +1960,10 @@ def evaluate_live_outcomes(
         outcome.excess_return = forward - benchmark if forward is not None and benchmark is not None else None
         outcome.mfe = mfe
         outcome.mae = mae
-        outcome.direction = "UP" if (forward or 0.0) > 0 else "DOWN" if (forward or 0.0) < 0 else "FLAT"
+        outcome.direction = "UP" if forward > 0 else "DOWN" if forward < 0 else "FLAT"
         outcome.drawdown = mae
-        fill = _shadow_fill_for_observation(db, observation.id, outcome.target_key) if outcome.target_type == "SECURITY" else None
-        outcome.execution_eligible = outcome.target_type in {"PORTFOLIO", "SECURITY"} and outcome.reference_price is not None
-        outcome.shadow_filled = fill is not None
-        outcome.fill_delay_seconds = fill.execution_delay_seconds if fill else None
-        outcome.fill_drift = fill.execution_delay_price_drift if fill else None
         if observation.final_action == "NO_ACTION":
-            outcome.drawdown_avoided = max(0.0, -(benchmark or 0.0))
+            outcome.drawdown_avoided = max(0.0, -benchmark) if benchmark is not None else None
             outcome.risk_off_correct = bool(
                 str(observation.market_regime or "").upper() in {"RISK_OFF", "DEFENSIVE", "BEAR"}
                 and (benchmark is not None and benchmark < 0)
@@ -1840,18 +1993,23 @@ def create_shadow_daily_snapshot(
     market_value = 0.0
     refs: dict[str, Any] = {}
     bases: set[str] = set()
+    missing_codes: list[str] = []
     for code, item in state["positions"].items():
         bar = _bar(db, code, trade_date, as_of=close_at)
-        price = _number(bar.close) if bar else None
+        price = _positive(bar.close) if bar else None
         basis = str(bar.adjustment or "QFQ") if bar else None
         if price is None:
             price, basis, quote_id = _latest_mark(db, code, as_of=close_at)
             refs[code] = {"quote_observation_id": quote_id, "basis": basis}
         else:
             refs[code] = {"daily_bar_id": bar.id if bar else None, "basis": basis}
-        if price is not None:
-            market_value += float(item["quantity"]) * price
-            bases.add(str(basis or "UNKNOWN"))
+        if price is None:
+            missing_codes.append(code)
+            continue
+        market_value += float(item["quantity"]) * price
+        bases.add(str(basis or "UNKNOWN"))
+    if missing_codes:
+        raise RuntimeError(f"{SHADOW_MARK_DATA_GAP}:{','.join(sorted(missing_codes))}")
     equity = float(state["cash"]) + market_value
     previous = db.execute(select(ShadowDailySnapshot).where(
         ShadowDailySnapshot.shadow_account_id == account.id,
@@ -1997,11 +2155,21 @@ def shadow_account_performance(db: Session, account: ShadowAccount, *, generatio
     last = snapshots[-1] if snapshots else None
     cumulative = last.cumulative_return if last else None
     benchmark = None
+    performance_quality = "PENDING"
     if snapshots:
-        benchmark = 1.0
-        for item in snapshots:
-            benchmark *= 1.0 + float(item.benchmark_return or 0.0)
-        benchmark -= 1.0
+        benchmark_returns = [item.benchmark_return for item in snapshots]
+        # The first snapshot is the generation baseline and has no prior day;
+        # every later missing benchmark is a data gap, never a zero return.
+        if benchmark_returns and benchmark_returns[0] is None:
+            benchmark_returns = benchmark_returns[1:]
+        if benchmark_returns and all(value is not None for value in benchmark_returns):
+            benchmark = 1.0
+            for value in benchmark_returns:
+                benchmark *= 1.0 + float(value)
+            benchmark -= 1.0
+            performance_quality = "VALID"
+        elif benchmark_returns:
+            performance_quality = "DATA_GAP"
     return {
         "account_id": account.id,
         "shadow_generation": generation,
@@ -2014,6 +2182,7 @@ def shadow_account_performance(db: Session, account: ShadowAccount, *, generatio
         "cumulative_return": cumulative,
         "benchmark_return": benchmark,
         "excess_return": cumulative - benchmark if cumulative is not None and benchmark is not None else None,
+        "performance_quality": performance_quality,
         "max_drawdown": min((float(item.drawdown) for item in snapshots if item.drawdown is not None), default=None),
         "turnover": sum(float(item.turnover or 0.0) for item in snapshots),
         "transaction_cost": sum(float(item.total_cost or 0.0) for item in fills),
@@ -2060,7 +2229,7 @@ def validation_summary(db: Session, *, user_id: int, portfolio_id: int | None = 
             "no_action_count": 0,
             "blocked_count": 0,
             "sample_days": set(),
-            "outcomes": [],
+            "outcome_buckets": {},
         })
         item["decision_count"] += 1
         item["action_count"] += observation.final_action == "ACTION"
@@ -2068,15 +2237,45 @@ def validation_summary(db: Session, *, user_id: int, portfolio_id: int | None = 
         item["blocked_count"] += observation.final_action == "DECISION_BLOCKED"
         item["sample_days"].add(observation.trade_date.isoformat())
         for outcome in db.execute(select(LiveDecisionOutcome).where(LiveDecisionOutcome.decision_observation_id == observation.id, LiveDecisionOutcome.status == "COMPLETED")).scalars().all():
+            bucket_key = (outcome.target_type, outcome.target_key, outcome.horizon_trading_days)
+            bucket = item["outcome_buckets"].setdefault(bucket_key, {
+                "target_type": outcome.target_type,
+                "target_key": outcome.target_key,
+                "horizon_trading_days": outcome.horizon_trading_days,
+                "completed_outcome_count": 0,
+                "excess_returns": [],
+            })
+            bucket["completed_outcome_count"] += 1
             if outcome.excess_return is not None:
-                item["outcomes"].append(float(outcome.excess_return))
+                bucket["excess_returns"].append(float(outcome.excess_return))
     result: list[dict[str, Any]] = []
     for item in cohorts.values():
         sample_days = len(item.pop("sample_days"))
-        outcomes = item.pop("outcomes")
+        buckets = item.pop("outcome_buckets")
         item["sample_days"] = sample_days
-        item["completed_outcome_count"] = len(outcomes)
-        item["mean_excess_return"] = sum(outcomes) / len(outcomes) if outcomes else None
+        item["outcomes_by_target_horizon"] = [
+            {
+                "target_type": bucket["target_type"],
+                "target_key": bucket["target_key"],
+                "horizon_trading_days": bucket["horizon_trading_days"],
+                "completed_outcome_count": bucket["completed_outcome_count"],
+                "mean_excess_return": (
+                    sum(bucket["excess_returns"]) / len(bucket["excess_returns"])
+                    if bucket["excess_returns"] else None
+                ),
+            }
+            for bucket in sorted(
+                buckets.values(),
+                key=lambda value: (
+                    str(value["target_type"]),
+                    str(value["target_key"]),
+                    int(value["horizon_trading_days"]),
+                ),
+            )
+        ]
+        item["completed_outcome_count"] = sum(
+            bucket["completed_outcome_count"] for bucket in buckets.values()
+        )
         item["evidence_status"] = "INSUFFICIENT_LIVE_EVIDENCE" if sample_days < 20 or item["action_count"] < 30 else "OBSERVE"
         result.append(item)
     return {
@@ -2090,6 +2289,7 @@ def validation_summary(db: Session, *, user_id: int, portfolio_id: int | None = 
             "Paper fill uses only persisted future quotes.",
             "Slippage and order-book impact are not modeled.",
             "Live evidence is independent from Historical Research/Backtest.",
+            "Outcome means are separated by target and trading horizon.",
         ],
     }
 
@@ -2107,20 +2307,30 @@ def maintain_shadow(
     outcomes = evaluate_live_outcomes(db, as_of=moment)
     day = trade_date or _china_date(moment)
     snapshots: list[int] = []
+    snapshot_errors: list[dict[str, Any]] = []
     local_time = moment.replace(tzinfo=UTC).astimezone(__import__("zoneinfo").ZoneInfo("Asia/Shanghai")).time()
     if trade_date is not None or local_time >= time(15, 30):
         for account in db.execute(select(ShadowAccount).where(ShadowAccount.status.in_(("ACTIVE", "PAUSED")))).scalars().all():
             try:
                 snapshots.append(create_shadow_daily_snapshot(db, account, trade_date=day, as_of=moment).id)
-            except Exception:
+            except Exception as exc:
+                snapshot_errors.append({"account_id": account.id, "reason": str(exc)[:300]})
                 logger.exception("Shadow daily snapshot failed account=%s", account.id)
     db.flush()
-    return {"fills": fills, "outcomes": outcomes, "snapshots": snapshots}
+    return {
+        "fills": fills,
+        "outcomes": outcomes,
+        "snapshots": snapshots,
+        "degraded": bool(snapshot_errors),
+        "snapshot_errors": snapshot_errors,
+    }
 
 
 __all__ = [
     "ACTIONABLE_ACTIONS",
+    "CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED",
     "OUTCOME_HORIZONS",
+    "SHADOW_MARK_DATA_GAP",
     "SHADOW_EXECUTION_VERSION",
     "canonical_json",
     "capture_live_decision_observation",

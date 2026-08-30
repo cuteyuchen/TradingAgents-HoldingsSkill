@@ -147,6 +147,14 @@ function validationStatus() {
   return '持续观察'
 }
 
+function validationOutcomeText(item: ShadowValidation['cohorts'][number]) {
+  const buckets = item.outcomes_by_target_horizon || []
+  if (!buckets.length) return '暂无已完成 target/horizon'
+  return buckets.slice(0, 2)
+    .map((bucket) => `${bucket.target_type}/${bucket.target_key} ${bucket.horizon_trading_days}D ${percent(bucket.mean_excess_return)}`)
+    .join(' · ')
+}
+
 async function loadPortfolioData(portfolioId = selectedPortfolioId.value, preferredAccountId = selectedAccountId.value) {
   if (!portfolioId) return
   loading.value = true
@@ -524,7 +532,7 @@ onMounted(() => void load())
           <div v-if="validation?.cohorts?.length" class="cohort-list">
             <div v-for="item in validation.cohorts.slice(0, 6)" :key="JSON.stringify(item.cohort)" class="cohort-row">
               <div><strong>{{ item.cohort.parameter_set_hash ? String(item.cohort.parameter_set_hash).slice(0, 12) : 'UNKNOWN' }}</strong><small>G{{ item.cohort.shadow_generation || '—' }} · {{ item.sample_days }} days · N={{ item.decision_count }}</small></div>
-              <div class="fact-right"><n-tag size="small" :type="statusType(item.evidence_status)">{{ item.evidence_status }}</n-tag><small>mean excess {{ percent(item.mean_excess_return) }}</small></div>
+              <div class="fact-right"><n-tag size="small" :type="statusType(item.evidence_status)">{{ item.evidence_status }}</n-tag><small>{{ validationOutcomeText(item) }}</small></div>
             </div>
           </div>
           <n-empty v-else description="Live sample = 0，等待真实交易日积累证据" />
