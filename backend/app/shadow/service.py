@@ -1670,7 +1670,10 @@ def _bar(db: Session, code: str, day: date, *, as_of: datetime | None = None) ->
     )
     if as_of is not None:
         cutoff = _utc_naive(as_of) or _now()
-        query = query.where((DailyBarCache.available_at.is_(None)) | (DailyBarCache.available_at <= cutoff))
+        query = query.where(
+            DailyBarCache.available_at.is_not(None),
+            DailyBarCache.available_at <= cutoff,
+        )
     # QFQ is the production daily-bar basis.  If only another basis exists,
     # the caller can explicitly reject the mix instead of silently combining it.
     return db.execute(query.order_by(
@@ -1694,16 +1697,32 @@ def _basis_compatible(reference_basis: str | None, target_basis: str | None) -> 
     return bool(reference and target and reference not in {"UNKNOWN", "NONE"} and target not in {"UNKNOWN", "NONE"} and reference == target)
 
 
-def _benchmark_return(db: Session, start: date, end: date) -> float | None:
-    first = db.execute(select(AllAMedianIndexDaily).where(
+def _benchmark_return(
+    db: Session,
+    start: date,
+    end: date,
+    *,
+    as_of: datetime | None = None,
+) -> float | None:
+    filters = [
         AllAMedianIndexDaily.market == "CN",
+        AllAMedianIndexDaily.quality_status.in_(tuple(VALID_QUOTE_QUALITY)),
+    ]
+    if as_of is not None:
+        cutoff = _utc_naive(as_of) or _now()
+        filters.extend([
+            AllAMedianIndexDaily.available_at.is_not(None),
+            AllAMedianIndexDaily.available_at <= cutoff,
+        ])
+    first = db.execute(select(AllAMedianIndexDaily).where(
+        *filters,
         AllAMedianIndexDaily.trade_date <= start,
     ).order_by(AllAMedianIndexDaily.trade_date.desc(), AllAMedianIndexDaily.id.desc()).limit(1)).scalar_one_or_none()
     last = db.execute(select(AllAMedianIndexDaily).where(
-        AllAMedianIndexDaily.market == "CN",
+        *filters,
         AllAMedianIndexDaily.trade_date <= end,
     ).order_by(AllAMedianIndexDaily.trade_date.desc(), AllAMedianIndexDaily.id.desc()).limit(1)).scalar_one_or_none()
-    if first is None or last is None or not first.index_value:
+    if first is None or last is None or not first.index_value or not last.index_value:
         return None
     return float(last.index_value) / float(first.index_value) - 1.0
 
@@ -1837,14 +1856,14 @@ def _shadow_equity_at(
     refs: dict[str, Any] = {}
     missing_codes: list[str] = []
     for code, item in state["positions"].items():
-        bar = _bar(db, code, _china_date(cutoff), as_of=cutoff)
-        price = _positive(bar.close) if bar else None
-        basis = str(bar.adjustment or "QFQ") if bar and price is not None else None
+        price, basis, quote_id = _latest_mark(db, code, as_of=cutoff)
         if price is not None:
-            refs[code] = {"daily_bar_id": bar.id, "basis": basis}
-        else:
-            price, basis, quote_id = _latest_mark(db, code, as_of=cutoff)
             refs[code] = {"quote_observation_id": quote_id, "basis": basis}
+        else:
+            bar = _bar(db, code, _china_date(cutoff), as_of=cutoff)
+            price = _positive(bar.close) if bar else None
+            basis = str(bar.adjustment or "QFQ") if bar and price is not None else None
+            refs[code] = {"daily_bar_id": bar.id if bar else None, "basis": basis}
         if price is None:
             missing_codes.append(code)
             continue
@@ -1890,7 +1909,12 @@ def evaluate_live_outcomes(
         if outcome.target_trade_date is None or outcome.target_trade_date > _china_date(moment):
             pending += 1
             continue
-        benchmark = _benchmark_return(db, observation.trade_date, outcome.target_trade_date)
+        benchmark = _benchmark_return(
+            db,
+            observation.trade_date,
+            outcome.target_trade_date,
+            as_of=moment,
+        )
         forward = mfe = mae = target_price = None
         portfolio_evidence: dict[str, Any] | None = None
         if outcome.target_type == "PORTFOLIO":
@@ -2029,7 +2053,16 @@ def create_shadow_daily_snapshot(
         ShadowDailySnapshot.shadow_generation == account.shadow_generation,
         ShadowDailySnapshot.trade_date <= trade_date,
     )).scalars().all()] + [equity])
-    benchmark = _benchmark_return(db, previous.trade_date if previous else trade_date, trade_date) if previous else None
+    benchmark = (
+        _benchmark_return(
+            db,
+            previous.trade_date if previous else trade_date,
+            trade_date,
+            as_of=close_at,
+        )
+        if previous
+        else None
+    )
     turnover = sum(
         float(fill.gross_amount or 0.0)
         for fill in db.execute(select(ShadowFill).where(

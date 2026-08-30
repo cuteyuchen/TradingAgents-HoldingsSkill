@@ -42,6 +42,8 @@ from app.shadow.service import (
     rebuild_shadow_state,
     shadow_account_performance,
     validation_summary,
+    _benchmark_return,
+    _shadow_equity_at,
 )
 from app.system.health import shadow_status
 from app.shadow_models import (
@@ -568,6 +570,7 @@ def test_no_action_outcome_and_candidate_veto_are_first_class(db: Session) -> No
             close=10.0 if index == 0 else 12.0,
             adjustment="QFQ",
             provider="test",
+            available_at=datetime.combine(current, datetime.min.time()).replace(hour=6, minute=55),
             quality_status="VALID",
         ))
     db.flush()
@@ -632,6 +635,7 @@ def test_portfolio_outcome_uses_shadow_equity_and_independent_benchmark(db: Sess
             index_value=100.0,
             eligible_count=1,
             quality_status="VALID",
+            available_at=datetime(2026, 8, 20, 7, 5),
         ),
         AllAMedianIndexDaily(
             market="CN",
@@ -640,6 +644,7 @@ def test_portfolio_outcome_uses_shadow_equity_and_independent_benchmark(db: Sess
             index_value=101.0,
             eligible_count=1,
             quality_status="VALID",
+            available_at=datetime(2026, 8, 21, 7, 5),
         ),
         ShadowDailySnapshot(
             shadow_account_id=account.id,
@@ -682,6 +687,156 @@ def test_portfolio_outcome_uses_shadow_equity_and_independent_benchmark(db: Sess
     assert outcome.excess_return == pytest.approx(0.03)
 
 
+def test_shadow_reference_equity_prefers_as_of_quote_over_unknown_same_day_bar(db: Session) -> None:
+    day = date(2026, 8, 20)
+    decision_at = datetime(2026, 8, 20, 2, 30)
+    _calendar(db, [day])
+    user, portfolio, snapshot = _portfolio(
+        db,
+        cash=20_000.0,
+        holdings=[{"code": "600001", "qty": 1000, "available_qty": 1000, "price": 10.0, "cost": 10.0}],
+    )
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 0),
+    )
+    db.add(DailyBarCache(
+        market="CN",
+        exchange="SSE",
+        code="600001",
+        trade_date=day,
+        close=12.0,
+        adjustment="QFQ",
+        provider="test",
+        available_at=None,
+        quality_status="VALID",
+    ))
+    db.flush()
+    quote = _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 29), price=10.0)
+
+    equity, evidence = _shadow_equity_at(db, account, generation=1, as_of=decision_at)
+
+    assert equity == pytest.approx(30_000.0)
+    assert evidence["status"] == "VALID"
+    assert evidence["marks"]["600001"]["quote_observation_id"] == quote.id
+    assert evidence["marks"]["600001"].get("daily_bar_id") is None
+
+
+def test_shadow_reference_equity_without_visible_mark_keeps_portfolio_outcome_pending(db: Session) -> None:
+    day = date(2026, 8, 20)
+    target_day = date(2026, 8, 21)
+    decision_at = datetime(2026, 8, 20, 2, 30)
+    _calendar(db, [day, target_day])
+    user, portfolio, snapshot = _portfolio(
+        db,
+        cash=20_000.0,
+        holdings=[{"code": "600001", "qty": 1000, "available_qty": 1000, "price": 10.0, "cost": 10.0}],
+    )
+    account = create_shadow_account(
+        db,
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 0),
+    )
+    db.add_all([
+        DailyBarCache(
+            market="CN",
+            exchange="SSE",
+            code="600001",
+            trade_date=day,
+            close=12.0,
+            adjustment="QFQ",
+            provider="test",
+            available_at=None,
+            quality_status="VALID",
+        ),
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=day,
+            median_return=0.0,
+            index_value=100.0,
+            eligible_count=1,
+            quality_status="VALID",
+            available_at=datetime(2026, 8, 20, 7, 0),
+        ),
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=target_day,
+            median_return=0.01,
+            index_value=101.0,
+            eligible_count=1,
+            quality_status="VALID",
+            available_at=datetime(2026, 8, 21, 7, 0),
+        ),
+        ShadowDailySnapshot(
+            shadow_account_id=account.id,
+            shadow_generation=1,
+            trade_date=target_day,
+            cash=30_000.0,
+            market_value=0.0,
+            total_equity=30_000.0,
+        ),
+    ])
+    db.flush()
+    run = _run(
+        db,
+        user=user,
+        portfolio=portfolio,
+        snapshot=snapshot,
+        finished_at=decision_at,
+        actions=[],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=True)
+    assert observation is not None
+
+    result = evaluate_live_outcomes(db, as_of=datetime(2026, 8, 21, 8, 0), observation_id=observation.id)
+    outcome = db.scalar(select(LiveDecisionOutcome).where(
+        LiveDecisionOutcome.decision_observation_id == observation.id,
+        LiveDecisionOutcome.target_type == "PORTFOLIO",
+        LiveDecisionOutcome.horizon_trading_days == 1,
+    ))
+
+    assert result["completed"] == 0
+    assert outcome is not None
+    assert outcome.status == "PENDING"
+    assert outcome.quality_status == "DATA_GAP"
+    assert outcome.forward_return is None
+    assert outcome.excess_return is None
+    assert outcome.source_refs_json["portfolio_equity"]["reference"]["status"] == "SHADOW_MARK_DATA_GAP"
+
+
+def test_benchmark_as_of_requires_known_available_at(db: Session) -> None:
+    day = date(2026, 8, 20)
+    target_day = date(2026, 8, 21)
+    db.add_all([
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=day,
+            median_return=0.0,
+            index_value=100.0,
+            eligible_count=1,
+            quality_status="VALID",
+            available_at=None,
+        ),
+        AllAMedianIndexDaily(
+            market="CN",
+            trade_date=target_day,
+            median_return=0.01,
+            index_value=101.0,
+            eligible_count=1,
+            quality_status="VALID",
+            available_at=None,
+        ),
+    ])
+    db.flush()
+
+    assert _benchmark_return(db, day, target_day, as_of=datetime(2026, 8, 21, 8, 0)) is None
+
+
 def test_execution_eligibility_requires_intent_and_future_quote(db: Session) -> None:
     day = date(2026, 8, 20)
     target_day = date(2026, 8, 21)
@@ -702,6 +857,7 @@ def test_execution_eligibility_requires_intent_and_future_quote(db: Session) -> 
             index_value=100.0,
             eligible_count=1,
             quality_status="VALID",
+            available_at=datetime(2026, 8, 20, 7, 5),
         ),
         AllAMedianIndexDaily(
             market="CN",
@@ -710,6 +866,7 @@ def test_execution_eligibility_requires_intent_and_future_quote(db: Session) -> 
             index_value=110.0,
             eligible_count=1,
             quality_status="VALID",
+            available_at=datetime(2026, 8, 21, 7, 5),
         ),
         DailyBarCache(
             market="CN",
@@ -722,6 +879,7 @@ def test_execution_eligibility_requires_intent_and_future_quote(db: Session) -> 
             close=11.0,
             adjustment="QFQ",
             provider="test",
+            available_at=datetime(2026, 8, 21, 7, 0),
             quality_status="VALID",
         ),
     ])
