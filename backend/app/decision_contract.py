@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-CONTRACT_VERSION = "2.1.0"
+CONTRACT_VERSION = "2.4.0"
 DEFAULT_PORTFOLIO_ACTION = "no_action"
 CANDIDATE_MIN_COUNT = 0
 CANDIDATE_MAX_COUNT = 3
@@ -26,6 +26,9 @@ HORIZONS = {
 CANONICAL_ANALYSIS_MODES = ("fast", "standard", "deep")
 ANALYSIS_MODE_ALIASES = {"quick": "fast"}
 SUPPORTED_ANALYSIS_MODES = ("quick",) + CANONICAL_ANALYSIS_MODES
+ACTIONABLE_HOLDING_ACTIONS = frozenset({"add", "conditional_add", "reduce", "sell"})
+ACTIONABLE_PORTFOLIO_RATINGS = frozenset({"add", "reduce", "sell", "rotate"})
+ACTIONABLE_CANDIDATE_TYPES = frozenset({"new_position", "add", "buy"})
 
 
 def canonicalize_analysis_mode(value: Any, *, default: str = "deep") -> str:
@@ -51,7 +54,7 @@ def decision_contract_payload() -> dict[str, Any]:
         "hard_caps": {
             "stock": STOCK_HARD_CAP_RATIO,
             "sector_theme_etf": SECTOR_THEME_ETF_HARD_CAP_RATIO,
-            "deterministic_enforcement": False,
+            "deterministic_enforcement": True,
         },
         "horizons": HORIZONS,
         "analysis_modes": {
@@ -111,6 +114,39 @@ def should_normalize_no_action(
     """Whether a successful analysis deterministically means no portfolio change."""
     if str(quality_gate_status or "").lower() == "blocked":
         return False
-    if candidates:
+    return not has_actionable_portfolio_change(
+        {"holdings": holdings, "candidates": candidates},
+        include_final_rating=False,
+    )
+
+
+def has_actionable_portfolio_change(
+    result: Any,
+    *,
+    include_final_rating: bool = True,
+) -> bool:
+    """Return whether a normalized result contains a real portfolio change.
+
+    This intentionally treats a current Action Candidate as a change while
+    excluding watch-only rows.  It is shared by result normalization and
+    TriggerEvent resolution so their ACTION semantics cannot drift.
+    """
+
+    if not isinstance(result, dict):
         return False
-    return all(str(row.get("action") or "watch").lower() in {"hold", "watch"} for row in holdings)
+    if include_final_rating and str(result.get("final_rating") or "").lower() in ACTIONABLE_PORTFOLIO_RATINGS:
+        return True
+    for row in result.get("holdings") or []:
+        if isinstance(row, dict) and str(row.get("action") or "").lower() in ACTIONABLE_HOLDING_ACTIONS:
+            return True
+    for row in result.get("today_actions") or []:
+        if isinstance(row, dict) and str(row.get("action") or row.get("type") or "").lower() in ACTIONABLE_HOLDING_ACTIONS:
+            return True
+    candidate_rows = result.get("candidates") if "candidates" in result else result.get("buy_candidates")
+    for row in candidate_rows or []:
+        if not isinstance(row, dict) or row.get("buyable") is False:
+            continue
+        candidate_type = str(row.get("candidate_type") or row.get("action") or row.get("type") or "").lower()
+        if candidate_type in ACTIONABLE_CANDIDATE_TYPES:
+            return True
+    return False

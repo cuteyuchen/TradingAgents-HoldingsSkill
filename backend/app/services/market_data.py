@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 import random
-import re
 import threading
 import time
 import uuid
@@ -13,6 +12,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from ..market.codes import normalize_security_code
+from ..market.providers.tencent import TencentQuoteProvider, parse_tencent_line as _normalized_parse_tencent_line
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 _EM_LOCK = threading.Lock()
@@ -20,8 +22,8 @@ _EM_LAST_CALL = 0.0
 
 
 def normalize_code(value: str) -> str:
-    match = re.search(r"(\d{6})", value or "")
-    return match.group(1) if match else (value or "").strip().upper()
+    """Legacy facade for the shared security-code normalizer."""
+    return normalize_security_code(value)
 
 
 def tencent_symbol(code: str) -> str:
@@ -83,47 +85,54 @@ def _em_get(
 
 
 def _parse_tencent_line(line: str) -> dict[str, Any] | None:
-    if '="' not in line:
+    quote = _normalized_parse_tencent_line(line)
+    if quote is None:
         return None
-    raw = line.split('="', 1)[1].rstrip('";\r\n')
-    fields = raw.split("~")
-    if len(fields) < 38:
-        return None
-    code = normalize_code(fields[2])
-    quote_time = fields[30] or None
-    return {
-        "code": code,
-        "name": fields[1] or None,
-        "price": _float(fields[3]),
-        "prev_close": _float(fields[4]),
-        "open": _float(fields[5]),
-        "pct_change": _float(fields[32]),
-        "high": _float(fields[33]),
-        "low": _float(fields[34]),
-        "volume": _float(fields[36]),
-        "turnover": _float(fields[37]),
-        "quote_time": quote_time,
-        "source": "Tencent qt.gtimg.cn",
-        "stale": False,
-    }
+    legacy = quote.to_dict()
+    legacy_quote_time = (
+        quote.source_timestamp.astimezone(CHINA_TZ).strftime("%H:%M:%S")
+        if quote.source_timestamp
+        else None
+    )
+    legacy.update(
+        {
+            "turnover": legacy.get("amount"),
+            "source": "Tencent qt.gtimg.cn",
+            "stale": legacy.get("quality_status") in {"STALE", "MISSING"},
+            "quote_time": legacy_quote_time,
+        }
+    )
+    return legacy
 
 
 def fetch_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     normalized = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
     if not normalized:
         return {}
-    symbols = [tencent_symbol(code) for code in normalized]
-    response = requests.get(
-        "https://qt.gtimg.cn/q=" + ",".join(symbols),
-        headers={"User-Agent": USER_AGENT, "Referer": "https://finance.qq.com/"},
-        timeout=10,
-    )
-    response.raise_for_status()
+    provider = TencentQuoteProvider(timeout=10)
+    normalized_quotes = provider.get_quotes(normalized)
     results: dict[str, dict[str, Any]] = {}
-    for line in _decode(response.content).splitlines():
-        parsed = _parse_tencent_line(line)
-        if parsed and parsed["code"]:
-            results[parsed["code"]] = parsed
+    for code, quote in normalized_quotes.items():
+        parsed = quote.to_dict()
+        legacy_quote_time = (
+            quote.source_timestamp.astimezone(CHINA_TZ).strftime("%H:%M:%S")
+            if quote.source_timestamp
+            else None
+        )
+        if parsed.get("quality_status") in {"MISSING", "INVALID"}:
+            errors = parsed.get("errors") or []
+            parsed["error"] = str(errors[0]) if errors else (
+                "quote_missing" if parsed.get("quality_status") == "MISSING" else "quote_invalid"
+            )
+        parsed.update(
+            {
+                "turnover": parsed.get("amount"),
+                "source": "Tencent qt.gtimg.cn",
+                "stale": parsed.get("quality_status") in {"STALE", "MISSING"},
+                "quote_time": legacy_quote_time,
+            }
+        )
+        results[code] = parsed
     missing = set(normalized) - set(results)
     for code in missing:
         results[code] = {

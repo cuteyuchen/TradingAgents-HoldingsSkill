@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          pytest tests -q --tb=short > "$RUNNER_TEMP/backend-tests.log" 2>&1
+          python -m pytest tests -q --tb=short > "$RUNNER_TEMP/backend-tests.log" 2>&1
           status=$?
           cat "$RUNNER_TEMP/backend-tests.log"
           exit $status

@@ -4,10 +4,13 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
   BellRing,
+  FlaskConical,
+  Activity,
   LayoutDashboard,
   LogOut,
   Moon,
   Settings,
+  ShieldCheck,
   Sun,
   Upload,
 } from 'lucide-vue-next'
@@ -40,6 +43,10 @@ const navigation = [
   { name: 'dashboard', label: '总览', icon: LayoutDashboard },
   { name: 'upload', label: '今日持仓', icon: Upload },
   { name: 'reports', label: '分析报告', icon: BarChart3 },
+  { name: 'shadow', label: 'Shadow', icon: ShieldCheck },
+  { name: 'research', label: '历史研究', icon: FlaskConical },
+  { name: 'governance', label: '参数治理', icon: ShieldCheck },
+  { name: 'system', label: '系统运维', icon: Activity },
   { name: 'settings', label: '系统设置', icon: Settings },
 ]
 

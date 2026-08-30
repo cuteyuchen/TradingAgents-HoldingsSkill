@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..candidates.service import latest_candidate_context, scan_candidates
 from ..config import settings
 from ..database import SessionLocal
 from ..decision_contract import (
@@ -17,9 +19,13 @@ from ..decision_contract import (
     canonicalize_analysis_mode,
     should_normalize_no_action,
 )
+from ..memory.service import current_memory_features, memory_context_for_analysis
+from ..portfolio.decision_gate import apply_portfolio_decision_gate
+from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
 from .model_client import call_model, parse_json_result
+from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_prompt
 
 logger = logging.getLogger(__name__)
@@ -35,9 +41,14 @@ CORE_RULES = """
 - 同日或近期建议发生方向反转，必须指出发生了什么实质变化。
 - 缺少关键行情时，不得编造触发价和具体数量。
 - 新 Candidate 只表示当前未持有的新机会，允许 0-3 个；当前持仓加仓/条件加仓只能出现在 Holding Action。
+- Phase F deterministic Candidate Engine 是新 Candidate 的唯一来源：模型只能解释或否决后端 ACTION，不能发明代码、提升 READY/WATCHLIST、修改分数或绕过 Decision Edge。
+- Fast 只读取同一持仓快照下的近期可靠 CandidateRun；Standard/Deep 才能运行本地缓存扫描，候选扫描不得逐票联网。
 - 证据充分、所有持仓为 hold/watch 且没有通过门控的新 Candidate 时，组合级结果必须为 no_action；质量门控 blocked 时必须保留 watch_only。
 - 事实、推断、风险和失效条件必须区分。
 - 这是研究辅助，不承诺收益，不执行交易。
+- portfolio_context 是后端提供的确定性组合风险事实和动作上限，不是交易指令；不得覆盖 hard_cap、max_additional_weight 或 max_sellable_qty。
+- Historical Memory 仅是可审计的辅助证据。当前 Market、Portfolio、Candidate、Data Quality 和 Decision Gate 永远优先；历史案例不得发明候选、升级候选阶段或覆盖风险门控。
+- 不得因为历史案例盈利就复制动作，也不得因为历史案例亏损就机械反向交易。Memory context 不能改变任何因子权重、Hard Cap 或 Risk Gate。
 """.strip()
 
 # Keep the model-facing schema explicit.  The frontend can render the report even
@@ -68,8 +79,20 @@ FINAL_SCHEMA = {
             "action": "add/hold/reduce/sell/watch",
             "reason": "证据与原因",
             "trigger": "条件或价格",
+            "trigger_plan": {
+                "condition": "price_below/price_above/pct_change_below/pct_change_above",
+                "threshold": 0.0,
+                "priority": "P0/P1/P2/P3",
+                "action_context": "触发后复核的动作语义",
+            },
             "quantity": "数量或比例；卖出不得超过 available_qty",
+            "current_weight": 0.0,
+            "target_weight": 0.0,
+            "adjustment_weight": 0.0,
             "max_sellable_qty": 0,
+            "hard_cap": 0.0,
+            "max_additional_weight": 0.0,
+            "portfolio_gate": "PASS/ADJUSTED/BLOCKED/REVIEW_ONLY",
             "stop_loss": "止损/失效条件",
             "take_profit": "止盈/观察条件",
             "risk": "主要风险",
@@ -103,6 +126,7 @@ FINAL_SCHEMA = {
     "hot_sectors": [],
     "rebalance_plan": {},
     "checkpoint_plan": "",
+    "memory_context": {},
 }
 
 
@@ -516,11 +540,94 @@ def _numeric_score(value: Any) -> float | None:
     return score if score == score and score not in {float("inf"), float("-inf")} else None
 
 
+def _trigger_context(job: AnalysisJob) -> dict[str, Any] | None:
+    """Return server-owned Trigger context as analysis context, never an order."""
+
+    context = job.context_json if isinstance(job.context_json, dict) else {}
+    event_ids = list(context.get("trigger_event_ids") or [])
+    if not event_ids and context.get("trigger_event_id") is not None:
+        event_ids = [context["trigger_event_id"]]
+    if not event_ids:
+        return None
+    contexts = [item for item in context.get("trigger_contexts") or [] if isinstance(item, dict)]
+    if not contexts:
+        contexts = [{
+            "trigger_event_id": event_ids[-1],
+            "trigger_reason": context.get("trigger_reason"),
+            "trigger_evidence": context.get("trigger_evidence") or {},
+        }]
+    return {
+        "trigger_event_ids": event_ids,
+        "reason": context.get("trigger_reason"),
+        "evidence": context.get("trigger_evidence") or {},
+        "events": contexts,
+        "interpretation": "这是本次重新分析的原因与已观测证据，不是交易指令；必须独立核验后才能提出任何动作。",
+    }
+
+
+def _candidate_context_for_analysis(
+    db: Session,
+    *,
+    job: AnalysisJob,
+    analysis_mode: str,
+    quote_rows: Any = None,
+    parameter_context: dict[str, Any] | None = None,
+    parameter_lineage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load deterministic candidates without allowing analysis to invent them."""
+
+    try:
+        candidate_config = None
+        if parameter_context is not None:
+            from ..governance.registry import candidate_config_from_snapshot
+
+            candidate_config = candidate_config_from_snapshot(parameter_context["snapshot"])
+        if analysis_mode == "fast":
+            return latest_candidate_context(
+                db,
+                user_id=job.user_id,
+                portfolio_id=job.portfolio_id,
+                snapshot_id=job.snapshot_id,
+                max_age_seconds=30 * 60,
+                require_reliable=True,
+            )
+        return scan_candidates(
+            db,
+            user_id=job.user_id,
+            portfolio_id=job.portfolio_id,
+            snapshot_id=job.snapshot_id,
+            mode=analysis_mode,
+            persist=True,
+            config=candidate_config,
+            # Standard/Deep own one fresh all-market bulk quote snapshot inside
+            # Candidate Engine.  The initial market snapshot only covers held
+            # positions and must not be reused as candidate provenance.
+            quote_rows=None,
+            parameter_context=parameter_context,
+            parameter_lineage=parameter_lineage,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Candidate Engine unavailable for analysis job %s", job.id)
+        return {
+            "status": "unavailable",
+            "quality_status": "MISSING",
+            "confidence": 0.0,
+            "run_id": None,
+            "watchlist": [],
+            "ready": [],
+            "action": [],
+            "candidates": [],
+            "reason": "CANDIDATE_ENGINE_UNAVAILABLE",
+            "error": str(exc)[:300],
+        }
+
+
 def _normalize_final(
     result: dict[str, Any],
     holdings: list[dict[str, Any]],
     quality_grade: str,
     workflow: dict[str, Any] | None = None,
+    candidate_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     defaults = {
         "data_quality_grade": quality_grade,
@@ -531,6 +638,7 @@ def _normalize_final(
         "confidence": "low",
         "holdings": [],
         "candidates": [],
+        "candidate_engine": {},
         "history_consistency": "",
         "bull_case": [],
         "bear_case": [],
@@ -549,6 +657,7 @@ def _normalize_final(
             result[key] = [result[key]] if result.get(key) not in (None, "") else []
 
     workflow = workflow or {}
+    candidate_context = candidate_context if candidate_context is not None else workflow.get("candidate_context")
     for key in (
         "evidence_pack",
         "quality_gate",
@@ -567,6 +676,19 @@ def _normalize_final(
         result["candidate_status"] = workflow["candidate_status"]
     if workflow.get("candidate_blocked_reason"):
         result["candidate_blocked_reason"] = workflow["candidate_blocked_reason"]
+    if candidate_context is not None:
+        result["candidate_engine"] = {
+            "run_id": candidate_context.get("run_id") or (candidate_context.get("run") or {}).get("id"),
+            "status": candidate_context.get("status", "unavailable"),
+            "quality_status": candidate_context.get("quality_status", "MISSING"),
+            "confidence": candidate_context.get("confidence", 0.0),
+            "market_regime": (candidate_context.get("candidate_engine") or {}).get("market_regime"),
+            "watchlist_count": len(candidate_context.get("watchlist") or []),
+            "ready_count": len(candidate_context.get("ready") or []),
+            "action_count": len(candidate_context.get("action") or []),
+            "calculation_version": (candidate_context.get("candidate_engine") or {}).get("calculation_version"),
+            "reason": candidate_context.get("reason"),
+        }
     phase_errors = workflow.get("phase_errors") or []
     if phase_errors:
         result["phase_errors"] = phase_errors
@@ -644,6 +766,22 @@ def _normalize_final(
 
     holding_codes = {row["code"] for row in output_rows}
     filtered_candidates: list[dict[str, Any]] = []
+    deterministic_allowed: dict[str, dict[str, Any]] | None = None
+    candidate_quality = ""
+    candidate_quality_blocked = False
+    if candidate_context is not None:
+        candidate_quality = str(
+            candidate_context.get("quality_status")
+            or (candidate_context.get("run") or {}).get("quality_status")
+            or ""
+        ).upper()
+        candidate_quality_blocked = candidate_quality in {"MISSING", "BLOCKED", "BLOCKED_FOR_ACTION"}
+        if not candidate_quality_blocked:
+            deterministic_allowed = {
+                normalize_code(str(item.get("code") or "")): dict(item)
+                for item in candidate_context.get("action") or []
+                if isinstance(item, dict) and normalize_code(str(item.get("code") or ""))
+            }
     # An explicitly empty workflow list is authoritative: the candidate scan
     # may have blocked new opportunities even when a later model response still
     # echoes stale candidates in its final payload.
@@ -651,6 +789,22 @@ def _normalize_final(
         raw_candidates = workflow.get("candidates") or []
     else:
         raw_candidates = result.get("buy_candidates") or result.get("candidates") or []
+    final_model_rating = str(
+        result.get("final_rating")
+        or (result.get("portfolio_manager_final") or {}).get("portfolio_rating")
+        or ""
+    ).lower()
+    if candidate_quality_blocked:
+        raw_candidates = []
+        result.setdefault(
+            "candidate_blocked_reason",
+            f"CandidateRun 全局质量门为 {candidate_quality}，新增风险候选已关闭。",
+        )
+    if candidate_context is not None and final_model_rating in {"no_action", "watch_only"}:
+        # The deterministic ACTION set is the only source of candidates, but
+        # the final model is still allowed to veto the entire set.
+        raw_candidates = []
+        result.setdefault("candidate_blocked_reason", "最终组合经理否决新增风险，保持 NO_ACTION。")
     gate = result.get("quality_gate") or workflow.get("quality_gate") or {}
     gate_grade = str(gate.get("grade") or quality_grade).upper()
     gate_status = str(gate.get("status") or "pass").lower()
@@ -668,6 +822,48 @@ def _normalize_final(
             if code in holding_codes:
                 result["risk_warnings"].append(f"候选 {code} 已在当前持仓中，已从新增机会列表移除。")
             continue
+        if deterministic_allowed is not None:
+            deterministic_row = deterministic_allowed.get(code)
+            if deterministic_row is None:
+                # READY/WATCHLIST rows and model-invented codes can never enter
+                # the Phase A new-position contract.
+                continue
+            if row.get("accepted") is False or row.get("veto") is True or row.get("actionable") is False:
+                continue
+            model_row = row
+            row = {**deterministic_row, **model_row}
+            # LLM output may explain or demote, but may not alter the facts that
+            # determine stage, score, edge, coverage, or risk.
+            for field in (
+                "name",
+                "security_type",
+                "etf_category",
+                "stage",
+                "candidate_engine_stage",
+                "score",
+                "opportunity_score",
+                "entry_score",
+                "portfolio_fit_score",
+                "action_score",
+                "decision_edge",
+                "edge_vs_no_action",
+                "edge_vs_current_holdings",
+                "risk_reward_ratio",
+                "data_coverage",
+                "confidence",
+                "funding_mode",
+                "probe_weight",
+                "positive_drivers",
+                "negative_drivers",
+                "blocking_reasons",
+                "risk_flags",
+                "components",
+                "entry",
+                "portfolio_fit",
+                "comparison",
+            ):
+                if field in deterministic_row:
+                    row[field] = deterministic_row[field]
         row["code"] = code
         candidate_type = str(row.get("candidate_type") or row.get("type") or row.get("action") or "rotation_watch").lower()
         candidate_type = {
@@ -700,6 +896,7 @@ def _normalize_final(
         if score is None or score < 7:
             continue
         row["buyable"] = True
+        row["actionable"] = True
         row["gate_status"] = "buyable"
         filtered_candidates.append(row)
 
@@ -817,6 +1014,7 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
     revision = result.get("risk_revision") or {}
     risk_debate = result.get("risk_debate_state") or {}
     portfolio_final = result.get("portfolio_manager_final") or {}
+    decision_gate = result.get("decision_gate") or {}
     lines = [
         f"# {job.checkpoint or '即时'} 持仓分析",
         "",
@@ -929,6 +1127,28 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
         f"- 硬性约束：{_md(portfolio_final.get('hard_constraints') or revision.get('hard_constraints'))}",
         f"- 去风险触发器：{_md(portfolio_final.get('de_risk_triggers') or revision.get('de_risk_triggers'))}",
         "",
+        "## 组合约束门",
+        "",
+        f"- Gate 状态：`{_md(decision_gate.get('status'))}`；组合动作：`{_md(decision_gate.get('portfolio_action'))}`",
+        f"- 阻断原因：{_md(decision_gate.get('blocking_reasons') or '无')}",
+        f"- 调整提示：{_md(decision_gate.get('warnings') or '无')}",
+        "",
+        "| 标的 | Gate | 请求目标/数量 | 允许目标/数量 | Reason Code |",
+        "|---|---|---|---|---|",
+    ])
+    for gate_row in decision_gate.get("action_results") or []:
+        lines.append(
+            f"| {_md(gate_row.get('code'))} | {_md(gate_row.get('status'))} | "
+            f"{_md(gate_row.get('requested_target_weight') if gate_row.get('requested_target_weight') is not None else gate_row.get('requested_qty'))} | "
+            f"{_md(gate_row.get('allowed_target_weight') if gate_row.get('allowed_target_weight') is not None else gate_row.get('allowed_qty'))} | "
+            f"{_md(gate_row.get('reason_codes'))} |"
+        )
+    if not decision_gate.get("action_results"):
+        lines.append("| - | PASS | - | - | - |")
+
+    lines.extend([
+        "",
+        "",
         "## 今日持仓操作",
         "",
         "| 标的 | 操作 | 条件/触发 | 数量 | 最大可卖 | 关键原因 | 风险/失效 |",
@@ -1011,9 +1231,62 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
     return "\n".join(lines)
 
 
+def _fail_closed_portfolio_gate_result(final: dict[str, Any], error: Exception) -> dict[str, Any]:
+    """Remove executable portfolio changes when the deterministic Gate fails."""
+
+    final["portfolio_engine"] = {"status": "unavailable", "error": str(error)[:300]}
+    final["decision_gate"] = {
+        "status": "REVIEW_ONLY",
+        "portfolio_action": "WATCH_ONLY",
+        "blocking_reasons": ["PORTFOLIO_ENGINE_UNAVAILABLE"],
+        "calculation_version": "portfolio-decision-gate-v1",
+    }
+    safe_holdings: list[dict[str, Any]] = []
+    for raw in final.get("holdings") or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        if str(row.get("action") or "").lower() in {"add", "conditional_add", "reduce", "sell"}:
+            row["action"] = "watch"
+            row["quantity"] = None
+            row["target_weight"] = None
+        row["portfolio_gate"] = "BLOCKED"
+        row["portfolio_gate_reasons"] = ["PORTFOLIO_ENGINE_UNAVAILABLE"]
+        safe_holdings.append(row)
+    safe_candidates: list[dict[str, Any]] = []
+    for raw in final.get("candidates") or []:
+        if not isinstance(raw, dict):
+            continue
+        candidate = dict(raw)
+        candidate["buyable"] = False
+        candidate["actionable"] = False
+        candidate["gate_status"] = "blocked"
+        candidate["portfolio_gate"] = "BLOCKED"
+        candidate["portfolio_gate_reasons"] = ["PORTFOLIO_ENGINE_UNAVAILABLE"]
+        safe_candidates.append(candidate)
+    final["holdings"] = safe_holdings
+    final["today_actions"] = safe_holdings
+    final["candidates"] = safe_candidates
+    final["buy_candidates"] = safe_candidates
+    final["final_rating"] = "watch_only"
+    final["portfolio_conclusion"] = "组合约束引擎暂不可用，本次不输出可执行交易动作。"
+    portfolio_final = final.get("portfolio_manager_final") if isinstance(final.get("portfolio_manager_final"), dict) else {}
+    portfolio_final["portfolio_rating"] = "watch_only"
+    portfolio_final["final_actions"] = safe_holdings
+    final["portfolio_manager_final"] = portfolio_final
+    return final
+
+
 def run_analysis_job(job_id: int) -> None:
     db = SessionLocal()
     job: AnalysisJob | None = None
+    heartbeat: AnalysisLeaseHeartbeat | None = None
+    stop_event = threading.Event()
+    from ..system.logging import bind_worker_context
+    from ..system.workers import register_worker, unregister_worker
+
+    register_worker("analysis", job_id, stop_event)
+    bind_worker_context(analysis_job_id=job_id)
     try:
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
         if job is None or job.status not in {"queued", "retrying"}:
@@ -1023,6 +1296,22 @@ def run_analysis_job(job_id: int) -> None:
         job.error_code = None
         job.error_message = None
         db.commit()
+        heartbeat = AnalysisLeaseHeartbeat.for_job(
+            db,
+            job_id=job.id,
+            external_stop=stop_event,
+        )
+        if heartbeat is not None:
+            heartbeat.start()
+
+        from ..governance.service import lineage_fields, resolve_production_parameters
+
+        parameter_context = resolve_production_parameters(db)
+        parameter_lineage = lineage_fields(parameter_context)
+        bind_worker_context(
+            analysis_job_id=job_id,
+            parameter_set_version=parameter_lineage.get("parameter_set_version"),
+        )
 
         snapshot_row = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == job.snapshot_id).first()
         if snapshot_row is None or snapshot_row.status != "confirmed":
@@ -1051,13 +1340,54 @@ def run_analysis_job(job_id: int) -> None:
         codes = [item["code"] for item in snapshot["holdings"] if item.get("code")]
         _job_stage(db, job, "market_collecting", 20)
         market = collect_market_snapshot(codes)
+        # A realtime Trigger may have attached context after this job began.
+        # Refresh before model prompts so a reused active job sees that reason.
+        db.refresh(job)
         phase_errors: list[str] = []
         evidence: dict[str, Any] = {}
         workflow: dict[str, Any] = {"phase_errors": phase_errors}
+        trigger_context = _trigger_context(job)
+        if trigger_context is not None:
+            workflow["trigger_context"] = trigger_context
         final_profile = deep_profile or quick_profile
         system_prompt = CORE_RULES + "\n\n" + runtime_prompt()
+        try:
+            portfolio_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Portfolio Engine context failed for analysis job %s", job.id)
+            portfolio_context = {
+                "interpretation": "Portfolio Engine context unavailable; do not produce executable risk-increase actions.",
+                "portfolio_quality": "BLOCKED",
+                "portfolio_confidence": 0.0,
+                "position_constraints": [],
+                "market_state_frozen": False,
+                "portfolio_engine_error": str(exc)[:300],
+            }
+            workflow["phase_errors"].append("portfolio_engine_context_unavailable")
+        workflow["portfolio_context"] = portfolio_context
         quality_gate = _quality_gate(snapshot, market)
         analysis_mode = canonicalize_analysis_mode(job.mode)
+        workflow["analysis_mode"] = analysis_mode
+        candidate_context = _candidate_context_for_analysis(
+            db,
+            job=job,
+            analysis_mode=analysis_mode,
+            quote_rows=market.get("quotes") if isinstance(market, dict) else None,
+            parameter_context=parameter_context,
+            parameter_lineage=parameter_lineage,
+        )
+        workflow["candidate_context"] = candidate_context
+        memory_context = memory_context_for_analysis(
+            db,
+            user_id=job.user_id,
+            portfolio_id=job.portfolio_id,
+            as_of=job.started_at or datetime.now(UTC),
+            current_features=current_memory_features(
+                portfolio_context=portfolio_context,
+                candidate_context=candidate_context,
+            ),
+        )
+        workflow["memory_context"] = memory_context
 
         if quality_gate["status"] == "blocked":
             final = _blocked_result(snapshot, market)
@@ -1088,6 +1418,10 @@ def run_analysis_job(job_id: int) -> None:
                 "recent_history": history,
                 "checkpoint": job.checkpoint,
                 "analysis_mode": analysis_mode,
+                "trigger_context": trigger_context,
+                "portfolio_context": portfolio_context,
+                "candidate_context": candidate_context,
+                "memory_context": memory_context,
             }
 
             _job_stage(db, job, "analysts_running", 30)
@@ -1238,43 +1572,98 @@ def run_analysis_job(job_id: int) -> None:
                 input_payload["market"] = market
 
                 _job_stage(db, job, "candidate_screening", 87)
-                candidate_raw = _required_call_json(
-                    analyst_profile,
-                    system_prompt,
-                    {
-                        "input": input_payload,
-                        "quality_gate": quality_gate,
-                        "trader_proposal": trader,
-                        "risk_revision": risk_revision,
-                    },
-                    "执行今日新增机会三层扫描：大盘环境、热门板块、候选盘口。输出 0-3 个可行动的非当前持仓候选；candidates=[] 是正常结果，不得为了数量生成。"
-                    "每个候选必须包含 code、name、candidate_type(new_position)，score>=7，且不得属于当前持仓；"
-                    "reason_detail(catalyst/capital_flow/sector_position)、entry_trigger、initial_size、take_profit_1、"
-                    "take_profit_2、stop_loss、invalidating_condition、score(0-10)、score_breakdown。"
-                    "同时输出 hot_sectors、market_buy_mode、cancel_all_buys_when、candidate_blocked_reason。",
-                    "candidate_screening",
-                )
-                candidates = candidate_raw.get("candidates") or candidate_raw.get("buy_candidates") or []
-                candidate_evidence_gaps: list[str] = []
-                if not market.get("sector_heat"):
-                    candidate_evidence_gaps.append("market.sector_heat")
-                if not ((market.get("candidate_pool") or {}).get("etf_leaders")):
-                    candidate_evidence_gaps.append("market.candidate_pool.etf_leaders")
-                if not market.get("news"):
-                    candidate_evidence_gaps.append("market.news")
-                if candidate_evidence_gaps:
+                deterministic_candidates = [
+                    dict(item)
+                    for item in candidate_context.get("action") or []
+                    if isinstance(item, dict) and str(item.get("stage") or "").upper() == "ACTION"
+                ]
+                candidate_raw: dict[str, Any] = {
+                    "deterministic_candidates": deterministic_candidates,
+                    "candidates": deterministic_candidates,
+                    "accepted_codes": [item.get("code") for item in deterministic_candidates],
+                    "review_status": "not_needed" if not deterministic_candidates else "pending",
+                }
+                if deterministic_candidates:
+                    try:
+                        review_raw = _call_json(
+                            analyst_profile,
+                            system_prompt,
+                            {
+                                "input": input_payload,
+                                "candidate_context": candidate_context,
+                                "deterministic_action_candidates": deterministic_candidates,
+                                "quality_gate": quality_gate,
+                                "trader_proposal": trader,
+                                "risk_revision": risk_revision,
+                            },
+                            "只审查后端 deterministic_action_candidates。你可以解释、补充风险，或明确否决某个候选；"
+                            "不得新增代码、不得把 READY/WATCHLIST 提升为 ACTION、不得修改任何分数、coverage、confidence、"
+                            "decision_edge、risk_reward_ratio 或 stage。若没有需要否决的候选，原样返回 accepted_codes。"
+                            "输出 JSON：{accepted_codes:[], veto_codes:[], explanations:{code:{reason_detail:{},risk:[]}}, "
+                            "hot_sectors:[], candidate_blocked_reason:\"\"}。",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        review_raw = {
+                            "review_status": "unavailable",
+                            "review_error": str(exc)[:300],
+                        }
+                        phase_errors.append("candidate_llm_review_unavailable")
+                    candidate_raw.update(review_raw if isinstance(review_raw, dict) else {})
+                    all_codes = {
+                        normalize_code(str(item.get("code") or ""))
+                        for item in deterministic_candidates
+                    }
+                    if "accepted_codes" in candidate_raw:
+                        accepted_codes = {
+                            normalize_code(str(code))
+                            for code in candidate_raw.get("accepted_codes") or []
+                        }
+                    elif "candidates" in candidate_raw or "buy_candidates" in candidate_raw:
+                        returned = candidate_raw.get("candidates")
+                        if returned is None:
+                            returned = candidate_raw.get("buy_candidates")
+                        accepted_codes = {
+                            normalize_code(str(item.get("code") or ""))
+                            for item in returned or []
+                            if isinstance(item, dict)
+                        }
+                    else:
+                        accepted_codes = all_codes
+                    veto_codes = {
+                        normalize_code(str(code))
+                        for code in candidate_raw.get("veto_codes") or candidate_raw.get("rejected_codes") or []
+                    }
+                    accepted_codes -= veto_codes
+                    explanations = candidate_raw.get("explanations") if isinstance(candidate_raw.get("explanations"), dict) else {}
                     candidates = []
+                    for item in deterministic_candidates:
+                        code = normalize_code(str(item.get("code") or ""))
+                        if code not in accepted_codes or code in veto_codes:
+                            continue
+                        explanation = explanations.get(code) if isinstance(explanations.get(code), dict) else {}
+                        candidates.append({**item, **explanation})
+                    candidate_raw["accepted_codes"] = [item.get("code") for item in candidates]
+                    candidate_raw["review_status"] = candidate_raw.get("review_status") or "completed"
+                else:
+                    candidates = []
+                diagnostics = candidate_context.get("diagnostics") if isinstance(candidate_context.get("diagnostics"), dict) else {}
+                action_zero_reasons = diagnostics.get("action_zero_reasons") or {}
+                deterministic_blocked_reason = candidate_context.get("reason")
+                if not deterministic_blocked_reason and action_zero_reasons:
+                    deterministic_blocked_reason = "确定性候选未通过门控：" + "、".join(
+                        f"{key}={value}" for key, value in sorted(action_zero_reasons.items())
+                    )
                 workflow["candidates"] = candidates
+                workflow["candidate_review"] = candidate_raw
                 workflow["hot_sectors"] = candidate_raw.get("hot_sectors") or market.get("sector_heat") or []
                 workflow["candidate_status"] = (
-                    "blocked_missing_evidence"
-                    if candidate_evidence_gaps
-                    else candidate_raw.get("market_buy_mode") or ("ready" if candidates else "none")
+                    candidate_raw.get("market_buy_mode")
+                    or ("ready" if candidates else "llm_veto" if deterministic_candidates else candidate_context.get("status") or "none")
                 )
                 workflow["candidate_blocked_reason"] = (
-                    "候选数据不完整，暂不给出可执行买入：" + "、".join(candidate_evidence_gaps)
-                    if candidate_evidence_gaps
-                    else candidate_raw.get("candidate_blocked_reason")
+                    candidate_raw.get("candidate_blocked_reason")
+                    or deterministic_blocked_reason
+                    or ("LLM 否决了全部 deterministic ACTION 候选。" if deterministic_candidates and not candidates else None)
                 )
 
                 _job_stage(db, job, "portfolio_synthesis", 92)
@@ -1295,7 +1684,8 @@ def run_analysis_job(job_id: int) -> None:
                     },
                     "Phase 5 组合经理最终决策：基于最终刷新行情综合全部阶段，严格按 required_schema 返回 JSON。"
                     "每个当前持仓都必须出现，today_actions 与 holdings 一致，buy_candidates 与 candidates 一致，"
-                    "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。",
+                    "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。trigger 保留报告用自然语言；"
+                    "trigger_plan 仅在存在明确机器可读阈值时输出对象，否则必须为 null。",
                     "portfolio_synthesis",
                 )
                 if not final:
@@ -1316,6 +1706,21 @@ def run_analysis_job(job_id: int) -> None:
             final = _normalize_final(final, snapshot["holdings"], quality_gate.get("grade", market.get("quality_grade", "C")), workflow)
         else:
             final = _normalize_final(final, snapshot["holdings"], final.get("data_quality_grade", "F"), workflow)
+        try:
+            # Rebuild from the final quote refresh so the Gate sees the same
+            # server-owned price facts as the persisted visible decision.
+            portfolio_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
+            workflow["portfolio_context"] = portfolio_context
+            final = apply_portfolio_decision_gate(final, portfolio_context=portfolio_context)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Portfolio Decision Gate failed for analysis job %s", job.id)
+            workflow["phase_errors"].append("portfolio_decision_gate_unavailable")
+            final = _fail_closed_portfolio_gate_result(final, exc)
+        final["portfolio_engine"] = {
+            **(final.get("portfolio_engine") if isinstance(final.get("portfolio_engine"), dict) else {}),
+            "portfolio_context": workflow.get("portfolio_context"),
+            "calculation_version": "portfolio-engine-v1",
+        }
         for key in (
             "evidence_pack",
             "quality_gate",
@@ -1330,8 +1735,13 @@ def run_analysis_job(job_id: int) -> None:
             "hot_sectors",
             "rebalance_plan",
             "checkpoint_plan",
+            "portfolio_context",
+            "decision_gate",
+            "portfolio_engine",
         ):
             workflow[key] = final.get(key)
+        workflow["memory_context"] = memory_context
+        final["memory_context"] = memory_context
 
         _job_stage(db, job, "report_rendering", 96)
         markdown = render_markdown(final, market, snapshot, job)
@@ -1382,6 +1792,10 @@ def run_analysis_job(job_id: int) -> None:
                 },
             },
             markdown_text=markdown,
+            parameter_set_version_id=parameter_lineage["parameter_set_version_id"],
+            parameter_set_version=parameter_lineage["parameter_set_version"],
+            parameter_set_hash=parameter_lineage["parameter_set_hash"],
+            governance_lineage_json=parameter_lineage["governance_lineage_json"],
         )
         db.add(run)
         job.status = "succeeded"
@@ -1391,6 +1805,79 @@ def run_analysis_job(job_id: int) -> None:
         db.commit()
         db.refresh(run)
 
+        # Memory is a derived maintenance fact. Capture it after the successful
+        # AnalysisRun commit so a capture failure cannot roll back the report.
+        memory_db = SessionLocal()
+        try:
+            from ..memory.decision import capture_decision_memory
+
+            persisted_run = memory_db.query(AnalysisRun).filter(AnalysisRun.id == run.id).first()
+            captured_memory = (
+                capture_decision_memory(
+                    memory_db,
+                    persisted_run,
+                    available_at=datetime.now(UTC),
+                    commit=True,
+                )
+                if persisted_run is not None
+                else None
+            )
+            if captured_memory is not None:
+                logger.info(
+                    "memory_capture portfolio=%s analysis_run=%s decision_type=%s targets=%s quality=%s",
+                    job.portfolio_id,
+                    run.id,
+                    captured_memory.decision_type,
+                    len(captured_memory.holding_decisions_json or []) + len(captured_memory.candidate_decisions_json or []),
+                    captured_memory.quality_status,
+                )
+        except Exception:
+            logger.exception("Decision Memory capture failed for analysis run %s", run.id)
+        finally:
+            memory_db.close()
+
+        # Live Decision Observation is a validation-side effect.  It runs in
+        # its own session after the authoritative AnalysisRun commit so a
+        # shadow schema/worker failure can never roll back the production
+        # decision or make the analysis endpoint fail.
+        shadow_db = SessionLocal()
+        try:
+            from ..shadow.service import capture_live_decision_observation
+
+            persisted_run = shadow_db.query(AnalysisRun).filter(AnalysisRun.id == run.id).first()
+            observation = (
+                capture_live_decision_observation(shadow_db, persisted_run)
+                if persisted_run is not None
+                else None
+            )
+            shadow_db.commit()
+            if observation is not None:
+                logger.info(
+                    "shadow_observation portfolio=%s analysis_run=%s observation=%s action=%s",
+                    job.portfolio_id,
+                    run.id,
+                    observation.id,
+                    observation.final_action,
+                )
+        except Exception:
+            shadow_db.rollback()
+            logger.exception("Live Decision Observation capture failed for analysis run %s", run.id)
+        finally:
+            shadow_db.close()
+
+        # Realtime triggers are resolved only after the authoritative AnalysisRun
+        # exists.  Standard/Deep runs may also refresh explicit structured plans;
+        # natural-language conditions remain report-only.
+        try:
+            from ..triggers.resolution import resolve_trigger_event_from_analysis_run
+            from ..triggers.plans import refresh_trigger_plans_from_run
+
+            resolve_trigger_event_from_analysis_run(db, run)
+            refresh_trigger_plans_from_run(db, run, mode=analysis_mode)
+            db.commit()
+        except Exception:
+            logger.exception("Trigger post-processing failed for analysis run %s", run.id)
+
         if job.notify:
             try:
                 from .notifications import send_run_notifications
@@ -1399,6 +1886,19 @@ def run_analysis_job(job_id: int) -> None:
                 db.commit()
             except Exception:
                 logger.exception("Notification failed for analysis run %s", run.id)
+        try:
+            from ..operations.notifications import dispatch_material_events
+
+            dispatch_material_events(
+                db,
+                user_id=run.user_id,
+                portfolio_id=job.portfolio_id,
+                as_of=run.created_at,
+            )
+        except Exception:
+            # Operating notifications are advisory side effects and must never
+            # change the authoritative AnalysisJob/AnalysisRun result.
+            logger.exception("Operating notification dispatch failed for analysis run %s", run.id)
     except Exception as exc:
         logger.exception("Analysis job %s failed", job_id)
         if job is not None:
@@ -1416,4 +1916,7 @@ def run_analysis_job(job_id: int) -> None:
                 job.finished_at = datetime.now(UTC)
                 db.commit()
     finally:
+        if heartbeat is not None:
+            heartbeat.stop()
+        unregister_worker("analysis", job_id)
         db.close()

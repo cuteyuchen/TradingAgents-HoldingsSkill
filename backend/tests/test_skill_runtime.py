@@ -19,8 +19,8 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
     prompt = runtime_prompt()
 
     assert runtime["name"] == "tradingagents-holdings-advisor"
-    assert runtime["version"] == "2.1.0"
-    assert runtime["prompt_version"] == "2026-08-22"
+    assert runtime["version"] == "2.4.0"
+    assert runtime["prompt_version"] == "2026-08-26"
     assert list(runtime["checkpoints"]) == ["09:35", "10:30", "13:05", "14:30", "15:10"]
     assert len(runtime["runtime_sha256"]) == 64
     assert metadata["runtime_sha256"] == runtime["runtime_sha256"]
@@ -39,6 +39,10 @@ def test_repository_skill_runtime_is_loadable_and_versioned():
     assert contract["hard_caps"]["sector_theme_etf"] == 0.30
     assert contract["analysis_modes"]["canonical"] == ["fast", "standard", "deep"]
     assert contract["analysis_modes"]["aliases"]["quick"] == "fast"
-    assert metadata["decision_contract_version"] == "2.1.0"
+    assert contract["hard_caps"]["deterministic_enforcement"] is True
+    assert metadata["decision_contract_version"] == "2.4.0"
     assert metadata["contract_keys"]["candidate_max"] == 3
     assert '"default_portfolio_action": "no_action"' in prompt
+    assert runtime["notification_semantics"]["severity"] == [
+        "INFO", "IMPORTANT", "ACTION_REQUIRED", "CRITICAL"
+    ]

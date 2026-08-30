@@ -4,6 +4,7 @@
 .idea
 .vscode
 .pytest_cache
+**/.pytest_cache
 .env
 **/.env.local
 *.log
