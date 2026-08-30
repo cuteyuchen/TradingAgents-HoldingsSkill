@@ -24,6 +24,18 @@
   equity 优先使用 cutoff 前的合法 LiveQuote，无法证明 mark 可见时保持
   `SHADOW_MARK_DATA_GAP`，不发布 Portfolio outcome。
 
+## Phase N Final Acceptance
+
+验收日期：2026-08-30
+
+当前结论：`PASS`
+
+- Phase N Architecture：`PASS`
+- Phase N.1 Execution & Outcome Integrity：`PASS`
+- PIT / Future Quote Anti-Lookahead：`PASS`
+- Real Portfolio Isolation：`PASS`
+- Remote Sync：`PASS`
+
 ## Release Identity
 
 | 项目 | 值 |
@@ -83,7 +95,7 @@
 | Frontend typecheck | 已通过 `npm run typecheck` |
 | Frontend build | 已通过 `npm run build`；仅有 Vite 大 chunk warning |
 | Docker build | 已通过 |
-| GitHub CI | PR 创建前尚无 workflow run，待远端 PR CI 确认 |
+| GitHub CI | PR #6 的 backend、frontend、docker checks 全部通过 |
 
 ## Explicit Non-Features
 
