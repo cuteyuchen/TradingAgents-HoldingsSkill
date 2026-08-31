@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   CalendarRange,
   Database,
@@ -13,10 +13,14 @@ import {
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
+import EmptyState from '../components/EmptyState.vue'
+import ErrorState from '../components/ErrorState.vue'
+import LoadingState from '../components/LoadingState.vue'
+import { usePortfolioContext } from '../composables/portfolio'
+import { fmtDateTime, unavailableText } from '../utils/ui'
 import type {
   BacktestRun,
   CalibrationReport,
-  Portfolio,
   RecomputeCapabilityManifest,
   ReplayAvailabilityItem,
   ReplayAvailabilityManifest,
@@ -27,17 +31,35 @@ import type {
 const message = useMessage()
 const loading = ref(false)
 const running = ref(false)
+const cancelLoading = ref(false)
+const loadError = ref<unknown>(null)
 const availability = ref<ReplayAvailabilityManifest | null>(null)
-const portfolios = ref<Portfolio[]>([])
 const runs = ref<BacktestRun[]>([])
 const reports = ref<CalibrationReport[]>([])
 const selectedRun = ref<BacktestRun | null>(null)
 const selectedReport = ref<CalibrationReport | null>(null)
 const recomputePreview = ref<RecomputeCapabilityManifest | null>(null)
 const previewLoading = ref(false)
+let runPollTimer: number | null = null
+let runPollBusy = false
+let mounted = false
+
+const {
+  portfolios,
+  selectedPortfolioId,
+  selectedPortfolio,
+  loadPortfolios,
+} = usePortfolioContext()
 
 function isoDate(value: Date): string {
-  return value.toISOString().slice(0, 10)
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return [values.year, values.month, values.day].join('-')
 }
 
 const endDate = isoDate(new Date())
@@ -116,7 +138,7 @@ function statusType(status?: string | null): 'success' | 'warning' | 'error' | '
 
 function statusText(status?: string | null): string {
   const labels: Record<string, string> = {
-    FULL: 'FULL', PARTIAL: 'PARTIAL', DIAGNOSTIC_ONLY: 'DIAGNOSTIC_ONLY', DATA_GAP: 'DATA_GAP',
+    FULL: 'FULL', FULL_PIT_EQUIVALENT: '完整 PIT 重算', PARTIAL: 'PARTIAL', PARTIAL_PIT_RECOMPUTE: '部分历史输入缺失，仅供研究', DIAGNOSTIC_ONLY: '仅诊断', DATA_GAP: 'DATA_GAP',
     UNSUPPORTED: 'UNSUPPORTED', LEAKAGE_BLOCKED: 'LEAKAGE_BLOCKED', COMPLETED: 'COMPLETED',
     RUNNING: 'RUNNING', QUEUED: 'QUEUED', CANCELLED: 'CANCELLED', FAILED: 'FAILED',
     INVALIDATED: 'INVALIDATED', INSUFFICIENT_DATA: 'INSUFFICIENT_DATA',
@@ -131,7 +153,7 @@ function pct(value?: number | null): string {
 }
 
 function fmt(value?: string | null): string {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+  return fmtDateTime(value)
 }
 
 function portfolioFor(scope: ResearchScope, value: number | null): number | null {
@@ -140,17 +162,18 @@ function portfolioFor(scope: ResearchScope, value: number | null): number | null
 
 async function load() {
   loading.value = true
+  loadError.value = null
   try {
+    await loadPortfolios()
+    if (!runForm.portfolio_id && selectedPortfolioId.value) runForm.portfolio_id = selectedPortfolioId.value
     const values = await Promise.all([
-      api.listPortfolios(),
       api.getReplayAvailability({ start_date: runForm.start_date, end_date: runForm.end_date, portfolio_id: runForm.portfolio_id || undefined }),
-      api.listBacktests(),
-      api.listCalibrations(),
+      api.listBacktests(selectedPortfolioId.value || undefined),
+      api.listCalibrations(selectedPortfolioId.value || undefined),
     ])
-    portfolios.value = values[0]
-    availability.value = values[1]
-    runs.value = values[2]
-    reports.value = values[3]
+    availability.value = values[0]
+    runs.value = values[1]
+    reports.value = values[2]
     if (selectedRun.value) {
       selectedRun.value = await api.getBacktest(selectedRun.value.id)
     } else if (runs.value[0]) {
@@ -161,12 +184,42 @@ async function load() {
     } else if (reports.value[0]) {
       selectedReport.value = reports.value[0]
     }
+    if (selectedRun.value && ['QUEUED', 'RUNNING'].includes(String(selectedRun.value.status).toUpperCase())) startRunPolling()
+    else stopRunPolling()
     await refreshRecomputePreview()
   } catch (error) {
-    message.error((error as Error).message)
+    loadError.value = error
   } finally {
     loading.value = false
   }
+}
+
+function stopRunPolling() {
+  if (runPollTimer !== null) {
+    window.clearInterval(runPollTimer)
+    runPollTimer = null
+  }
+  runPollBusy = false
+}
+
+function startRunPolling() {
+  stopRunPolling()
+  if (!selectedRun.value || !['QUEUED', 'RUNNING'].includes(String(selectedRun.value.status).toUpperCase())) return
+  runPollTimer = window.setInterval(async () => {
+    if (!selectedRun.value || runPollBusy) return
+    runPollBusy = true
+    try {
+      const latest = await api.getBacktest(selectedRun.value.id)
+      selectedRun.value = latest
+      const rowIndex = runs.value.findIndex((item) => item.id === latest.id)
+      if (rowIndex >= 0) runs.value[rowIndex] = latest
+      if (!['QUEUED', 'RUNNING'].includes(String(latest.status).toUpperCase())) stopRunPolling()
+    } catch (error) {
+      loadError.value = error
+    } finally {
+      runPollBusy = false
+    }
+  }, 1500)
 }
 
 let previewSequence = 0
@@ -206,6 +259,15 @@ async function refreshAvailability() {
 }
 
 async function createRun() {
+  if (running.value) return
+  if (runForm.start_date > runForm.end_date) {
+    message.warning('开始日期不能晚于结束日期')
+    return
+  }
+  if (!runForm.horizons.length) {
+    message.warning('至少选择一个 Forward Horizon')
+    return
+  }
   running.value = true
   try {
     const run = await api.createBacktest({
@@ -219,8 +281,9 @@ async function createRun() {
       bootstrap_iterations: 500,
     })
     selectedRun.value = run
+    startRunPolling()
     await load()
-    message.success(`研究 Run #${run.id} 已完成或进入持久化状态`)
+    message.success('研究 Run 已提交，页面会持续同步进度')
   } catch (error) {
     message.error((error as Error).message)
   } finally {
@@ -229,19 +292,27 @@ async function createRun() {
 }
 
 async function cancelRun() {
-  if (!selectedRun.value) return
+  if (!selectedRun.value || cancelLoading.value) return
+  cancelLoading.value = true
   try {
     selectedRun.value = await api.cancelBacktest(selectedRun.value.id)
+    stopRunPolling()
     await load()
     message.info('研究 Run 已取消')
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    cancelLoading.value = false
   }
 }
 
 function selectRun(run: BacktestRun) {
   selectedRun.value = run
-  void api.getBacktest(run.id).then((value) => { selectedRun.value = value }).catch((error) => message.error(error.message))
+  void api.getBacktest(run.id).then((value) => {
+    selectedRun.value = value
+    if (['QUEUED', 'RUNNING'].includes(String(value.status).toUpperCase())) startRunPolling()
+    else stopRunPolling()
+  }).catch((error) => { loadError.value = error })
 }
 
 function parseGrid(value: string): Array<number | string> | undefined {
@@ -291,12 +362,19 @@ function downloadJson(label: string, value: unknown) {
   URL.revokeObjectURL(url)
 }
 
-onMounted(() => void load())
+onMounted(() => { mounted = true; void load() })
+onUnmounted(stopRunPolling)
 
 watch(
   () => [runForm.scope, runForm.replay_mode, runForm.start_date, runForm.end_date, runForm.portfolio_id],
   () => { void refreshRecomputePreview() },
 )
+
+watch(selectedPortfolioId, (value) => {
+  if (!mounted) return
+  runForm.portfolio_id = value
+  void load()
+})
 </script>
 
 <template>
@@ -305,7 +383,7 @@ watch(
       <div>
         <div class="research-eyebrow"><FlaskConical :size="15" /> OFFLINE RESEARCH</div>
         <h1>历史回放与参数校准</h1>
-        <p>只读取已持久化事实，输出可复现的 Backtest Evidence 与人工评审报告。</p>
+        <p>只读取已持久化事实，输出可复现的 Backtest Evidence 与人工评审报告。<span v-if="selectedPortfolio">当前组合：{{ selectedPortfolio.name }}</span></p>
       </div>
       <n-button secondary :loading="loading" @click="load">
         <template #icon><RefreshCw :size="16" /></template>
@@ -313,6 +391,8 @@ watch(
       </n-button>
     </header>
 
+    <ErrorState v-if="loadError" :error="loadError" @retry="load" />
+    <LoadingState v-if="loading && !availability" message="正在读取研究数据" />
     <div class="research-grid research-grid-top">
       <n-card class="panel-card" :bordered="false">
         <template #header>
@@ -322,7 +402,7 @@ watch(
           <div v-for="row in availabilityRows" :key="row.key" class="availability-row">
             <div class="availability-name">
               <strong>{{ row.label }}</strong>
-              <span>{{ row.item?.row_count ?? 0 }} rows · {{ pct(row.item?.coverage) }}</span>
+              <span>{{ row.item ? (row.item.row_count ?? unavailableText) : unavailableText }} rows · {{ row.item ? pct(row.item.coverage) : unavailableText }}</span>
             </div>
             <n-tag size="small" :type="statusType(row.item?.status)">{{ statusText(row.item?.status) }}</n-tag>
           </div>
@@ -392,7 +472,7 @@ watch(
           Backtest 使用 {{ runForm.replay_mode }}；结果不会写入 DecisionMemory、TradeLedger 或生产配置。
         </n-alert>
         <div class="form-actions">
-          <n-button type="primary" :loading="running" @click="createRun">
+          <n-button type="primary" :loading="running" :disabled="loading" @click="createRun">
             <template #icon><Play :size="16" /></template>
             启动研究 Run
           </n-button>
@@ -404,12 +484,15 @@ watch(
       <template #header>
         <div class="card-heading"><FlaskConical :size="17" /><span>Backtest Runs</span><small>{{ runs.length }} runs</small></div>
       </template>
-      <div v-if="!runs.length" class="empty-state">暂无研究 Run。选择范围后启动一次离线回放。</div>
+      <LoadingState v-if="loading && !runs.length" message="正在读取 Backtest Runs" />
+      <EmptyState v-else-if="!runs.length" description="暂无研究 Run">
+        <template #action><n-button secondary size="small" @click="createRun">按当前条件启动研究</n-button></template>
+      </EmptyState>
       <div v-else class="run-table">
         <button v-for="run in runs" :key="run.id" class="run-row" :class="{ selected: selectedRun?.id === run.id }" @click="selectRun(run)">
           <span class="run-id">#{{ run.id }}</span>
           <span class="run-main"><strong>{{ run.scope }}</strong><small>{{ run.start_date }} → {{ run.end_date }} · {{ run.replay_mode }}</small></span>
-          <span class="run-samples">N={{ run.sample_count }}<small>{{ run.unique_trade_dates }} dates</small></span>
+          <span class="run-samples">N={{ run.sample_count }}<small>{{ run.unique_trade_dates }} dates</small><n-progress v-if="['QUEUED', 'RUNNING'].includes(run.status)" type="line" :percentage="run.progress_percent" :show-indicator="false" /></span>
           <n-tag size="small" :type="statusType(run.status)">{{ statusText(run.status) }}</n-tag>
         </button>
       </div>
@@ -420,7 +503,7 @@ watch(
         <template #header>
           <div class="card-heading"><ShieldAlert :size="17" /><span>Run Evidence</span></div>
         </template>
-        <div v-if="!selectedRun" class="empty-state">选择一个 Run 查看 Evidence。</div>
+        <EmptyState v-if="!selectedRun" description="选择一个 Run 查看 Evidence" />
         <template v-else>
           <div class="evidence-summary">
             <div><span>状态</span><n-tag size="small" :type="statusType(selectedRun.status)">{{ statusText(selectedRun.status) }}</n-tag></div>
@@ -472,7 +555,7 @@ watch(
               <template #icon><Download :size="15" /></template>
               导出 JSON
             </n-button>
-            <n-button v-if="canCancel" quaternary type="error" @click="cancelRun">
+            <n-button v-if="canCancel" quaternary type="error" :loading="cancelLoading" :disabled="running" @click="cancelRun">
               <template #icon><Square :size="14" /></template>
               取消 Run
             </n-button>
@@ -514,9 +597,9 @@ watch(
       <div class="report-columns">
         <div><span>Current</span><strong>{{ JSON.stringify(selectedReport.current_value) }}</strong></div>
         <div><span>Challenger</span><strong>{{ JSON.stringify(selectedReport.challenger_value) }}</strong></div>
-        <div><span>Train N</span><strong>{{ selectedReport.sample_counts?.train_case_count ?? 0 }}</strong></div>
-        <div><span>Validation N</span><strong>{{ selectedReport.sample_counts?.validation_case_count ?? 0 }}</strong></div>
-        <div><span>Test N</span><strong>{{ selectedReport.sample_counts?.test_case_count ?? 0 }}</strong></div>
+        <div><span>Train N</span><strong>{{ selectedReport.sample_counts?.train_case_count ?? unavailableText }}</strong></div>
+        <div><span>Validation N</span><strong>{{ selectedReport.sample_counts?.validation_case_count ?? unavailableText }}</strong></div>
+        <div><span>Test N</span><strong>{{ selectedReport.sample_counts?.test_case_count ?? unavailableText }}</strong></div>
         <div><span>Robustness</span><strong>{{ selectedReport.robustness?.status || '—' }}</strong></div>
       </div>
       <n-alert v-if="selectedReport.recommendation === 'INSUFFICIENT_EVIDENCE'" class="research-alert" type="warning" :show-icon="true">

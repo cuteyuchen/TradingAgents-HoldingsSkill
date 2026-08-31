@@ -32,6 +32,7 @@ import type {
   SystemBackupList,
   SystemDiagnostics,
   SystemHealth,
+  LiveValidationReadiness,
   SystemReadiness,
   SystemRecoveryReport,
   SystemRelease,
@@ -53,6 +54,85 @@ import type {
 const ACCESS_KEY = 'advisor_v2_access_token'
 const REFRESH_KEY = 'advisor_v2_refresh_token'
 
+export type ApiErrorKind = 'auth' | 'forbidden' | 'not_found' | 'conflict' | 'validation' | 'server' | 'network' | 'timeout' | 'unknown'
+
+export class ApiError extends Error {
+  readonly status: number | null
+  readonly code: string | null
+  readonly kind: ApiErrorKind
+  readonly requestId: string | null
+  readonly fieldErrors: Record<string, string[]>
+
+  constructor(message: string, options: {
+    status?: number | null
+    code?: string | null
+    kind?: ApiErrorKind
+    requestId?: string | null
+    fieldErrors?: Record<string, string[]>
+    cause?: unknown
+  } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause })
+    this.name = 'ApiError'
+    this.status = options.status ?? null
+    this.code = options.code ?? null
+    this.kind = options.kind || 'unknown'
+    this.requestId = options.requestId ?? null
+    this.fieldErrors = options.fieldErrors || {}
+  }
+}
+
+const statusMessages: Record<number, string> = {
+  401: '登录状态已过期，请重新登录。',
+  403: '当前账户没有权限执行此操作。',
+  404: '请求的资源不存在，可能已被删除或不属于当前组合。',
+  409: '当前操作与已有数据冲突，请刷新后再试。',
+  422: '提交内容未通过校验，请检查标记的字段。',
+  500: '后端发生系统错误，请稍后重试。',
+  502: '后端网关暂时不可用，请稍后重试。',
+  503: '后端服务暂时不可用，请确认服务状态后重试。',
+  504: '后端响应超时，请稍后重试。',
+}
+
+function requestIdHeader(res: Response): string | null {
+  return res.headers.get('X-Request-ID') || res.headers.get('x-request-id')
+}
+
+function requestIdValue(): string {
+  const uuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2)
+  return `web_${uuid}`
+}
+
+function statusKind(status: number): ApiErrorKind {
+  if (status === 401) return 'auth'
+  if (status === 403) return 'forbidden'
+  if (status === 404) return 'not_found'
+  if (status === 409) return 'conflict'
+  if (status === 422) return 'validation'
+  if (status >= 500) return 'server'
+  return 'unknown'
+}
+
+function payloadDetails(payload: any): { message: string; code: string | null; fieldErrors: Record<string, string[]> } {
+  const detail = payload?.detail ?? payload?.error ?? payload
+  const fieldErrors: Record<string, string[]> = {}
+  if (Array.isArray(detail)) {
+    for (const item of detail) {
+      const path = Array.isArray(item?.loc) ? item.loc.filter((part: unknown) => part !== 'body').join('.') : 'form'
+      const message = String(item?.msg || item?.message || item || '')
+      if (message) fieldErrors[path] = [...(fieldErrors[path] || []), message]
+    }
+  }
+  const code = typeof detail?.code === 'string' ? detail.code : typeof payload?.code === 'string' ? payload.code : null
+  const message = typeof detail === 'string'
+    ? detail
+    : typeof detail?.message === 'string'
+      ? detail.message
+      : Object.values(fieldErrors).flat().join('；')
+  return { message, code, fieldErrors }
+}
+
 export function getAccessToken(): string { return localStorage.getItem(ACCESS_KEY) || '' }
 export function getRefreshToken(): string { return localStorage.getItem(REFRESH_KEY) || '' }
 export function saveSession(tokens: TokenPair): void {
@@ -62,19 +142,33 @@ export function saveSession(tokens: TokenPair): void {
 export function clearSession(): void { localStorage.removeItem(ACCESS_KEY); localStorage.removeItem(REFRESH_KEY) }
 export function hasSession(): boolean { return Boolean(getAccessToken() || getRefreshToken()) }
 
-interface RequestOptions { method?: string; body?: unknown; public?: boolean; headers?: Record<string, string>; retryAuth?: boolean }
+interface RequestOptions { method?: string; body?: unknown; public?: boolean; headers?: Record<string, string>; retryAuth?: boolean; timeoutMs?: number }
 
-async function parseError(res: Response): Promise<string> {
+async function parseError(res: Response): Promise<ApiError> {
+  let payload: any = null
   try {
-    const payload = await res.json()
-    const detail = payload?.detail
-    if (typeof detail === 'string') return detail
-    if (detail?.message) {
-      const errors = Array.isArray(detail.errors) ? `：${detail.errors.join('；')}` : ''
-      return `${detail.message}${errors}`
-    }
-    return JSON.stringify(payload)
-  } catch { return `${res.status} ${res.statusText}` }
+    payload = await res.json()
+  } catch { /* Empty or non-JSON responses still get a stable user message. */ }
+  const parsed = payloadDetails(payload)
+  const generic = statusMessages[res.status] || `${res.status} ${res.statusText || '请求失败'}`
+  const safeDetail = res.status >= 500 ? '' : parsed.message
+  const message = safeDetail ? `${generic} ${safeDetail}` : generic
+  return new ApiError(message, {
+    status: res.status,
+    code: parsed.code,
+    kind: statusKind(res.status),
+    requestId: requestIdHeader(res),
+    fieldErrors: parsed.fieldErrors,
+  })
+}
+
+export function errorMessage(error: unknown, fallback = '请求失败，请稍后重试。'): string {
+  if (typeof error === 'string' && error) return error
+  return error instanceof ApiError || error instanceof Error ? error.message : fallback
+}
+
+export function requestIdOf(error: unknown): string | null {
+  return error instanceof ApiError ? error.requestId : null
 }
 
 let refreshPromise: Promise<boolean> | null = null
@@ -83,7 +177,9 @@ async function refreshSession(): Promise<boolean> {
   if (!refreshToken) return false
   if (!refreshPromise) {
     refreshPromise = fetch('/api/v2/auth/refresh', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: refreshToken }),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestIdValue() },
+      body: JSON.stringify({ refresh_token: refreshToken }),
     }).then(async (res) => {
       if (!res.ok) return false
       saveSession((await res.json()) as TokenPair)
@@ -95,6 +191,7 @@ async function refreshSession(): Promise<boolean> {
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { ...(options.headers || {}) }
+  headers['X-Request-ID'] ||= requestIdValue()
   const isForm = options.body instanceof FormData
   let body: BodyInit | undefined
   if (options.body !== undefined) {
@@ -103,16 +200,33 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
   const token = getAccessToken()
   if (token && !options.public) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(path, { method: options.method || 'GET', headers, body })
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || 30_000)
+  let res: Response
+  try {
+    res = await fetch(path, { method: options.method || 'GET', headers, body, signal: controller.signal })
+  } catch (cause) {
+    const timedOut = cause instanceof DOMException && cause.name === 'AbortError'
+    throw new ApiError(
+      timedOut ? '后端响应超时，请稍后重试。' : '无法连接后端，请确认服务已启动。',
+      { kind: timedOut ? 'timeout' : 'network', cause },
+    )
+  } finally {
+    window.clearTimeout(timeout)
+  }
   if (res.status === 401 && !options.public && options.retryAuth !== false) {
     const refreshed = await refreshSession()
     if (refreshed) return request<T>(path, { ...options, retryAuth: false })
     clearSession()
     window.dispatchEvent(new CustomEvent('advisor-auth-expired'))
   }
-  if (!res.ok) throw new Error(await parseError(res))
+  if (!res.ok) throw await parseError(res)
   if (res.status === 204) return undefined as T
-  return (await res.json()) as T
+  try {
+    return (await res.json()) as T
+  } catch (cause) {
+    throw new ApiError('后端返回了无法解析的数据。', { kind: 'server', requestId: requestIdHeader(res), cause })
+  }
 }
 
 async function registerAndLogin(payload: { email: string; username?: string; password: string }): Promise<TokenPair> {
@@ -306,6 +420,7 @@ export const api = {
   getSystemRelease: () => request<SystemRelease>('/api/v3/system/release'),
   getSystemHealth: () => request<SystemHealth>('/api/v3/system/health'),
   getSystemReadiness: () => request<SystemReadiness>('/api/v3/system/readiness'),
+  getLiveValidationReadiness: () => request<LiveValidationReadiness>('/api/v3/system/live-validation-readiness'),
   getSystemRecovery: () => request<SystemRecoveryReport>('/api/v3/system/recovery'),
   listSystemBackups: () => request<SystemBackupList>('/api/v3/system/backups'),
   createSystemBackup: (reason: string = 'MANUAL') => request<SystemBackup>('/api/v3/system/backups', { method: 'POST', body: { reason } }),
@@ -330,9 +445,18 @@ export const api = {
 }
 
 async function requestBlob(path: string, retryAuth = true): Promise<Blob> {
-  const headers: Record<string, string> = {}; const token = getAccessToken(); if (token) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(path, { headers })
-  if (res.status === 401 && retryAuth && (await refreshSession())) return requestBlob(path, false)
-  if (!res.ok) throw new Error(await parseError(res))
+  const headers: Record<string, string> = { 'X-Request-ID': requestIdValue() }; const token = getAccessToken(); if (token) headers.Authorization = `Bearer ${token}`
+  let res: Response
+  try {
+    res = await fetch(path, { headers })
+  } catch (cause) {
+    throw new ApiError('无法连接后端，请确认服务已启动。', { kind: 'network', cause })
+  }
+  if (res.status === 401 && retryAuth) {
+    if (await refreshSession()) return requestBlob(path, false)
+    clearSession()
+    window.dispatchEvent(new CustomEvent('advisor-auth-expired'))
+  }
+  if (!res.ok) throw await parseError(res)
   return res.blob()
 }

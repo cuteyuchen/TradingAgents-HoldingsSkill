@@ -4,8 +4,11 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
   BellRing,
+  BriefcaseBusiness,
+  Camera,
   FlaskConical,
   Activity,
+  ExternalLink,
   LayoutDashboard,
   LogOut,
   Moon,
@@ -18,6 +21,8 @@ import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThe
 
 import { api, clearSession, hasSession } from './api'
 import type { User } from './api/types'
+import { usePortfolioContext } from './composables/portfolio'
+import { fmtDateTime } from './utils/ui'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,6 +33,15 @@ const themePref = ref<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) 
 const user = ref<User | null>(null)
 const loadingUser = ref(false)
 const isLogin = computed(() => route.name === 'login')
+const {
+  portfolios,
+  selectedPortfolioId,
+  selectedPortfolio,
+  loading: loadingPortfolios,
+  error: portfolioError,
+  loadPortfolios,
+  setSelectedPortfolio,
+} = usePortfolioContext()
 const theme = computed<GlobalTheme>(() => (themePref.value === 'dark' ? darkTheme : lightTheme))
 const themeOverrides = computed<GlobalThemeOverrides>(() => ({
   common: {
@@ -54,7 +68,8 @@ async function loadUser() {
   if (!hasSession() || isLogin.value || loadingUser.value) return
   loadingUser.value = true
   try {
-    user.value = await api.me()
+    const [userResult] = await Promise.all([api.me(), loadPortfolios()])
+    user.value = userResult
   } catch {
     user.value = null
   } finally {
@@ -96,6 +111,7 @@ watch(() => route.name, () => void loadUser())
         <div class="app-root" :class="`theme-${themePref}`">
           <router-view v-if="isLogin" />
           <template v-else>
+            <a class="skip-link" href="#main-content">跳到主要内容</a>
             <header class="topbar">
               <div class="brand">
                 <div class="brand-mark"><BellRing :size="22" /></div>
@@ -123,7 +139,40 @@ watch(() => route.name, () => void loadUser())
                 </n-button>
               </div>
             </header>
-            <main class="app-content">
+            <div class="portfolio-context-bar" aria-label="当前组合上下文">
+              <div class="context-copy">
+                <BriefcaseBusiness :size="17" aria-hidden="true" />
+                <div>
+                  <span>当前 Portfolio</span>
+                  <strong>{{ selectedPortfolio?.name || '尚未选择组合' }}</strong>
+                </div>
+                <small v-if="selectedPortfolio?.latest_snapshot_time">最近确认：{{ fmtDateTime(selectedPortfolio.latest_snapshot_time) }}</small>
+              </div>
+              <n-select
+                v-if="portfolios.length"
+                :value="selectedPortfolioId"
+                class="global-portfolio-select"
+                :options="portfolios.map((item) => ({ label: item.name, value: item.id }))"
+                :loading="loadingPortfolios"
+                aria-label="选择当前 Portfolio"
+                @update:value="setSelectedPortfolio"
+              />
+              <n-button v-if="!portfolios.length" secondary @click="router.push({ name: 'upload' })">
+                <template #icon><Camera :size="15" /></template>
+                导入第一份持仓
+              </n-button>
+              <n-button v-else secondary @click="router.push({ name: 'upload', query: { portfolio: selectedPortfolioId } })">
+                <template #icon><Camera :size="15" /></template>
+                更新持仓
+              </n-button>
+              <n-button text type="primary" @click="router.push({ name: 'system' })">
+                系统状态 <ExternalLink :size="14" />
+              </n-button>
+            </div>
+            <n-alert v-if="portfolioError" class="context-error" type="warning" :show-icon="false">
+              Portfolio 列表暂时无法读取，请打开系统状态页重试。
+            </n-alert>
+            <main id="main-content" class="app-content">
               <router-view />
             </main>
           </template>
@@ -147,18 +196,34 @@ watch(() => route.name, () => void loadUser())
 .brand strong { font-size: 15px; }
 .brand span, .user-copy span { color: var(--app-text-muted); font-size: 11px; }
 .top-nav { display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid var(--app-border-soft); border-radius: 12px; background: var(--app-surface); }
+.top-nav { max-width: min(760px, 52vw); overflow-x: auto; scrollbar-width: thin; }
 .nav-link { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 13px; border-radius: 9px; color: var(--app-text-muted); text-decoration: none; font-size: 13px; font-weight: 700; }
 .nav-link:hover, .nav-link.router-link-active { background: var(--app-primary-soft); color: var(--app-primary); }
 .user-actions { display: flex; justify-content: flex-end; align-items: center; gap: 5px; }
 .user-copy { display: grid; margin-right: 5px; text-align: right; }
 .user-copy strong { max-width: 170px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .app-content { width: min(1480px, 100%); margin: 0 auto; padding: 24px; }
+.skip-link { position: fixed; z-index: 100; top: -50px; left: 14px; border-radius: 6px; background: var(--app-primary); padding: 8px 12px; color: white; text-decoration: none; }
+.skip-link:focus { top: 10px; }
+.portfolio-context-bar { display: flex; width: min(1480px, calc(100% - 48px)); align-items: center; gap: 12px; margin: 14px auto 0; border: 1px solid var(--app-border); border-radius: 8px; background: var(--app-surface); padding: 10px 14px; box-shadow: var(--app-shadow); }
+.context-copy { display: flex; min-width: 0; align-items: center; gap: 9px; color: var(--app-primary); }
+.context-copy > div { display: grid; min-width: 0; }
+.context-copy span { color: var(--app-text-muted); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.context-copy strong { max-width: 220px; overflow: hidden; color: var(--app-text); text-overflow: ellipsis; white-space: nowrap; }
+.context-copy small { margin-left: 8px; color: var(--app-text-muted); font-size: 11px; }
+.global-portfolio-select { width: min(240px, 28vw); margin-left: auto; }
+.context-error { width: min(1480px, calc(100% - 48px)); margin: 10px auto 0; }
 @media (max-width: 980px) {
   .topbar { grid-template-columns: 1fr auto; padding: 0 12px; }
   .top-nav { position: fixed; z-index: 60; right: 12px; bottom: 12px; left: 12px; justify-content: space-around; box-shadow: var(--app-shadow-strong); }
   .nav-link { flex: 1; justify-content: center; padding: 0 6px; }
   .user-copy { display: none; }
   .app-content { padding: 16px 12px 88px; }
+  .portfolio-context-bar { width: calc(100% - 24px); align-items: flex-start; flex-wrap: wrap; margin-top: 10px; }
+  .global-portfolio-select { width: min(280px, 100%); margin-left: 0; }
+  .context-copy { flex: 1 1 100%; }
+  .context-copy small { margin-left: 0; }
+  .context-error { width: calc(100% - 24px); }
 }
 @media (max-width: 560px) {
   .brand span { display: none; }

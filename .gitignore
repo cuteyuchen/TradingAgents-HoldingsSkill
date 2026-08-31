@@ -29,5 +29,6 @@ frontend/node_modules/
 !.vscode/
 !.vscode/tasks.json
 .idea/
+.playwright-cli/
 .DS_Store
 Thumbs.db

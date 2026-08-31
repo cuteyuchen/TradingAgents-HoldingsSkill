@@ -519,6 +519,15 @@ export interface SystemReadiness {
   checks: Record<string, SystemHealthCheck>
 }
 
+export interface LiveValidationReadiness {
+  status: 'READY' | 'NOT_READY'
+  ready: boolean
+  blockers: Array<{ key: string; reason: string }>
+  warnings: Array<{ key: string; reason: string }>
+  checks: Record<string, SystemHealthCheck>
+  evaluated_at: string
+}
+
 export interface SystemBackup {
   backup_id: string
   filename: string

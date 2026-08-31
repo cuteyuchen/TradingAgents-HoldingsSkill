@@ -4,14 +4,18 @@ import {Bell, Bot, CalendarClock, CheckCircle2, KeyRound, Pencil, Play, Plus, Te
 import {useDialog, useMessage} from 'naive-ui'
 
 import {api} from '../api'
-import type {AnalysisMode, ModelProfile, ModelProvider, NotificationChannel, Portfolio, Schedule} from '../api/types'
+import ErrorState from '../components/ErrorState.vue'
+import LoadingState from '../components/LoadingState.vue'
+import {usePortfolioContext} from '../composables/portfolio'
+import {fmtDateTime} from '../utils/ui'
+import type {AnalysisMode, ModelProfile, ModelProvider, NotificationChannel, Schedule} from '../api/types'
 
 const message = useMessage()
 const dialog = useDialog()
 const loading = ref(false)
+const loadError = ref<unknown>(null)
 const providers = ref<ModelProvider[]>([])
 const profiles = ref<ModelProfile[]>([])
-const portfolios = ref<Portfolio[]>([])
 const schedules = ref<Schedule[]>([])
 const notifications = ref<NotificationChannel[]>([])
 const activeTab = ref('models')
@@ -22,6 +26,9 @@ const scheduleOpen = ref(false)
 const notificationOpen = ref(false)
 const saving = ref(false)
 const testingId = ref<number | null>(null)
+const writeLoading = ref<string | null>(null)
+
+const {portfolios, loadPortfolios} = usePortfolioContext()
 
 const providerForm = reactive({
   provider: 'openai_compatible',
@@ -89,20 +96,27 @@ watch(() => profileForm.stream, (streaming) => {
 })
 
 function fmt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', {hour12: false}) : '—'
+  return fmtDateTime(value)
+}
+
+function beginWrite(key: string) {
+  if (writeLoading.value) return false
+  writeLoading.value = key
+  return true
 }
 
 async function load() {
   loading.value = true
+  loadError.value = null
   try {
-    const values = await Promise.all([api.listProviders(), api.listProfiles(), api.listPortfolios(), api.listSchedules(), api.listNotifications()])
+    await loadPortfolios()
+    const values = await Promise.all([api.listProviders(), api.listProfiles(), api.listSchedules(), api.listNotifications()])
     providers.value = values[0];
     profiles.value = values[1];
-    portfolios.value = values[2];
-    schedules.value = values[3];
-    notifications.value = values[4]
+    schedules.value = values[2];
+    notifications.value = values[3]
   } catch (e) {
-    message.error((e as Error).message)
+    loadError.value = e
   } finally {
     loading.value = false
   }
@@ -138,6 +152,7 @@ function openEditProvider(provider: ModelProvider) {
 
 async function saveProvider() {
   if (!providerForm.display_name.trim()) return
+  if (!beginWrite('provider-save')) return
   saving.value = true
   try {
     const payload: Record<string, unknown> = {
@@ -160,11 +175,13 @@ async function saveProvider() {
     message.error((e as Error).message)
   } finally {
     saving.value = false
+    writeLoading.value = null
   }
 }
 
 async function createProfile() {
   if (!profileForm.provider_id || !profileForm.model_name.trim()) return
+  if (!beginWrite('profile-save')) return
   saving.value = true
   try {
     await api.createProfile({
@@ -187,10 +204,12 @@ async function createProfile() {
     message.error((e as Error).message)
   } finally {
     saving.value = false
+    writeLoading.value = null
   }
 }
 
 async function testProfile(id: number) {
+  if (!beginWrite('profile-test-' + id)) return
   testingId.value = id
   try {
     const result = await api.testProfile(id)
@@ -200,21 +219,26 @@ async function testProfile(id: number) {
     message.error((e as Error).message)
   } finally {
     testingId.value = null
+    writeLoading.value = null
   }
 }
 
 async function setDefault(profile: ModelProfile) {
+  if (!beginWrite('profile-default-' + profile.id)) return
   try {
     await api.updateProfile(profile.id, {is_default: true});
     await load();
     message.success('默认模型已切换')
   } catch (e) {
     message.error((e as Error).message)
+  } finally {
+    writeLoading.value = null
   }
 }
 
 async function createSchedule() {
   if (!scheduleForm.portfolio_id || !scheduleForm.name.trim()) return
+  if (!beginWrite('schedule-save')) return
   saving.value = true
   try {
     scheduleForm.checkpoint = `${String(scheduleForm.hour).padStart(2, '0')}:${String(scheduleForm.minute).padStart(2, '0')}`
@@ -226,19 +250,24 @@ async function createSchedule() {
     message.error((e as Error).message)
   } finally {
     saving.value = false
+    writeLoading.value = null
   }
 }
 
 async function toggleSchedule(row: Schedule) {
+  if (!beginWrite('schedule-toggle-' + row.id)) return
   try {
     await api.updateSchedule(row.id, {enabled: !row.enabled});
     await load()
   } catch (e) {
     message.error((e as Error).message)
+  } finally {
+    writeLoading.value = null
   }
 }
 
 async function runSchedule(row: Schedule) {
+  if (!beginWrite('schedule-run-' + row.id)) return
   testingId.value = row.id
   try {
     const job = await api.runScheduleNow(row.id);
@@ -247,11 +276,13 @@ async function runSchedule(row: Schedule) {
     message.error((e as Error).message)
   } finally {
     testingId.value = null
+    writeLoading.value = null
   }
 }
 
 async function createNotification() {
   if (!notificationForm.name.trim() || !notificationForm.webhook.trim()) return
+  if (!beginWrite('notification-save')) return
   saving.value = true
   try {
     await api.createNotification({...notificationForm, secret: notificationForm.secret || null})
@@ -263,10 +294,12 @@ async function createNotification() {
     message.error((e as Error).message)
   } finally {
     saving.value = false
+    writeLoading.value = null
   }
 }
 
 async function testNotification(row: NotificationChannel) {
+  if (!beginWrite('notification-test-' + row.id)) return
   testingId.value = row.id
   try {
     const result = await api.testNotification(row.id);
@@ -276,6 +309,7 @@ async function testNotification(row: NotificationChannel) {
     message.error((e as Error).message)
   } finally {
     testingId.value = null
+    writeLoading.value = null
   }
 }
 
@@ -286,12 +320,15 @@ function confirmDelete(label: string, action: () => Promise<void>) {
     positiveText: '删除',
     negativeText: '取消',
     async onPositiveClick() {
+      if (!beginWrite('delete')) return
       try {
         await action();
         message.success('已删除');
         await load()
       } catch (e) {
         message.error((e as Error).message)
+      } finally {
+        writeLoading.value = null
       }
     }
   })
@@ -308,6 +345,8 @@ onMounted(load)
         <p>模型密钥、Webhook 和加签 Secret 均加密保存，页面不会回显明文。</p></div>
     </div>
 
+    <ErrorState v-if="loadError" :error="loadError" @retry="load" />
+    <LoadingState v-if="loading && !providers.length && !profiles.length && !schedules.length && !notifications.length" message="正在读取系统设置" />
     <n-tabs v-model:value="activeTab" type="line" animated>
       <n-tab-pane name="models" tab="模型配置">
         <div class="settings-stack">
@@ -315,7 +354,7 @@ onMounted(load)
             <div class="section-title">
               <div><h2>模型供应商</h2>
                 <p>支持官方接口、OpenAI Compatible 和本地 Ollama</p></div>
-              <n-button type="primary" @click="openCreateProvider">
+              <n-button type="primary" :disabled="Boolean(writeLoading)" @click="openCreateProvider">
                 <template #icon>
                   <Plus :size="16"/>
                 </template>
@@ -335,10 +374,10 @@ onMounted(load)
                 </n-tag>
                 <div class="secret-state">API Key：{{ row.has_api_key ? row.api_key_masked : '未配置' }}</div>
                 <div class="setting-actions">
-                  <n-button quaternary circle title="编辑供应商" @click="openEditProvider(row)">
+                  <n-button quaternary circle title="编辑供应商" :disabled="Boolean(writeLoading)" @click="openEditProvider(row)">
                     <template #icon><Pencil :size="16"/></template>
                   </n-button>
-                  <n-button quaternary circle type="error" title="删除供应商"
+                  <n-button quaternary circle type="error" title="删除供应商" :disabled="Boolean(writeLoading)"
                             @click="confirmDelete(row.display_name, () => api.deleteProvider(row.id))">
                     <template #icon><Trash2 :size="16"/></template>
                   </n-button>
@@ -352,7 +391,7 @@ onMounted(load)
             <div class="section-title">
               <div><h2>模型用途</h2>
                 <p>识图与分析可以使用不同供应商和模型</p></div>
-              <n-button secondary :disabled="!providers.length" @click="profileOpen = true">
+              <n-button secondary :disabled="!providers.length || Boolean(writeLoading)" @click="profileOpen = true">
                 <template #icon>
                   <Plus :size="16"/>
                 </template>
@@ -370,14 +409,14 @@ onMounted(load)
                 <n-tag v-else :bordered="false">备用</n-tag>
                 <span class="health" :class="row.last_health_status || ''"><CheckCircle2
                     :size="14"/>{{ row.last_health_status || '未测试' }}</span>
-                <n-button v-if="!row.is_default" text type="primary" @click="setDefault(row)">设为默认</n-button>
-                <n-button secondary :loading="testingId === row.id" @click="testProfile(row.id)">
+                <n-button v-if="!row.is_default" text type="primary" :loading="writeLoading === 'profile-default-' + row.id" :disabled="Boolean(writeLoading)" @click="setDefault(row)">设为默认</n-button>
+                <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="testProfile(row.id)">
                   <template #icon>
                     <TestTube2 :size="15"/>
                   </template>
                   测试
                 </n-button>
-                <n-button quaternary circle type="error"
+                <n-button quaternary circle type="error" :disabled="Boolean(writeLoading)"
                           @click="confirmDelete(row.model_name, () => api.deleteProfile(row.id))">
                   <template #icon>
                     <Trash2 :size="16"/>
@@ -395,7 +434,7 @@ onMounted(load)
           <div class="section-title">
             <div><h2>每日分析计划</h2>
               <p>到点后校验 A 股交易日，并使用最近一次已确认持仓</p></div>
-            <n-button type="primary" :disabled="!portfolios.length" @click="scheduleOpen = true">
+            <n-button type="primary" :disabled="!portfolios.length || Boolean(writeLoading)" @click="scheduleOpen = true">
               <template #icon>
                 <Plus :size="16"/>
               </template>
@@ -415,14 +454,14 @@ onMounted(load)
               <div class="schedule-meta"><span>下次：{{
                   fmt(row.next_run_at)
                 }}</span><span>连续失败：{{ row.consecutive_failures }}/{{ row.max_consecutive_failures }}</span></div>
-              <n-switch :value="row.enabled" @update:value="toggleSchedule(row)"/>
-              <n-button secondary :loading="testingId === row.id" @click="runSchedule(row)">
+              <n-switch :value="row.enabled" :disabled="Boolean(writeLoading)" @update:value="toggleSchedule(row)"/>
+              <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="runSchedule(row)">
                 <template #icon>
                   <Play :size="15"/>
                 </template>
                 立即执行
               </n-button>
-              <n-button quaternary circle type="error"
+              <n-button quaternary circle type="error" :disabled="Boolean(writeLoading)"
                         @click="confirmDelete(row.name, () => api.deleteSchedule(row.id))">
                 <template #icon>
                   <Trash2 :size="16"/>
@@ -439,7 +478,7 @@ onMounted(load)
           <div class="section-title">
             <div><h2>通知渠道</h2>
               <p>分析完成后发送摘要和完整报告链接；发送失败不影响报告</p></div>
-            <n-button type="primary" @click="notificationOpen = true">
+            <n-button type="primary" :disabled="Boolean(writeLoading)" @click="notificationOpen = true">
               <template #icon>
                 <Plus :size="16"/>
               </template>
@@ -458,13 +497,13 @@ onMounted(load)
                 {{ row.last_test_status || '未测试' }}
               </n-tag>
               <div class="secret-state">加签：{{ row.has_secret ? '已配置' : '未配置' }}</div>
-              <n-button secondary :loading="testingId === row.id" @click="testNotification(row)">
+              <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="testNotification(row)">
                 <template #icon>
                   <TestTube2 :size="15"/>
                 </template>
                 测试发送
               </n-button>
-              <n-button quaternary circle type="error"
+              <n-button quaternary circle type="error" :disabled="Boolean(writeLoading)"
                         @click="confirmDelete(row.name, () => api.deleteNotification(row.id))">
                 <template #icon>
                   <Trash2 :size="16"/>
@@ -501,7 +540,7 @@ onMounted(load)
         <n-form-item label="启用供应商">
           <n-switch v-model:value="providerForm.enabled"/>
         </n-form-item>
-        <n-button type="primary" block :loading="saving" @click="saveProvider">保存供应商</n-button>
+        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="saveProvider">保存供应商</n-button>
       </n-form>
     </n-modal>
     <n-modal v-model:show="profileOpen" preset="card" title="新增模型用途" style="width: min(560px, 94vw)">
@@ -539,7 +578,7 @@ onMounted(load)
         <n-form-item label="设为该用途默认模型">
           <n-switch v-model:value="profileForm.is_default"/>
         </n-form-item>
-        <n-button type="primary" block :loading="saving" @click="createProfile">保存模型用途</n-button>
+        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createProfile">保存模型用途</n-button>
       </n-form>
     </n-modal>
     <n-modal v-model:show="scheduleOpen" preset="card" title="新增自动分析计划" style="width: min(560px, 94vw)">
@@ -569,7 +608,7 @@ onMounted(load)
         <n-form-item label="持仓超过多少天视为过期">
           <n-input-number v-model:value="scheduleForm.stale_snapshot_days" :min="0" :max="30"/>
         </n-form-item>
-        <n-button type="primary" block :loading="saving" @click="createSchedule">保存计划</n-button>
+        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createSchedule">保存计划</n-button>
       </n-form>
     </n-modal>
     <n-modal v-model:show="notificationOpen" preset="card" title="新增通知渠道" style="width: min(560px, 94vw)">
@@ -587,7 +626,7 @@ onMounted(load)
         <n-form-item label="加签 Secret（可选）">
           <n-input v-model:value="notificationForm.secret" type="password" show-password-on="mousedown"/>
         </n-form-item>
-        <n-button type="primary" block :loading="saving" @click="createNotification">保存渠道</n-button>
+        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createNotification">保存渠道</n-button>
       </n-form>
     </n-modal>
   </section>

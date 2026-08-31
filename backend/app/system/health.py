@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -473,6 +473,220 @@ def readiness(db: Session | None = None, *, detailed: bool = False) -> dict[str,
             session.close()
 
 
+def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
+    """Evaluate the evidence chain required before live validation.
+
+    This is deliberately stricter than the process readiness endpoint.  It
+    checks persisted market, portfolio, analysis, candidate, and Shadow facts
+    without starting a provider call or an analysis job.
+    """
+
+    from ..candidates.models import CandidateRun
+    from ..market_models import TradingCalendar
+    from ..market_runtime_models import MarketSnapshot, ProviderHealth
+    from ..services.market_identity_sync import calendar_status
+    from ..shadow_models import LiveQuoteObservation
+    from ..v2_models import AnalysisRun, PortfolioSnapshot
+    from ..services.trading_calendar import CHINA_TZ
+
+    now = datetime.now(UTC)
+    local_now = now.astimezone(CHINA_TZ)
+    checks: dict[str, dict[str, Any]] = {}
+
+    base = readiness(db, detailed=True)
+    base_checks = base.get("checks", {})
+    checks["database"] = dict(base_checks.get("database") or {"status": "UNKNOWN", "reason": "database_check_missing"})
+    checks["schema"] = dict(base_checks.get("schema") or {"status": "UNKNOWN", "reason": "schema_check_missing"})
+    checks["disk"] = dict(base_checks.get("storage") or {"status": "UNKNOWN", "reason": "disk_check_missing"})
+    checks["backup"] = dict(base_checks.get("backup") or {"status": "UNKNOWN", "reason": "backup_check_missing"})
+    checks["scheduler"] = dict(base_checks.get("scheduler") or {"status": "UNKNOWN", "reason": "scheduler_check_missing"})
+    checks["worker_recovery"] = dict(base_checks.get("worker_recovery") or {"status": "UNKNOWN", "reason": "worker_recovery_check_missing"})
+    checks["governance"] = dict(base_checks.get("governance") or {"status": "UNKNOWN", "reason": "governance_check_missing"})
+
+    if not settings.SCHEDULER_ENABLED:
+        checks["scheduler"] = {
+            **checks["scheduler"],
+            "status": "BLOCKED",
+            "reason": "scheduler_disabled_by_config",
+        }
+
+    calendar = calendar_status(db, market="CN")
+    current_calendar = db.execute(
+        select(TradingCalendar).where(
+            TradingCalendar.market == "CN",
+            TradingCalendar.trade_date == local_now.date(),
+        )
+    ).scalar_one_or_none()
+    if current_calendar is not None and not current_calendar.is_open:
+        checks["trading_calendar"] = {
+            "status": "OK",
+            "reason": "non_trading_day",
+            "calendar_status": calendar.get("status"),
+            "trade_date": local_now.date(),
+        }
+    elif calendar.get("status") == "ready":
+        checks["trading_calendar"] = {
+            "status": "OK",
+            "reason": None,
+            "calendar_status": calendar.get("status"),
+            "trade_date": local_now.date(),
+        }
+    else:
+        checks["trading_calendar"] = {
+            "status": "BLOCKED",
+            "reason": calendar.get("status") or "calendar_unavailable",
+            "calendar_status": calendar.get("status"),
+            "trade_date": local_now.date(),
+        }
+
+    provider_rows = db.query(ProviderHealth).filter(ProviderHealth.data_type == "quote").all()
+    healthy_provider = next(
+        (row for row in provider_rows if str(row.status).upper() == "HEALTHY" and row.last_success_at),
+        None,
+    )
+    recovering_provider = next(
+        (row for row in provider_rows if str(row.status).upper() == "RECOVERING"),
+        None,
+    )
+    if healthy_provider is not None:
+        checks["market_provider"] = {
+            "status": "OK",
+            "provider": healthy_provider.provider_name,
+            "last_success_at": healthy_provider.last_success_at,
+        }
+    elif recovering_provider is not None:
+        checks["market_provider"] = {
+            "status": "DEGRADED",
+            "reason": "provider_recovering",
+            "provider": recovering_provider.provider_name,
+        }
+    else:
+        checks["market_provider"] = {
+            "status": "BLOCKED",
+            "reason": "quote_provider_not_observed",
+            "configured_primary": settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER,
+        }
+
+    latest_market = db.query(MarketSnapshot).filter(MarketSnapshot.market == "CN").order_by(
+        MarketSnapshot.completed_at.desc(), MarketSnapshot.id.desc()
+    ).first()
+    if latest_market is None:
+        checks["quote_pipeline"] = {"status": "BLOCKED", "reason": "market_snapshot_not_observed"}
+        checks["market_refresh"] = {"status": "BLOCKED", "reason": "market_refresh_not_observed"}
+    else:
+        completed_at = latest_market.completed_at
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=UTC)
+        age_seconds = max(0.0, (now - completed_at.astimezone(UTC)).total_seconds())
+        quality = str(latest_market.quality_status or "MISSING").upper()
+        market_closed = checks["trading_calendar"].get("reason") == "non_trading_day"
+        is_usable = quality in {"VALID", "DEGRADED"}
+        is_fresh = age_seconds <= settings.MARKET_SNAPSHOT_FRESHNESS_SECONDS
+        pipeline_status = "OK" if is_usable else "BLOCKED"
+        refresh_status = "OK" if is_usable and (is_fresh or market_closed) else "BLOCKED"
+        checks["quote_pipeline"] = {
+            "status": pipeline_status,
+            "reason": None if is_usable else f"market_snapshot_quality:{quality}",
+            "provider": latest_market.provider,
+            "quality_status": quality,
+            "completed_at": latest_market.completed_at,
+            "age_seconds": round(age_seconds, 1),
+        }
+        checks["market_refresh"] = {
+            "status": refresh_status,
+            "reason": None if refresh_status == "OK" else "market_snapshot_stale",
+            "trade_date": latest_market.trade_date,
+            "completed_at": latest_market.completed_at,
+            "age_seconds": round(age_seconds, 1),
+            "closed_day_grace": market_closed,
+        }
+
+    latest_snapshot = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.user_id == user_id,
+        PortfolioSnapshot.status == "confirmed",
+    ).order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc()).first()
+    if latest_snapshot is None:
+        checks["portfolio_snapshot"] = {"status": "BLOCKED", "reason": "confirmed_portfolio_snapshot_missing"}
+    else:
+        snapshot_time = latest_snapshot.snapshot_time
+        if snapshot_time.tzinfo is None:
+            snapshot_time = snapshot_time.replace(tzinfo=UTC)
+        snapshot_age = max(0.0, (now - snapshot_time.astimezone(UTC)).total_seconds())
+        fresh_enough = snapshot_age <= timedelta(days=3).total_seconds()
+        checks["portfolio_snapshot"] = {
+            "status": "OK" if fresh_enough else "BLOCKED",
+            "reason": None if fresh_enough else "confirmed_portfolio_snapshot_stale",
+            "portfolio_id": latest_snapshot.portfolio_id,
+            "snapshot_id": latest_snapshot.id,
+            "snapshot_time": latest_snapshot.snapshot_time,
+            "age_seconds": round(snapshot_age, 1),
+        }
+
+    latest_analysis = db.query(AnalysisRun).filter(AnalysisRun.user_id == user_id).order_by(
+        AnalysisRun.created_at.desc(), AnalysisRun.id.desc()
+    ).first()
+    checks["analysis_smoke"] = {
+        "status": "OK" if latest_analysis else "BLOCKED",
+        "reason": None if latest_analysis else "successful_analysis_run_not_observed",
+        "run_id": latest_analysis.id if latest_analysis else None,
+        "completed_at": latest_analysis.created_at if latest_analysis else None,
+    }
+
+    latest_candidate = db.query(CandidateRun).filter(
+        CandidateRun.user_id == user_id,
+        CandidateRun.status == "COMPLETED",
+    ).order_by(CandidateRun.as_of.desc(), CandidateRun.id.desc()).first()
+    checks["candidate_smoke"] = {
+        "status": "OK" if latest_candidate else "BLOCKED",
+        "reason": None if latest_candidate else "successful_candidate_run_not_observed",
+        "run_id": latest_candidate.id if latest_candidate else None,
+        "captured_at": latest_candidate.captured_at if latest_candidate else None,
+    }
+
+    shadow = shadow_status(db)
+    checks["shadow_subsystem"] = {
+        "status": "OK" if shadow.get("schema_installed") and shadow.get("status") == "OK" else "BLOCKED" if not shadow.get("schema_installed") else "DEGRADED",
+        "reason": shadow.get("reason"),
+        "schema_installed": shadow.get("schema_installed"),
+        "active_shadow_accounts": shadow.get("active_shadow_accounts"),
+    }
+
+    future_quote = db.query(LiveQuoteObservation).filter(
+        LiveQuoteObservation.quality_status.in_(("VALID", "DEGRADED")),
+        LiveQuoteObservation.price.is_not(None),
+    ).order_by(LiveQuoteObservation.captured_at.desc(), LiveQuoteObservation.id.desc()).first()
+    checks["future_quote_observation"] = {
+        "status": "OK" if future_quote else "BLOCKED",
+        "reason": None if future_quote else "future_quote_observation_not_observed",
+        "quote_id": future_quote.id if future_quote else None,
+        "captured_at": future_quote.captured_at if future_quote else None,
+        "provider": future_quote.provider if future_quote else None,
+    }
+    checks["real_broker_write_path"] = {
+        "status": "OK",
+        "reason": "real_broker_order_path_not_exposed",
+    }
+
+    blockers = [
+        {"key": key, "reason": value.get("reason") or value.get("status") or "check_failed"}
+        for key, value in checks.items()
+        if str(value.get("status") or "UNKNOWN").upper() in {"BLOCKED", "UNKNOWN"}
+    ]
+    warnings = [
+        {"key": key, "reason": value.get("reason") or "degraded"}
+        for key, value in checks.items()
+        if str(value.get("status") or "UNKNOWN").upper() == "DEGRADED"
+    ]
+    return {
+        "status": "READY" if not blockers else "NOT_READY",
+        "ready": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "checks": checks,
+        "evaluated_at": now.isoformat(),
+    }
+
+
 def operational_health(db: Session | None = None) -> dict[str, Any]:
     owns_session = db is None
     if owns_session:
@@ -521,6 +735,7 @@ __all__ = [
     "disk_status",
     "governance_status",
     "liveness",
+    "live_validation_readiness",
     "monitor_status",
     "operational_health",
     "readiness",

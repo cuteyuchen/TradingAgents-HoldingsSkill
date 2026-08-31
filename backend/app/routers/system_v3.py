@@ -23,7 +23,7 @@ from ..system.diagnostics import (
     diagnostic_bundle_metadata,
     diagnostic_bundle_path,
 )
-from ..system.health import operational_health, readiness
+from ..system.health import live_validation_readiness, operational_health, readiness
 from ..system.release import build_release_metadata
 from ..system.startup import collect_startup_recovery_report
 from ..v2_dependencies import get_current_user
@@ -69,6 +69,16 @@ def system_readiness(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     return readiness(db, detailed=True)
+
+
+@router.get("/live-validation-readiness")
+def system_live_validation_readiness(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the persisted evidence gate for entering live validation."""
+
+    return live_validation_readiness(db, user_id=current_user.id)
 
 
 @router.get("/recovery")

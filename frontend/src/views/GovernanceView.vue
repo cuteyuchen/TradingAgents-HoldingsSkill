@@ -4,6 +4,8 @@ import { FilePlus2, RefreshCw, ShieldCheck, Undo2 } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
+import ErrorState from '../components/ErrorState.vue'
+import { fmtDateTime } from '../utils/ui'
 import type {
   CalibrationReport,
   GovernanceEventListResponse,
@@ -18,6 +20,8 @@ import type {
 
 const message = useMessage()
 const loading = ref(false)
+const loadError = ref<unknown>(null)
+const actionLoading = ref<string | null>(null)
 const registry = ref<GovernanceRegistryResponse | null>(null)
 const active = ref<ParameterSetVersion | null>(null)
 const versions = ref<ParameterSetVersion[]>([])
@@ -56,12 +60,24 @@ const pendingProposals = computed(() => proposals.value.filter((item) =>
 const calibratableKeys = computed(() => Object.entries(registry.value?.registry || {}).filter(([, spec]) => spec.calibration_supported).map(([key]) => key))
 const statusType = (status?: string | null): 'success' | 'warning' | 'error' | 'info' | 'default' => {
   const value = String(status || '').toUpperCase()
-  if (['ACTIVE', 'APPROVED', 'PASS', 'OK', 'COMPLETED'].includes(value)) return 'success'
-  if (['PENDING_REVIEW', 'DRAFT', 'DEGRADED', 'WARNING', 'SUPERSEDED'].includes(value)) return 'warning'
+  if (['ACTIVE', 'PASS', 'OK', 'COMPLETED'].includes(value)) return 'success'
+  if (['APPROVED', 'PENDING_REVIEW', 'DRAFT', 'DEGRADED', 'WARNING', 'SUPERSEDED'].includes(value)) return 'warning'
   if (['REJECTED', 'BLOCKED', 'ROLLED_BACK'].includes(value)) return 'error'
   return 'info'
 }
-const fmt = (value?: string | null) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+const statusLabel = (status?: string | null) => {
+  const value = String(status || '').toUpperCase()
+  return ({
+    DRAFT: 'DRAFT',
+    PENDING_REVIEW: 'REVIEW',
+    APPROVED: 'REVIEW / 已审批待激活',
+    ACTIVE: 'ACTIVE',
+    SUPERSEDED: 'SUPERSEDED',
+    REJECTED: 'REJECTED',
+    ROLLED_BACK: 'SUPERSEDED',
+  }[value] || value || 'UNKNOWN')
+}
+const fmt = (value?: string | null) => fmtDateTime(value)
 const pretty = (value: unknown): string => {
   if (value === null || value === undefined) return '—'
   if (typeof value === 'object') return JSON.stringify(value)
@@ -69,6 +85,11 @@ const pretty = (value: unknown): string => {
 }
 const specFor = (key: string): GovernanceParameter | undefined => registry.value?.registry?.[key]
 const specLabel = (key: string) => specFor(key)?.display_name || key
+const beginAction = (key: string) => {
+  if (actionLoading.value) return false
+  actionLoading.value = key
+  return true
+}
 
 function parseValue(raw: string): unknown {
   const value = raw.trim()
@@ -82,6 +103,7 @@ function parseValue(raw: string): unknown {
 
 async function load() {
   loading.value = true
+  loadError.value = null
   try {
     const [registryResult, versionsResult, proposalsResult, eventsResult, calibrationResult] = await Promise.all([
       api.getGovernanceParameters(),
@@ -106,7 +128,7 @@ async function load() {
       health.value = null
     }
   } catch (error) {
-    message.error((error as Error).message)
+    loadError.value = error
   } finally {
     loading.value = false
   }
@@ -120,6 +142,7 @@ function openCalibration(report: CalibrationReport) {
 }
 
 async function createCalibrationProposal() {
+  if (!beginAction('calibration-proposal')) return
   try {
     await api.createProposalFromCalibration({
       calibration_report_id: calibrationForm.reportId,
@@ -131,6 +154,8 @@ async function createCalibrationProposal() {
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
@@ -139,6 +164,7 @@ async function createManualProposal() {
     message.warning('请选择目标参数')
     return
   }
+  if (!beginAction('manual-proposal')) return
   try {
     await api.createManualProposal({
       target_parameter_key: manualForm.key,
@@ -151,80 +177,101 @@ async function createManualProposal() {
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
 async function submitProposal(proposal: ParameterChangeProposal) {
+  if (!beginAction('submit-' + proposal.id)) return
   try {
     await api.submitGovernanceProposal(proposal.id)
     message.success('提案已提交审批')
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
 async function approveProposal(proposal: ParameterChangeProposal) {
   if (!window.confirm(`批准提案 #${proposal.id}？批准不会立即激活生产参数。`)) return
+  if (!beginAction('approve-' + proposal.id)) return
   try {
     await api.approveGovernanceProposal(proposal.id)
     message.success('已生成 APPROVED 参数版本，需再次显式激活')
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
 async function rejectProposal(proposal: ParameterChangeProposal) {
   if (!window.confirm(`拒绝提案 #${proposal.id}？`)) return
+  if (!beginAction('reject-' + proposal.id)) return
   try {
     await api.rejectGovernanceProposal(proposal.id)
     message.info('提案已拒绝')
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
 async function validateVersion(version: ParameterSetVersion) {
+  if (!beginAction('validate-' + version.id)) return
   try {
     await api.validateParameterSet(version.id)
     message.success('确定性验证已完成')
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
 async function activateVersion(version: ParameterSetVersion) {
-  const emergency = !window.confirm(`激活参数版本 v${version.version}？当前 ACTIVE 将被 SUPERSEDED。`)
-  const reason = window.prompt(emergency ? '紧急激活必须填写原因' : '激活原因（可留空）') || ''
-  if (emergency && !reason) {
-    message.warning('紧急激活必须填写原因')
-    return
-  }
+  if (version.status !== 'APPROVED') return
+  const diff = pretty(version.diff || '未记录结构化变更')
+  const evidence = version.source_proposal_id ? 'Proposal #' + version.source_proposal_id : '无关联提案'
+  if (!window.confirm('准备激活参数版本 v' + version.version + '？当前 ACTIVE 版本将被 SUPERSEDED。')) return
+  if (!window.confirm('二次确认：这会让生产运行时读取该版本。\n\n版本：v' + version.version + '\nConfig Hash：' + version.config_hash + '\n关键变更：' + diff + '\n证据来源：' + evidence + '\n\n确认继续？')) return
+  const reasonInput = window.prompt('填写本次手工激活原因（可留空；取消则不激活）')
+  if (reasonInput === null) return
+  if (!beginAction('activate-' + version.id)) return
   try {
     await api.activateParameterSet(version.id, {
-      emergency_override: emergency,
-      reason: reason || null,
+      emergency_override: false,
+      reason: reasonInput.trim() || null,
       expected_active_version_id: active.value?.id ?? null,
     })
     message.success(`参数版本 v${version.version} 已激活`)
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
 async function rollbackTo(version: ParameterSetVersion) {
   const reason = window.prompt(`创建回滚到 v${version.version} 的提案原因`) || ''
   if (!reason) return
+  if (!beginAction('rollback-' + version.id)) return
   try {
     await api.createRollbackProposal(version.id, reason)
     message.info('回滚提案已创建，需要继续提交、审批并激活')
     await load()
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    actionLoading.value = null
   }
 }
 
@@ -236,16 +283,17 @@ onMounted(() => void load())
     <div class="page-head">
       <div>
         <h1>参数治理</h1>
-        <span class="muted">Research proposes · Humans approve · Governance versions · Production consumes</span>
+        <span class="muted">Research 提议 · 人工审批 · 版本验证 · 手工激活；不会自动应用参数</span>
       </div>
       <div class="head-actions">
         <n-tag v-if="health" :type="statusType(health.status)" size="large">
-          {{ health.status }} {{ health.reasons.join(' / ') }}
+          {{ statusLabel(health.status) }} {{ health.reasons.join(' / ') }}
         </n-tag>
         <n-button :loading="loading" @click="load"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
       </div>
     </div>
 
+    <ErrorState v-if="loadError" :error="loadError" @retry="load" />
     <n-spin :show="loading">
       <div class="gov-grid">
         <section class="panel-card gov-section">
@@ -257,7 +305,7 @@ onMounted(() => void load())
             <div class="active-banner">
               <strong>v{{ active.version }}</strong>
               <span>{{ fmt(active.activated_at) }}</span>
-              <n-tag :type="statusType(active.status)" size="small">{{ active.status }}</n-tag>
+              <n-tag :type="statusType(active.status)" size="small">{{ statusLabel(active.status) }}</n-tag>
             </div>
             <div class="kv-list">
               <div><span>Config Hash</span><code>{{ active.config_hash }}</code></div>
@@ -298,7 +346,7 @@ onMounted(() => void load())
             <div class="proposal-main">
               <div class="proposal-title">
                 <strong>#{{ proposal.id }} · {{ specLabel(proposal.target_parameter) }}</strong>
-                <n-tag size="small" :type="statusType(proposal.status)">{{ proposal.status }}</n-tag>
+                <n-tag size="small" :type="statusType(proposal.status)">{{ statusLabel(proposal.status) }}</n-tag>
               </div>
               <div class="proposal-values">
                 <span><b>当前</b> {{ pretty(proposal.current_value) }}</span>
@@ -306,14 +354,15 @@ onMounted(() => void load())
                 <span><b>拟变更</b> {{ pretty(proposal.proposed_value) }}</span>
               </div>
               <div class="muted small">{{ proposal.reason || '' }}</div>
+              <div v-if="proposal.evidence" class="muted small">证据来源：{{ pretty(proposal.evidence) }}</div>
             </div>
             <div class="proposal-actions">
-              <n-button v-if="proposal.status === 'DRAFT'" size="small" @click="submitProposal(proposal)">提交审批</n-button>
+              <n-button v-if="proposal.status === 'DRAFT'" size="small" :loading="actionLoading === 'submit-' + proposal.id" :disabled="Boolean(actionLoading)" @click="submitProposal(proposal)">提交审批</n-button>
               <template v-if="proposal.status === 'PENDING_REVIEW'">
-                <n-button size="small" type="primary" @click="approveProposal(proposal)">批准</n-button>
-                <n-button size="small" @click="rejectProposal(proposal)">拒绝</n-button>
+                <n-button size="small" type="primary" :loading="actionLoading === 'approve-' + proposal.id" :disabled="Boolean(actionLoading)" @click="approveProposal(proposal)">批准</n-button>
+                <n-button size="small" :loading="actionLoading === 'reject-' + proposal.id" :disabled="Boolean(actionLoading)" @click="rejectProposal(proposal)">拒绝</n-button>
               </template>
-              <n-button v-if="proposal.status === 'APPROVED' && proposal.approved_version_id" size="small" @click="validateVersion(versions.find((v) => v.id === proposal.approved_version_id)!)">验证</n-button>
+              <n-button v-if="proposal.status === 'APPROVED' && proposal.approved_version_id" size="small" :loading="actionLoading === 'validate-' + proposal.approved_version_id" :disabled="Boolean(actionLoading)" @click="versions.find((v) => v.id === proposal.approved_version_id) && validateVersion(versions.find((v) => v.id === proposal.approved_version_id)!)">验证</n-button>
             </div>
           </div>
         </div>
@@ -327,18 +376,19 @@ onMounted(() => void load())
             <div class="version-main">
               <div class="proposal-title">
                 <strong>v{{ version.version }}</strong>
-                <n-tag size="small" :type="statusType(version.status)">{{ version.status }}</n-tag>
+                <n-tag size="small" :type="statusType(version.status)">{{ statusLabel(version.status) }}</n-tag>
               </div>
               <div class="muted small">
                 {{ fmt(version.activated_at || version.approved_at || version.created_at) }}
                 <template v-if="version.rollback_from_version_id"> · rollback from v{{ (versions.find((v) => v.id === version.rollback_from_version_id))?.version }}</template>
               </div>
               <code class="small">{{ version.config_hash }}</code>
+              <div v-if="version.diff" class="version-line"><span>关键变更</span><code>{{ pretty(version.diff) }}</code></div>
             </div>
             <div class="version-actions">
-              <n-button v-if="version.status === 'APPROVED'" size="small" @click="validateVersion(version)">验证</n-button>
-              <n-button v-if="version.status === 'APPROVED'" size="small" type="primary" @click="activateVersion(version)">激活</n-button>
-              <n-button v-if="version.status !== 'ACTIVE'" size="small" secondary @click="rollbackTo(version)">回滚提案</n-button>
+              <n-button v-if="version.status === 'APPROVED'" size="small" :loading="actionLoading === 'validate-' + version.id" :disabled="Boolean(actionLoading)" @click="validateVersion(version)">验证</n-button>
+              <n-button v-if="version.status === 'APPROVED'" size="small" type="primary" :loading="actionLoading === 'activate-' + version.id" :disabled="Boolean(actionLoading)" @click="activateVersion(version)">激活</n-button>
+              <n-button v-if="version.status !== 'ACTIVE'" size="small" secondary :loading="actionLoading === 'rollback-' + version.id" :disabled="Boolean(actionLoading)" @click="rollbackTo(version)">回滚提案</n-button>
             </div>
           </div>
         </div>
@@ -367,7 +417,7 @@ onMounted(() => void load())
       </n-form>
       <template #footer>
         <n-button @click="calibrationModal = false">取消</n-button>
-        <n-button type="primary" @click="createCalibrationProposal">创建提案</n-button>
+        <n-button type="primary" :loading="actionLoading === 'calibration-proposal'" :disabled="Boolean(actionLoading)" @click="createCalibrationProposal">创建提案</n-button>
       </template>
     </n-modal>
 
@@ -386,7 +436,7 @@ onMounted(() => void load())
       </n-form>
       <template #footer>
         <n-button @click="manualModal = false">取消</n-button>
-        <n-button type="primary" :disabled="!manualForm.riskAcknowledged" @click="createManualProposal">创建提案</n-button>
+        <n-button type="primary" :loading="actionLoading === 'manual-proposal'" :disabled="!manualForm.riskAcknowledged || Boolean(actionLoading)" @click="createManualProposal">创建提案</n-button>
       </template>
     </n-modal>
   </div>
@@ -414,6 +464,8 @@ onMounted(() => void load())
 .suggestion-row span, .proposal-values span { color: var(--app-text-muted); font-size: 12px; }
 .proposal-row, .version-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--app-border-soft); border-radius: 8px; padding: 12px; }
 .proposal-main, .version-main { min-width: 0; display: grid; gap: 5px; }
+.version-line { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; color: var(--app-text-muted); font-size: 11px; }
+.version-line code { min-width: 0; overflow-wrap: anywhere; }
 .proposal-title { display: flex; align-items: center; gap: 8px; }
 .proposal-values { display: flex; align-items: center; gap: 8px; }
 .proposal-values b { color: var(--app-text); }

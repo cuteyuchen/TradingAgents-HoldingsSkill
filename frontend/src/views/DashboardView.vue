@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Bell,
@@ -16,6 +16,9 @@ import {
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
+import ErrorState from '../components/ErrorState.vue'
+import { usePortfolioContext } from '../composables/portfolio'
+import { fmtDateTime } from '../utils/ui'
 import type {
   AnalysisMode,
   DailyDashboard,
@@ -32,10 +35,8 @@ const message = useMessage()
 
 const loading = ref(false)
 const error = ref('')
-const portfolios = ref<Portfolio[]>([])
 const profiles = ref<ModelProfile[]>([])
 const schedules = ref<Schedule[]>([])
-const selectedId = ref<number | null>(null)
 const dashboard = ref<DailyDashboard | null>(null)
 const systemReadiness = ref<SystemReadiness | null>(null)
 const candidateTab = ref<'action' | 'ready' | 'watchlist'>('action')
@@ -51,7 +52,13 @@ const analysisNotify = ref(true)
 const startingAnalysis = ref(false)
 let refreshTimer: number | null = null
 
-const selectedPortfolio = computed(() => portfolios.value.find((item) => item.id === selectedId.value) || null)
+const {
+  portfolios,
+  selectedPortfolioId: selectedId,
+  selectedPortfolio,
+  loadPortfolios,
+  setSelectedPortfolio,
+} = usePortfolioContext()
 const modelReady = computed(() => profiles.value.some((item) => ['analysis', 'deep_analysis'].includes(item.purpose) && item.is_default))
 const schedulesEnabled = computed(() => schedules.value.some((item) => item.enabled))
 const health = computed(() => dashboard.value?.data_health as any)
@@ -67,7 +74,7 @@ const nextCheckpoint = computed(() => dashboard.value?.timeline?.timeline?.find(
 const unreadNotifications = computed(() => Number(dashboard.value?.notifications?.unread_count || 0))
 
 function fmt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+  return fmtDateTime(value)
 }
 
 function numberText(value: unknown, digits = 2) {
@@ -152,7 +159,7 @@ async function load() {
   error.value = ''
   try {
     const [portfolioRows, profileRows, scheduleRows] = await Promise.all([
-      api.listPortfolios(),
+      loadPortfolios(),
       api.listProfiles(),
       api.listSchedules(),
     ])
@@ -160,11 +167,8 @@ async function load() {
     profiles.value = profileRows
     schedules.value = scheduleRows
     const requestedId = Number(route.query.portfolio)
-    selectedId.value = portfolios.value.find((item) => item.id === requestedId)?.id
-      || selectedId.value
-      || portfolios.value.find((item) => item.is_default)?.id
-      || portfolios.value[0]?.id
-      || null
+    const requested = portfolios.value.find((item) => item.id === requestedId)?.id
+    if (requested && requested !== selectedId.value) setSelectedPortfolio(requested)
     await Promise.all([loadDashboard(true), loadSystemReadiness()])
   } catch (err) {
     error.value = (err as Error).message
@@ -264,6 +268,10 @@ onMounted(async () => {
   startAutoRefresh()
 })
 
+watch(selectedId, (id, previous) => {
+  if (id && id !== previous) void loadDashboard()
+})
+
 onUnmounted(() => {
   if (refreshTimer !== null) window.clearInterval(refreshTimer)
 })
@@ -278,7 +286,7 @@ onUnmounted(() => {
         <p>市场、组合、候选、分析、执行和复盘统一对齐到同一数据时点。</p>
       </div>
       <div class="heading-actions">
-        <n-select v-model:value="selectedId" :options="portfolios.map((item) => ({ label: item.name, value: item.id }))" placeholder="选择组合" class="portfolio-select" @update:value="loadDashboard" />
+        <n-select :value="selectedId" :options="portfolios.map((item) => ({ label: item.name, value: item.id }))" placeholder="选择组合" class="portfolio-select" @update:value="setSelectedPortfolio" />
         <n-button secondary :loading="loading" @click="loadDashboard()"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
         <n-button secondary :loading="reconciling" :disabled="!selectedId" @click="reconcile"><template #icon><RotateCcw :size="16" /></template>恢复今日状态</n-button>
         <n-button type="primary" :disabled="!selectedId" @click="router.push({ name: 'upload', query: { portfolio: selectedId } })"><template #icon><Camera :size="16" /></template>更新持仓</n-button>
@@ -286,7 +294,7 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <n-alert v-if="error" type="error" :show-icon="true">{{ error }}</n-alert>
+    <ErrorState v-if="error" :error="error" @retry="load" />
 
     <n-empty v-if="!loading && !portfolios.length" description="暂无持仓组合，请先创建组合或上传持仓。">
       <template #extra><n-button type="primary" @click="createOpen = true"><template #icon><Plus :size="16" /></template>创建组合</n-button></template>

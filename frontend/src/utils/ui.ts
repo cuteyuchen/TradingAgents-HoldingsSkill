@@ -2,13 +2,66 @@ import { h, type VNodeChild } from 'vue'
 import { NCode, NTag } from 'naive-ui'
 
 export const emptyText = '—'
+export const unavailableText = '不可用'
+export const SHANGHAI_TIME_ZONE = 'Asia/Shanghai'
+
+function parseDate(value?: string | null): Date | null {
+  if (!value) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return new Date(`${value}T00:00:00+08:00`)
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
 
 export function fmtDateTime(value?: string | null): string {
-  return value ? value.slice(0, 16).replace('T', ' ') : emptyText
+  const parsed = parseDate(value)
+  if (!parsed) return emptyText
+  const formatted = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: SHANGHAI_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(parsed)
+  return `${formatted.replaceAll('/', '-')} 北京时间`
+}
+
+export function fmtTime(value?: string | null): string {
+  const parsed = parseDate(value)
+  if (!parsed) return emptyText
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: SHANGHAI_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(parsed)
 }
 
 export function fmtPct(value?: number | null): string {
   return value == null ? emptyText : `${(value * 100).toFixed(2)}%`
+}
+
+export function formatPercent(value: unknown, digits = 1): string {
+  if (value === null || value === undefined || value === '') return unavailableText
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(digits)}%` : unavailableText
+}
+
+export function formatNumber(value: unknown, digits = 2): string {
+  if (value === null || value === undefined || value === '') return unavailableText
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed.toFixed(digits) : unavailableText
+}
+
+export function formatCurrency(value: unknown, digits = 2): string {
+  if (value === null || value === undefined || value === '') return unavailableText
+  const parsed = Number(value)
+  return Number.isFinite(parsed)
+    ? `￥${parsed.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
+    : unavailableText
 }
 
 export function fmtMoney(value?: number | null): string {

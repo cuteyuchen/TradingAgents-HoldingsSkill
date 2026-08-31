@@ -78,16 +78,16 @@ function switchMode() {
         <n-alert v-if="route.query.expired" type="warning" :show-icon="false">登录状态已过期，请重新登录。</n-alert>
         <n-form label-placement="top" @submit.prevent="submit">
           <n-form-item v-if="mode === 'register'" label="显示名称">
-            <n-input v-model:value="username" placeholder="可选" size="large" />
+            <n-input v-model:value="username" placeholder="可选" size="large" :input-props="{ autocomplete: 'name' }" />
           </n-form-item>
           <n-form-item label="邮箱">
-            <n-input v-model:value="email" placeholder="name@example.com" size="large" @keyup.enter="submit" />
+            <n-input v-model:value="email" type="email" placeholder="name@example.com" size="large" :input-props="{ autocomplete: 'email' }" @keyup.enter="submit" />
           </n-form-item>
           <n-form-item label="密码">
-            <n-input v-model:value="password" type="password" show-password-on="mousedown" placeholder="至少 8 位" size="large" @keyup.enter="submit" />
+            <n-input v-model:value="password" type="password" show-password-on="mousedown" placeholder="至少 8 位" size="large" :input-props="{ autocomplete: mode === 'register' ? 'new-password' : 'current-password' }" @keyup.enter="submit" />
           </n-form-item>
           <n-form-item v-if="mode === 'register'" label="确认密码">
-            <n-input v-model:value="confirmPassword" type="password" show-password-on="mousedown" size="large" @keyup.enter="submit" />
+            <n-input v-model:value="confirmPassword" type="password" show-password-on="mousedown" size="large" :input-props="{ autocomplete: 'new-password' }" @keyup.enter="submit" />
           </n-form-item>
           <n-alert v-if="error" type="error" :show-icon="false" class="mb-3">{{ error }}</n-alert>
           <n-button type="primary" block size="large" :loading="loading" @click="submit">

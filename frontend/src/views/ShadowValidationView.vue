@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Activity,
@@ -21,8 +21,11 @@ import {
 import { useDialog, useMessage } from 'naive-ui'
 
 import { api } from '../api'
+import ErrorState from '../components/ErrorState.vue'
+import EmptyState from '../components/EmptyState.vue'
+import { usePortfolioContext } from '../composables/portfolio'
+import { fmtDateTime, formatCurrency, formatNumber, formatPercent, unavailableText } from '../utils/ui'
 import type {
-  Portfolio,
   ShadowAccount,
   ShadowDailySnapshot,
   ShadowDecision,
@@ -41,8 +44,7 @@ const dialog = useDialog()
 const loading = ref(false)
 const working = ref(false)
 const error = ref('')
-const portfolios = ref<Portfolio[]>([])
-const selectedPortfolioId = ref<number | null>(null)
+const loadError = ref<unknown>(null)
 const accounts = ref<ShadowAccount[]>([])
 const selectedAccountId = ref<number | null>(null)
 const account = ref<ShadowAccount | null>(null)
@@ -57,7 +59,13 @@ const decisionFilter = ref('ALL')
 const createOpen = ref(false)
 const accountName = ref('影子验证')
 
-const selectedPortfolio = computed(() => portfolios.value.find((item) => item.id === selectedPortfolioId.value) || null)
+const {
+  portfolios,
+  selectedPortfolioId,
+  selectedPortfolio,
+  loadPortfolios,
+  setSelectedPortfolio,
+} = usePortfolioContext()
 const portfolioOptions = computed(() => portfolios.value.map((item) => ({ label: `${item.name} · #${item.id}`, value: item.id })))
 const accountOptions = computed(() => accounts.value.map((item) => ({
   label: `${item.name} · G${item.shadow_generation} · ${accountStatusText(item.status)}`,
@@ -70,36 +78,30 @@ const filteredDecisions = computed(() => decisionFilter.value === 'ALL'
   : decisions.value.filter((item) => String(item.final_action).toUpperCase() === decisionFilter.value))
 const selectedDecisionId = computed(() => selectedDecision.value?.id || null)
 const currentGeneration = computed(() => account.value?.shadow_generation || 0)
+const hasConditionalAdd = computed(() => selectedDecision.value?.selected_actions?.some((item) => String(item.action || item.recommended_action || '').toLowerCase() === 'conditional_add') || false)
 const pendingOrders = computed(() => orders.value.filter((item) => ['PENDING', 'PARTIAL'].includes(item.status)))
 const blockedOrders = computed(() => orders.value.filter((item) => ['BLOCKED', 'EXPIRED', 'CANCELLED', 'SUPERSEDED'].includes(item.status)))
 const filledOrders = computed(() => orders.value.filter((item) => ['FILLED', 'PARTIAL'].includes(item.status)))
+let mounted = false
 
 function fmt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+  return fmtDateTime(value)
 }
 
 function shortTime(value?: string | null) {
-  return value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '—'
+  return value ? fmtDateTime(value).replace(/^\d{4}-\d{2}-\d{2} /, '') : '—'
 }
 
 function numberText(value: unknown, digits = 2) {
-  if (value === null || value === undefined || value === '') return '—'
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed.toFixed(digits) : String(value)
+  return formatNumber(value, digits)
 }
 
 function money(value: unknown) {
-  if (value === null || value === undefined || value === '') return '—'
-  const parsed = Number(value)
-  return Number.isFinite(parsed)
-    ? `¥${parsed.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    : String(value)
+  return formatCurrency(value)
 }
 
 function percent(value: unknown, digits = 1) {
-  if (value === null || value === undefined || value === '') return '—'
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(digits)}%` : String(value)
+  return formatPercent(value, digits)
 }
 
 function percentClass(value: unknown) {
@@ -131,7 +133,8 @@ function accountStatusText(status?: string | null) {
 
 function actionText(action?: string | null) {
   const value = String(action || '').toUpperCase()
-  return value === 'NO_ACTION' ? 'NO_ACTION' : value || '—'
+  if (['ACTION', 'NO_ACTION', 'BLOCKED', 'DATA_GAP'].includes(value)) return value
+  return value || '—'
 }
 
 function basisText(value?: string | null) {
@@ -142,9 +145,13 @@ function basisText(value?: string | null) {
 }
 
 function validationStatus() {
-  if (!validation.value) return '暂无样本'
-  if (validation.value.live_sample_days < 20) return '样本积累中'
-  return '持续观察'
+  if (!validation.value) return 'DATA_GAP'
+  if (validation.value.live_sample_days < 20) return 'INSUFFICIENT_LIVE_EVIDENCE'
+  return 'OBSERVING'
+}
+
+function validationStatusText(value: string) {
+  return value === 'DATA_GAP' ? 'DATA_GAP' : value === 'INSUFFICIENT_LIVE_EVIDENCE' ? '样本不足，继续观察' : '持续观察'
 }
 
 function validationOutcomeText(item: ShadowValidation['cohorts'][number]) {
@@ -159,6 +166,7 @@ async function loadPortfolioData(portfolioId = selectedPortfolioId.value, prefer
   if (!portfolioId) return
   loading.value = true
   error.value = ''
+  loadError.value = null
   try {
     const [accountRows, validationRow] = await Promise.all([
       api.listShadowAccounts(portfolioId),
@@ -171,6 +179,7 @@ async function loadPortfolioData(portfolioId = selectedPortfolioId.value, prefer
     await loadAccountData(nextAccount?.id || null, portfolioId)
   } catch (err) {
     error.value = (err as Error).message
+    loadError.value = err
     message.error(error.value)
   } finally {
     loading.value = false
@@ -207,6 +216,7 @@ async function loadAccountData(accountId = selectedAccountId.value, portfolioId 
     if (decisionRows[0]) await selectDecision(decisionRows[0].id)
   } catch (err) {
     error.value = (err as Error).message
+    loadError.value = err
     message.error(error.value)
   }
 }
@@ -215,6 +225,7 @@ async function selectDecision(id: number) {
   try {
     selectedDecision.value = await api.getShadowDecision(id)
   } catch (err) {
+    loadError.value = err
     message.error((err as Error).message)
   }
 }
@@ -222,16 +233,19 @@ async function selectDecision(id: number) {
 async function load() {
   loading.value = true
   error.value = ''
+  loadError.value = null
   try {
-    portfolios.value = await api.listPortfolios()
+    await loadPortfolios()
     const requestedPortfolioId = Number(route.query.portfolio)
-    selectedPortfolioId.value = portfolios.value.find((item) => item.id === requestedPortfolioId)?.id
+    const preferredId = portfolios.value.find((item) => item.id === requestedPortfolioId)?.id
       || portfolios.value.find((item) => item.is_default)?.id
       || portfolios.value[0]?.id
       || null
-    await loadPortfolioData(selectedPortfolioId.value, Number(route.query.shadow) || null)
+    if (preferredId) setSelectedPortfolio(preferredId)
+    await loadPortfolioData(preferredId, Number(route.query.shadow) || null)
   } catch (err) {
     error.value = (err as Error).message
+    loadError.value = err
     message.error(error.value)
   } finally {
     loading.value = false
@@ -239,10 +253,9 @@ async function load() {
 }
 
 async function changePortfolio(value: number | null) {
-  selectedPortfolioId.value = value
+  setSelectedPortfolio(value)
   selectedAccountId.value = null
   await router.replace({ query: { ...route.query, portfolio: value ? String(value) : undefined, shadow: undefined } })
-  await loadPortfolioData(value, null)
 }
 
 async function changeAccount(value: number | null) {
@@ -351,7 +364,14 @@ async function refresh() {
   await loadPortfolioData(selectedPortfolioId.value, selectedAccountId.value)
 }
 
-onMounted(() => void load())
+onMounted(async () => { await load(); mounted = true })
+onUnmounted(() => { mounted = false })
+watch(selectedPortfolioId, (value, previous) => {
+  if (!mounted || value === previous) return
+  selectedAccountId.value = null
+  void router.replace({ query: { ...route.query, portfolio: value ? String(value) : undefined, shadow: undefined } })
+  void loadPortfolioData(value, null)
+})
 </script>
 
 <template>
@@ -363,9 +383,9 @@ onMounted(() => void load())
         <p>记录生产决策、未来可执行价格和后续结果，真实账户与 Shadow 完全隔离。</p>
       </div>
       <div class="shadow-safety" aria-label="模拟模式，不会真实下单">
-        <span class="safety-kicker">模拟</span>
-        <strong>SHADOW</strong>
-        <small>不会真实下单</small>
+        <span class="safety-kicker">SHADOW / 模拟验证</span>
+        <strong>不会发送真实订单</strong>
+        <small>只记录 Decision → Execution → Outcome</small>
       </div>
     </header>
 
@@ -397,16 +417,21 @@ onMounted(() => void load())
       </div>
     </div>
 
-    <n-alert v-if="error" type="error" :show-icon="true" closable @close="error = ''">{{ error }}</n-alert>
+    <ErrorState v-if="loadError" :error="loadError" @retry="refresh" />
     <n-alert type="info" :show-icon="true">
       Shadow 只使用决策完成后持久化的未来 Live Quote；不使用决策参考价、旧收盘价或真实账户资金模拟成交。模拟结果不代表未来收益。
     </n-alert>
 
-    <n-empty v-if="!loading && !portfolios.length" class="panel-card empty-panel" description="暂无生产组合，请先创建组合并确认持仓。" />
+    <EmptyState v-if="!loading && !portfolios.length" class="panel-card empty-panel" description="暂无生产组合，请先创建组合并确认持仓。">
+      <template #action><n-button secondary size="small" @click="router.push({ name: 'upload' })">先导入持仓</n-button></template>
+    </EmptyState>
     <template v-else-if="selectedPortfolio">
       <n-alert v-if="!latestSnapshotId" type="warning" :show-icon="true">
         当前组合还没有已确认持仓快照，Shadow Account 必须从一次明确的真实组合快照初始化。
       </n-alert>
+      <EmptyState v-if="!loading && !account" class="panel-card empty-panel" description="当前组合还没有 Shadow Account">
+        <template #action><n-button type="primary" size="small" :disabled="!latestSnapshotId" @click="openCreate">创建 Shadow Account</n-button></template>
+      </EmptyState>
 
       <n-card v-if="account" class="panel-card account-card" :bordered="false">
         <template #header>
@@ -420,13 +445,14 @@ onMounted(() => void load())
         </div>
         <div class="metric-grid">
           <div class="metric-cell"><span>当前现金</span><strong>{{ money(account.current_cash) }}</strong><small>Shadow cash</small></div>
-          <div class="metric-cell"><span>当前净值</span><strong>{{ money(performance?.current_equity) }}</strong><small>{{ performance?.sample_days || 0 }} 个交易日</small></div>
+          <div class="metric-cell"><span>当前净值</span><strong>{{ money(performance?.current_equity) }}</strong><small>{{ performance?.sample_days ?? unavailableText }} 个交易日</small></div>
           <div class="metric-cell"><span>累计收益</span><strong :class="percentClass(performance?.cumulative_return)">{{ percent(performance?.cumulative_return) }}</strong><small>仅基于 Shadow snapshot</small></div>
           <div class="metric-cell"><span>最大回撤</span><strong class="negative">{{ percent(performance?.max_drawdown) }}</strong><small>generation 内</small></div>
           <div class="metric-cell"><span>Benchmark</span><strong :class="percentClass(performance?.benchmark_return)">{{ percent(performance?.benchmark_return) }}</strong><small>All-A Median</small></div>
           <div class="metric-cell"><span>相对基准</span><strong :class="percentClass(performance?.excess_return)">{{ percent(performance?.excess_return) }}</strong><small>Shadow - benchmark</small></div>
           <div class="metric-cell"><span>待处理意图</span><strong>{{ pendingOrders.length }}</strong><small>{{ account.pending_intent_count }} pending / partial</small></div>
           <div class="metric-cell"><span>成交笔数</span><strong>{{ fills.length }}</strong><small>成本 {{ money(performance?.transaction_cost) }}</small></div>
+          <div class="metric-cell"><span>性能质量</span><strong>{{ performance?.performance_quality || 'DATA_GAP' }}</strong><small>样本不足不会判定策略有效</small></div>
         </div>
       </n-card>
 
@@ -469,6 +495,9 @@ onMounted(() => void load())
                 刷新实际动作对齐
               </n-button>
             </div>
+            <n-alert v-if="hasConditionalAdd" type="warning" :show-icon="false">
+              条件加仓仅记录建议，V1 暂不模拟条件触发成交。
+            </n-alert>
           </div>
         </n-card>
 
@@ -521,11 +550,11 @@ onMounted(() => void load())
       <div v-if="account" class="shadow-grid shadow-grid-bottom">
         <n-card class="panel-card validation-panel" :bordered="false">
           <template #header>
-            <div class="card-heading"><ShieldCheck :size="17" /><span>Validation Cohorts</span><small>{{ validationStatus() }}</small></div>
+            <div class="card-heading"><ShieldCheck :size="17" /><span>Validation Cohorts</span><small>{{ validationStatusText(validationStatus()) }}</small></div>
           </template>
           <div class="validation-kpis">
-            <div><span>Live sample days</span><strong>{{ validation?.live_sample_days || 0 }}</strong></div>
-            <div><span>Decision count</span><strong>{{ validation?.decision_count || 0 }}</strong></div>
+            <div><span>Live sample days</span><strong>{{ validation?.live_sample_days ?? unavailableText }}</strong></div>
+            <div><span>Decision count</span><strong>{{ validation?.decision_count ?? unavailableText }}</strong></div>
             <div><span>Action rate</span><strong>{{ validation?.decision_count ? percent((validation.cohorts.reduce((sum, item) => sum + item.action_count, 0)) / validation.decision_count) : '—' }}</strong></div>
             <div><span>Backtest 混入</span><strong>否</strong></div>
           </div>
@@ -535,7 +564,7 @@ onMounted(() => void load())
               <div class="fact-right"><n-tag size="small" :type="statusType(item.evidence_status)">{{ item.evidence_status }}</n-tag><small>{{ validationOutcomeText(item) }}</small></div>
             </div>
           </div>
-          <n-empty v-else description="Live sample = 0，等待真实交易日积累证据" />
+          <n-empty v-else description="暂无有效 Live Evidence，等待真实交易日积累证据" />
           <div v-if="validation?.limitations?.length" class="limitations">
             <span v-for="item in validation.limitations" :key="item"><AlertTriangle :size="13" />{{ item }}</span>
           </div>

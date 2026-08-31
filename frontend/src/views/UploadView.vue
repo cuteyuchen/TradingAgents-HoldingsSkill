@@ -5,13 +5,13 @@ import { Camera, CheckCircle2, ClipboardPaste, FileImage, Play, Plus, RefreshCw,
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { AnalysisJob, AnalysisMode, HoldingUpload, ParsedHoldings, Portfolio, PortfolioSnapshot } from '../api/types'
+import { usePortfolioContext } from '../composables/portfolio'
+import { fmtDateTime } from '../utils/ui'
+import type { AnalysisJob, AnalysisMode, HoldingUpload, ParsedHoldings, PortfolioSnapshot } from '../api/types'
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const portfolios = ref<Portfolio[]>([])
-const portfolioId = ref<number | null>(null)
 const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const upload = ref<HoldingUpload | null>(null)
@@ -23,18 +23,29 @@ const saving = ref(false)
 const confirming = ref(false)
 const loadingLatestSnapshot = ref(false)
 const analysisStarting = ref(false)
+const jobActionLoading = ref(false)
+const retryingUpload = ref(false)
+const pollingError = ref('')
 const analysisMode = ref<AnalysisMode>('deep')
 const checkpoint = ref('10:30')
 const notify = ref(true)
 const analysisPanel = ref<HTMLElement | null>(null)
 let initialized = false
 let pollTimer: number | null = null
+let pollBusy = false
+
+const {
+  portfolios,
+  selectedPortfolioId: portfolioId,
+  selectedPortfolio,
+  loadPortfolios: loadPortfolioContext,
+  setSelectedPortfolio,
+} = usePortfolioContext()
 
 const canUpload = computed(() => Boolean(selectedFile.value))
 const canConfirm = computed(() => Boolean(upload.value && parsed.value?.holdings.length && !upload.value.validation_errors.length))
 const missingCodeCount = computed(() => parsed.value?.holdings.filter((holding) => !holding.code.trim()).length || 0)
 const terminalJob = computed(() => ['succeeded', 'failed', 'cancelled'].includes(job.value?.status || ''))
-const selectedPortfolio = computed(() => portfolios.value.find((item) => item.id === portfolioId.value) || null)
 const stageLabels: Record<string, string> = {
   queued: '等待执行',
   context_loading: '加载历史分析',
@@ -57,7 +68,18 @@ const stageLabels: Record<string, string> = {
 }
 
 function fmt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+  return fmtDateTime(value)
+}
+
+function uploadStatusText(status?: string | null) {
+  return ({
+    uploaded: '已上传',
+    vision_parsing: '识别中',
+    waiting_confirmation: '待人工确认',
+    confirmed: '已确认',
+    failed: '识别失败',
+    needs_model: '缺少识图模型',
+  }[String(status || '').toLowerCase()] || String(status || '未知'))
 }
 
 function emptyParsed(): ParsedHoldings {
@@ -69,6 +91,7 @@ function stopPolling() {
     window.clearInterval(pollTimer)
     pollTimer = null
   }
+  pollBusy = false
 }
 
 function clearDraft() {
@@ -110,12 +133,12 @@ function pasteImage(event: ClipboardEvent) {
 }
 
 async function loadPortfolios() {
-  portfolios.value = await api.listPortfolios()
+  await loadPortfolioContext()
   const requested = Number(route.query.portfolio)
   const preferred = portfolios.value.find((item) => item.id === requested)
     || portfolios.value.find((item) => item.is_default)
     || portfolios.value[0]
-  portfolioId.value = preferred?.id || null
+  if (preferred?.id) setSelectedPortfolio(preferred.id)
 }
 
 async function loadLatestSnapshot(id: number | null) {
@@ -143,7 +166,7 @@ async function focusAnalysisPanel() {
 async function resumeJob(jobId: number) {
   const latest = await api.getAnalysisJob(jobId)
   job.value = latest
-  portfolioId.value = latest.portfolio_id
+  setSelectedPortfolio(latest.portfolio_id)
   snapshot.value = await api.getSnapshot(latest.snapshot_id)
   if (!['succeeded', 'failed', 'cancelled'].includes(latest.status)) startJobPolling()
   await focusAnalysisPanel()
@@ -153,13 +176,15 @@ async function submitUpload() {
   if (!selectedFile.value) return
   loading.value = true
   try {
-    if (!portfolioId.value) {
+    let targetPortfolioId = portfolioId.value
+    if (!targetPortfolioId) {
       const portfolio = await api.createPortfolio({ name: '默认组合', is_default: true })
       portfolios.value.push(portfolio)
-      portfolioId.value = portfolio.id
+      setSelectedPortfolio(portfolio.id)
+      targetPortfolioId = portfolio.id
       message.success('已自动创建默认持仓组合')
     }
-    upload.value = await api.uploadHoldings(portfolioId.value, selectedFile.value)
+    upload.value = await api.uploadHoldings(targetPortfolioId, selectedFile.value)
     parsed.value = upload.value.parsed || null
     message.success('截图已上传，正在识别持仓')
     startUploadPolling()
@@ -172,16 +197,19 @@ async function submitUpload() {
 
 function startUploadPolling() {
   stopPolling()
+  pollingError.value = ''
   pollTimer = window.setInterval(async () => {
-    if (!upload.value) return
+    if (!upload.value || pollBusy) return
+    pollBusy = true
     try {
       const latest = await api.getUpload(upload.value.id)
       upload.value = latest
       parsed.value = latest.parsed || parsed.value
       if (['waiting_confirmation', 'failed', 'needs_model', 'confirmed'].includes(latest.parsing_status)) stopPolling()
     } catch (error) {
-      stopPolling()
-      message.error((error as Error).message)
+      pollingError.value = (error as Error).message
+    } finally {
+      pollBusy = false
     }
   }, 1600)
 }
@@ -217,13 +245,16 @@ async function saveParsed(): Promise<boolean> {
 }
 
 async function retryVision() {
-  if (!upload.value) return
+  if (!upload.value || retryingUpload.value) return
+  retryingUpload.value = true
   try {
     upload.value = await api.retryUploadParse(upload.value.id)
     startUploadPolling()
     message.info('已重新提交识图任务')
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    retryingUpload.value = false
   }
 }
 
@@ -254,6 +285,7 @@ async function runAnalysis() {
   analysisStarting.value = true
   try {
     job.value = await api.createAnalysisJob(snapshot.value.id, analysisMode.value, checkpoint.value || undefined, notify.value)
+    pollingError.value = ''
     message.success('手动分析任务已创建')
     await router.replace({
       name: 'upload',
@@ -267,10 +299,41 @@ async function runAnalysis() {
   }
 }
 
+async function cancelAnalysis() {
+  if (!job.value || terminalJob.value || jobActionLoading.value) return
+  jobActionLoading.value = true
+  try {
+    job.value = await api.cancelAnalysisJob(job.value.id)
+    stopPolling()
+    message.info('分析任务已取消')
+  } catch (error) {
+    message.error((error as Error).message)
+  } finally {
+    jobActionLoading.value = false
+  }
+}
+
+async function retryAnalysis() {
+  if (!job.value || job.value.status !== 'failed' || jobActionLoading.value) return
+  jobActionLoading.value = true
+  try {
+    job.value = await api.retryAnalysisJob(job.value.id)
+    pollingError.value = ''
+    startJobPolling()
+    message.info('已重新提交分析任务')
+  } catch (error) {
+    message.error((error as Error).message)
+  } finally {
+    jobActionLoading.value = false
+  }
+}
+
 function startJobPolling() {
   stopPolling()
+  pollingError.value = ''
   pollTimer = window.setInterval(async () => {
-    if (!job.value) return
+    if (!job.value || pollBusy) return
+    pollBusy = true
     try {
       job.value = await api.getAnalysisJob(job.value.id)
       if (terminalJob.value) {
@@ -282,8 +345,9 @@ function startJobPolling() {
         }
       }
     } catch (error) {
-      stopPolling()
-      message.error((error as Error).message)
+      pollingError.value = (error as Error).message
+    } finally {
+      pollBusy = false
     }
   }, 1400)
 }
@@ -340,7 +404,7 @@ onUnmounted(() => {
         <div class="section-title"><div><h2>1. 上传新持仓（可选）</h2><p>支持选择文件或直接按 Ctrl + V 粘贴截图</p></div><FileImage :size="21" /></div>
         <n-form label-placement="top">
           <n-form-item label="持仓组合">
-            <n-select v-model:value="portfolioId" :options="portfolios.map(p => ({ label: p.name, value: p.id }))" placeholder="未选择时自动创建默认组合" />
+            <n-select :value="portfolioId" :options="portfolios.map(p => ({ label: p.name, value: p.id }))" placeholder="未选择时自动创建默认组合" @update:value="setSelectedPortfolio" />
           </n-form-item>
           <label class="drop-zone" :class="{ selected: selectedFile }">
             <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="selectFile" />
@@ -369,14 +433,14 @@ onUnmounted(() => {
         <n-empty v-else-if="!upload" :description="snapshot ? `当前可分析快照 #${snapshot.id}` : '上传截图后显示处理状态。'" />
         <template v-else>
           <div class="state-line"><span>上传编号</span><strong>#{{ upload.id }}</strong></div>
-          <div class="state-line"><span>当前状态</span><n-tag :type="upload.parsing_status === 'failed' ? 'error' : upload.parsing_status === 'waiting_confirmation' ? 'warning' : upload.parsing_status === 'confirmed' ? 'success' : 'info'">{{ upload.parsing_status }}</n-tag></div>
+          <div class="state-line"><span>当前状态</span><n-tag :type="upload.parsing_status === 'failed' ? 'error' : upload.parsing_status === 'waiting_confirmation' ? 'warning' : upload.parsing_status === 'confirmed' ? 'success' : 'info'">{{ uploadStatusText(upload.parsing_status) }}</n-tag></div>
           <n-progress v-if="['uploaded', 'vision_parsing'].includes(upload.parsing_status)" type="line" :percentage="upload.parsing_status === 'uploaded' ? 25 : 65" processing :show-indicator="false" />
           <n-alert v-if="upload.error_message" type="warning" :show-icon="false">{{ upload.error_message }}</n-alert>
           <n-alert v-if="upload.validation_errors.length" type="error" :show-icon="false">
             <div v-for="item in upload.validation_errors" :key="item">{{ item }}</div>
           </n-alert>
           <div class="state-actions">
-            <n-button v-if="['failed', 'needs_model'].includes(upload.parsing_status)" secondary @click="retryVision">重新识别</n-button>
+            <n-button v-if="['failed', 'needs_model'].includes(upload.parsing_status)" secondary :loading="retryingUpload" @click="retryVision">重新识别</n-button>
             <n-button v-if="!parsed" secondary @click="manualEntry">手工录入</n-button>
           </div>
         </template>
@@ -438,8 +502,11 @@ onUnmounted(() => {
         <div><strong>{{ stageLabels[job.current_stage] || job.current_stage }}</strong><span>{{ job.progress_percent }}%</span></div>
         <n-progress type="line" :percentage="job.progress_percent" :status="job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'success' : 'default'" :processing="!terminalJob" />
         <n-alert v-if="job.error_message" type="error" :show-icon="false">{{ job.error_message }}</n-alert>
+        <n-alert v-if="pollingError" type="warning" :show-icon="false">{{ pollingError }} 页面会继续尝试恢复。</n-alert>
         <div class="job-actions">
           <n-button v-if="job.status === 'succeeded' && job.run_id" type="primary" @click="openReport">查看完整报告</n-button>
+          <n-button v-if="['queued', 'running'].includes(job.status)" secondary :loading="jobActionLoading" @click="cancelAnalysis">取消任务</n-button>
+          <n-button v-if="job.status === 'failed'" secondary :loading="jobActionLoading" @click="retryAnalysis">重试分析</n-button>
           <n-button v-if="terminalJob" secondary @click="job = null">再次分析当前快照</n-button>
         </div>
       </div>

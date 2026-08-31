@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 import io
 import logging
@@ -15,10 +16,14 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import Base
 from app.governance.models import ParameterSetVersion
+from app.market_models import TradingCalendar
+from app.market_runtime_models import MarketSnapshot, ProviderHealth
+from app.services.trading_calendar import CHINA_TZ
 from app.system.health import (
     RuntimeNotReadyError,
     database_status,
     disk_status,
+    live_validation_readiness,
     readiness,
     require_runtime_ready_for_risk_work,
     run_quick_check,
@@ -29,7 +34,7 @@ from app.system.logging import RequestIDMiddleware, configure_logging, redact_te
 from app.system.release import build_release_metadata, schema_state
 
 
-def _full_db() -> Session:
+def _full_db(*, include_shadow: bool = False) -> Session:
     import app.candidates.models  # noqa: F401
     import app.governance.models  # noqa: F401
     import app.market_engine_models  # noqa: F401
@@ -38,6 +43,8 @@ def _full_db() -> Session:
     import app.operations.models  # noqa: F401
     import app.portfolio_models  # noqa: F401
     import app.research.models  # noqa: F401
+    if include_shadow:
+        import app.shadow_models  # noqa: F401
     import app.trigger_models  # noqa: F401
     import app.v2_models  # noqa: F401
 
@@ -212,6 +219,111 @@ def test_database_status_defers_heavy_quick_check(monkeypatch):
         assert called["count"] == 0
         assert result["checks"]["database"]["quick_check_source"] == "deferred"
         assert result["checks"]["database"]["status"] == "OK"
+    finally:
+        db.close()
+
+
+def _ready_base_payload() -> dict:
+    return {
+        "status": "READY",
+        "ready": True,
+        "checks": {
+            "database": {"status": "OK"},
+            "schema": {"status": "OK"},
+            "storage": {"status": "OK"},
+            "backup": {"status": "OK"},
+            "scheduler": {"status": "OK"},
+            "worker_recovery": {"status": "OK"},
+            "governance": {"status": "OK"},
+        },
+    }
+
+
+def test_live_validation_readiness_is_structured_and_fails_closed_for_missing_evidence(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["status"] == "NOT_READY"
+        assert result["ready"] is False
+        assert isinstance(result["checks"], dict)
+        assert isinstance(result["blockers"], list)
+        assert isinstance(result["warnings"], list)
+        assert result["evaluated_at"]
+
+        blockers = {item["key"]: item["reason"] for item in result["blockers"]}
+        for key in (
+            "market_provider",
+            "market_refresh",
+            "portfolio_snapshot",
+            "analysis_smoke",
+            "candidate_smoke",
+            "future_quote_observation",
+        ):
+            assert result["checks"][key]["status"] == "BLOCKED"
+            assert key in blockers
+            assert blockers[key]
+        assert result["checks"]["shadow_subsystem"]["status"] == "OK"
+        assert all("key" in item and "reason" in item for item in result["blockers"])
+        assert all("key" in item and "reason" in item for item in result["warnings"])
+    finally:
+        db.close()
+
+
+def test_live_validation_readiness_allows_stale_market_snapshot_on_closed_day(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(health_module, "shadow_status", lambda _db: {
+            "status": "OK",
+            "schema_installed": True,
+            "active_shadow_accounts": 0,
+        })
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+
+        current_day = datetime.now(UTC).astimezone(CHINA_TZ).date()
+        next_day = current_day + timedelta(days=1)
+        previous_capture = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=1)
+        db.add_all([
+            TradingCalendar(market="CN", trade_date=current_day, is_open=False),
+            TradingCalendar(market="CN", trade_date=next_day, is_open=True),
+            ProviderHealth(
+                provider_name="eastmoney_batch",
+                data_type="quote",
+                status="HEALTHY",
+                last_success_at=previous_capture,
+            ),
+            MarketSnapshot(
+                snapshot_id="holiday-market-snapshot",
+                market="CN",
+                started_at=previous_capture,
+                completed_at=previous_capture,
+                trade_date=current_day - timedelta(days=1),
+                provider="eastmoney_batch",
+                expected_count=1,
+                received_count=1,
+                coverage_ratio=1.0,
+                quality_status="VALID",
+            ),
+        ])
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["trading_calendar"]["status"] == "OK"
+        assert result["checks"]["trading_calendar"]["reason"] == "non_trading_day"
+        assert result["checks"]["market_provider"]["status"] == "OK"
+        assert result["checks"]["quote_pipeline"]["status"] == "OK"
+        assert result["checks"]["market_refresh"]["status"] == "OK"
+        assert result["checks"]["market_refresh"]["closed_day_grace"] is True
+        assert result["checks"]["market_refresh"]["trade_date"] == current_day - timedelta(days=1)
     finally:
         db.close()
 
