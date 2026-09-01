@@ -59,6 +59,7 @@ const result = computed<AnyRecord>(() => structured.value.result || {})
 const workflow = computed<AnyRecord>(() => structured.value.workflow || structured.value.analysis_workflow || {})
 const holdings = computed<any[]>(() => Array.isArray(result.value.holdings) ? result.value.holdings : [])
 const market = computed<AnyRecord>(() => structured.value.market_snapshot || {})
+const decisionGate = computed<AnyRecord>(() => section('decision_gate') || {})
 
 function section(...keys: string[]): any {
   for (const source of [result.value, workflow.value, structured.value]) {
@@ -82,13 +83,15 @@ const traderProposal = computed(() => section('trader_proposal'))
 const riskDebate = computed(() => section('risk_debate_state', 'risk_debate', 'three_way_risk_debate') || {})
 const riskRevision = computed(() => section('risk_revision', 'risk_revision_loop'))
 const portfolioFinal = computed(() => section('portfolio_final', 'portfolio_manager_final'))
-const finalDecision = computed(() => field(
-  result.value,
-  'final_action',
-  'final_rating',
-  'portfolio_action',
-  'decision',
-) || detail.value?.final_rating || null)
+const finalDecision = computed(() => {
+  const quality = String(detail.value?.data_quality_grade || result.value.data_quality_grade || '').toUpperCase()
+  if (quality === 'BLOCKED') return 'BLOCKED'
+  if (quality === 'DATA_GAP') return 'DATA_GAP'
+  return decisionGate.value.portfolio_action
+    || field(result.value, 'final_action', 'final_rating', 'portfolio_action', 'decision')
+    || detail.value?.final_rating
+    || null
+})
 const candidates = computed<any[]>(() => {
   const value = section('candidates', 'buy_candidates', 'rotation_candidates')
   if (Array.isArray(value)) return value

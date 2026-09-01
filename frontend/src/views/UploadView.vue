@@ -136,6 +136,7 @@ async function loadPortfolios() {
   await loadPortfolioContext()
   const requested = Number(route.query.portfolio)
   const preferred = portfolios.value.find((item) => item.id === requested)
+    || portfolios.value.find((item) => item.id === portfolioId.value)
     || portfolios.value.find((item) => item.is_default)
     || portfolios.value[0]
   if (preferred?.id) setSelectedPortfolio(preferred.id)

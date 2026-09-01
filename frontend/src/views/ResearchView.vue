@@ -174,11 +174,11 @@ async function load() {
     availability.value = values[0]
     runs.value = values[1]
     reports.value = values[2]
-    if (selectedRun.value) {
-      selectedRun.value = await api.getBacktest(selectedRun.value.id)
-    } else if (runs.value[0]) {
-      selectedRun.value = runs.value[0]
-    }
+    const requestedRunId = selectedRun.value?.id
+    const nextRunId = requestedRunId && runs.value.some((item) => item.id === requestedRunId)
+      ? requestedRunId
+      : runs.value[0]?.id
+    selectedRun.value = nextRunId ? await api.getBacktest(nextRunId) : null
     if (selectedReport.value) {
       selectedReport.value = await api.getCalibration(selectedReport.value.id)
     } else if (reports.value[0]) {
@@ -519,7 +519,9 @@ watch(selectedPortfolioId, (value) => {
           <div v-if="selectedRecompute" class="recompute-result">
             <div class="preview-heading">
               <strong>Deterministic Recompute</strong>
-              <n-tag size="small" :type="statusType(selectedRecompute.capability)">{{ statusText(selectedRecompute.capability) }}</n-tag>
+              <n-tag size="small" :type="statusType(selectedRecompute.capability)">
+                {{ selectedRecompute.capability }} · {{ statusText(selectedRecompute.capability) }}
+              </n-tag>
             </div>
             <div class="preview-meta">
               <span>Dates <code>{{ selectedRecompute.date_count ?? '—' }}</code></span>

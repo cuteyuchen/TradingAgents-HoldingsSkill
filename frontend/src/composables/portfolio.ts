@@ -30,7 +30,12 @@ export function setSelectedPortfolio(id: number | null): void {
 
 export async function loadPortfolios(force = false): Promise<Portfolio[]> {
   if (!force && portfolios.value.length) return portfolios.value
-  if (inFlight) return inFlight
+  if (inFlight) {
+    if (!force) return inFlight
+    // A forced reload must observe facts written after the older request began.
+    const pending = inFlight
+    await pending.catch(() => undefined)
+  }
   loading.value = true
   error.value = null
   inFlight = api.listPortfolios()

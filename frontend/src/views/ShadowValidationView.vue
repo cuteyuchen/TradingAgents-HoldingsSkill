@@ -235,9 +235,10 @@ async function load() {
   error.value = ''
   loadError.value = null
   try {
-    await loadPortfolios()
+    await loadPortfolios(true)
     const requestedPortfolioId = Number(route.query.portfolio)
     const preferredId = portfolios.value.find((item) => item.id === requestedPortfolioId)?.id
+      || portfolios.value.find((item) => item.id === selectedPortfolioId.value)?.id
       || portfolios.value.find((item) => item.is_default)?.id
       || portfolios.value[0]?.id
       || null

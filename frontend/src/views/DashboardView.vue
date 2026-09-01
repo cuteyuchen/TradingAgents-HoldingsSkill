@@ -69,6 +69,12 @@ const staleCandidates = computed(() => dashboard.value?.candidates?.stale || [])
 const latestDecision = computed(() => dashboard.value?.decisions?.latest || null)
 const finalAction = computed(() => String(dashboard.value?.decisions?.final_action || 'NO_ACTION').toUpperCase())
 const latestAnalysis = computed(() => dashboard.value?.analysis?.latest || null)
+const todayAnalysisMissing = computed(() => Boolean(
+  dashboard.value
+  && !dashboard.value.analysis?.analysis_in_progress
+  && !latestAnalysis.value
+  && !latestDecision.value,
+))
 const currentCheckpoint = computed(() => dashboard.value?.timeline?.timeline?.find((item: any) => item.is_current))
 const nextCheckpoint = computed(() => dashboard.value?.timeline?.timeline?.find((item: any) => item.status === 'PENDING'))
 const unreadNotifications = computed(() => Number(dashboard.value?.notifications?.unread_count || 0))
@@ -185,7 +191,7 @@ async function createPortfolio() {
   try {
     const portfolio = await api.createPortfolio({ name, is_default: portfolios.value.length === 0 })
     portfolios.value.push(portfolio)
-    selectedId.value = portfolio.id
+    setSelectedPortfolio(portfolio.id)
     createOpen.value = false
     message.success('组合已创建')
     await loadDashboard()
@@ -342,7 +348,8 @@ onUnmounted(() => {
           <section class="panel-card hero-card decision-card">
             <div class="section-title"><div><h2>Today's Decision</h2><p>{{ fmt(latestDecision?.decision_at || latestAnalysis?.finished_at) }}</p></div><n-tag :type="actionType(finalAction)" :bordered="false">{{ actionText(finalAction) }}</n-tag></div>
             <div class="decision-copy">{{ actionText(finalAction) }}</div>
-            <p v-if="finalAction === 'NO_ACTION'" class="decision-message">当前建议：保持组合不变。</p>
+            <p v-if="todayAnalysisMissing" class="decision-message">今日尚未完成分析。</p>
+            <p v-else-if="finalAction === 'NO_ACTION'" class="decision-message">当前建议：保持组合不变。</p>
             <p v-else-if="finalAction === 'BLOCKED'" class="decision-message">组合 Gate 或数据质量阻断风险增加。</p>
             <p v-else class="decision-message">请查看最新报告中的持仓动作与执行前提。</p>
             <div class="decision-meta"><span>质量 {{ latestDecision?.quality || latestAnalysis?.quality || '不可用' }}</span><span>置信度 {{ latestDecision?.confidence || latestAnalysis?.confidence || '不可用' }}</span></div>
@@ -438,7 +445,7 @@ onUnmounted(() => {
     </n-spin>
 
     <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, 92vw)">
-      <n-form label-placement="top"><n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item><n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button></n-form>
+      <n-form label-placement="top"><n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" aria-label="组合名称" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item><n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button></n-form>
     </n-modal>
 
     <n-modal v-model:show="analysisOpen" preset="card" title="手动分析最新持仓" style="width: min(480px, 92vw)">

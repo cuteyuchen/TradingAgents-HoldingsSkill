@@ -1,8 +1,10 @@
 # Phase O Frontend Product Audit
 
-审计日期：2026-08-30
+审计日期：2026-09-01
 Baseline SHA：`3d68a777ebfd9aed6117778397bae99ba53edccc`
 Branch：`codex/phase-o-frontend-productization`
+Phase O 实现基线 SHA：`c6147bc979c629ab7e339b4bab4355347a023a6d`
+Phase O.1 验证结果以最终交付报告中的提交 SHA 为准。
 
 ## 审计范围
 
@@ -16,19 +18,18 @@ FastAPI 路由，以及 Phase H～N 验收文档。`当前可用` 描述源码�
 
 | 页面 | 用户目标 | 当前可用 | API存在 | 写操作真实有效 | Loading | Empty | Error | Auth | E2E | 状态 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `/login` | 登录、注册、过期后重新进入 | 是 | 是 | 是 | 是 | 不适用 | 是 | 公共入口 | 待执行 | PARTIAL |
-| `/dashboard` | 查看今日市场、组合、最终决策并启动分析 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
-| `/upload` | 上传、解析、修正并确认持仓快照 | 是 | 是 | 是 | 是 | 是 | 部分，操作错误已提示 | 是 | 待执行 | PARTIAL |
-| `/reports` | 查看报告详情、最终组合决策、候选和 veto | 是 | 是 | 不适用 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
-| `/shadow` | 创建纸面账户并分离查看 Decision/Execution/Outcome | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
-| `/research` | 创建、恢复、取消 Backtest 并查看历史证据 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
-| `/governance` | 人工审核、验证、激活参数版本 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
-| `/system` | 检查系统健康和 Live Validation Readiness | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
-| `/settings` | 保存模型、计划和通知配置 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | 待执行 | PARTIAL |
+| `/login` | 登录、注册、过期后重新进入 | 是 | 是 | 是 | 是 | 不适用 | 是 | 公共入口 | PASS | PASS |
+| `/dashboard` | 查看今日市场、组合、最终决策并启动分析 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
+| `/upload` | 上传、解析、修正并确认持仓快照 | 是 | 是 | 是 | 是 | 是 | 部分，操作错误已提示 | 是 | PASS | PASS |
+| `/reports` | 查看报告详情、最终组合决策、候选和 veto | 是 | 是 | 不适用 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
+| `/shadow` | 创建纸面账户并分离查看 Decision/Execution/Outcome | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
+| `/research` | 创建、恢复、取消 Backtest 并查看历史证据 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
+| `/governance` | 人工审核、验证、激活参数版本 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
+| `/system` | 检查系统健康和 Live Validation Readiness | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
+| `/settings` | 保存模型、计划和通知配置 | 是 | 是 | 是 | 是 | 是 | 是，可重试 | 是 | PASS | PASS |
 
-`PARTIAL` 的主要原因是本工作树尚未完成真实 backend + frontend + isolated
-SQLite 的浏览器验收和 Docker production-like 运行验证，不代表页面可以绕过
-API 或使用 demo 数据。
+页面 PASS 仅表示源码、真实 API 链路和可重复浏览器验收已经通过；它不代表真实
+行情已经具备，也不替代人工 UAT。
 
 ## 共享产品基础设施
 
@@ -54,8 +55,8 @@ API 或使用 demo 数据。
 - `disabled` 均用于没有 Portfolio、没有 snapshot 或写操作进行中的保护。
 - “自动分析”指已有 scheduler 创建分析任务，不是 Auto Trading；没有真实券商
   写入口，也没有 Auto Apply Calibration。
-- 仍需要浏览器逐个点击验证的风险是：第三方模型、通知 provider、上传识图和
-  long-running worker 依赖真实环境，不能只靠静态源码审计判定 PASS。
+- 生产环境的第三方模型、通知 provider、上传识图和 long-running worker 仍需人工
+  UAT；自动 acceptance 使用显式开启的 deterministic provider，仅作用于隔离运行。
 
 ## 已知审计结论
 
@@ -70,10 +71,30 @@ API 或使用 demo 数据。
    `emergency_override: false`。
 6. System 使用真实的 `GET /api/v3/system/live-validation-readiness`，不在前端
    hardcode `READY`。
+7. Playwright acceptance 通过真实 FastAPI、SQLAlchemy 和 fresh SQLite，未对正式
+   业务 API 做全面浏览器 mock；失败诊断保留 trace、screenshot、video 和日志。
+8. Acceptance runner 固定交易日 `2026-08-21` 和 UTC cutoff，并由后端 authority
+   形成 AnalysisRun、CandidateRun、Shadow intent/fill 事实。
 
-## 未完成 Gate
+## 自动化 Gate 结果
 
-- 真实浏览器 E2E 尚未在本工作树形成证据。
-- 1366×768、1440×900、1920×1080 截图检查尚未执行。
-- Docker build/start、登录、deep-link refresh 尚未在本轮完成。
-- 因此 Frontend Acceptance 只能记录为 `HOLD`，不能提前宣布 Phase O PASS。
+- Playwright acceptance：`PASS`，15/15，运行于真实 Vue + FastAPI + SQLAlchemy +
+  isolated SQLite。
+- Browser console/pageerror：`PASS`，未发现未处理 `console.error`、`pageerror` 或
+  unhandled rejection。
+- Desktop screenshots：`PASS`，覆盖 1366×768、1440×900、1920×1080。
+- Backend regression：`PASS`，当前本地全量 `427 passed`。
+- Frontend typecheck/build：`PASS`。
+- Alembic：`20260829_0020`，无 Phase O.1 migration。
+- Docker build 和独立 Compose runtime smoke：`PASS`；使用独立 project、volume 和
+  临时端口，未触碰默认数据卷。
+- GitHub CI 已加入 `frontend-acceptance` job；精确提交的远端 CI 结果以 PR/Actions
+  为准。
+
+## 仍然保留
+
+- `AUTOMATED_FRONTEND_ACCEPTANCE = PASS` 只代表自动化 Gate；`MANUAL_UAT = REQUIRED`。
+- 当前真实 Live Validation 仍诚实返回 `LIVE_READINESS = NOT_READY`，具体 blockers
+  必须在 `/system` 查看。
+- 用户完成 [PHASE_O_MANUAL_UAT.md](PHASE_O_MANUAL_UAT.md) 前，不进入 Phase P，
+  也不能把 Phase O 最终状态写成 PASS。
