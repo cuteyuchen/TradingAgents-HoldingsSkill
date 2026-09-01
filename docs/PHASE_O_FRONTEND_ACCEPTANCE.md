@@ -85,3 +85,16 @@ MANUAL_UAT = REQUIRED
 自动化 acceptance PASS 不等于 Manual UAT PASS。用户完成
 `docs/PHASE_O_MANUAL_UAT.md` 前，不得把 `MANUAL_UAT` 改为 PASS，不得进入 Phase P，
 也不得把整个 Phase O 的最终状态写成 PASS。
+
+## O.2-A 环境记录
+
+- 记录日期：2026-09-01。
+- 环境应用代码基线：`d6f9d91543aa90eef0fcbf414ac869ad1b85a646`；本次 O.2-A 的配置、脚本和文档
+  变更 exact SHA 以当前分支最终提交为准。
+- Manual UAT Docker URL：`http://127.0.0.1:18082`。
+- Acceptance mode：`OFF`；独立 Compose project 为 `phase-o2-manual-uat`，使用全新
+  `phase-o2-manual-uat_advisor-data` volume。
+- 该环境的 `/dashboard`、`/reports`、`/shadow`、`/research`、`/system`、`/settings`
+  在 `Accept: text/html` 下均返回 SPA `index.html`。
+- 带认证的真实 readiness endpoint 当前返回 `NOT_READY`；这只是 O.2-A 环境基线，
+  不代表 Manual UAT 已完成，也不启动 O.2-B。
