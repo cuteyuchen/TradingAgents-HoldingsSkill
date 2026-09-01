@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now_naive
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache
 from ..market_models import TradingCalendar
 from ..v2_models import PortfolioSnapshot
@@ -58,7 +59,7 @@ class LeaseLostError(RuntimeError):
 
 
 def _now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 def _json(value: Any) -> Any:

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
+from ..clock import utc_now
 from .codes import exchange_for_code, normalize_security_code
 
 
@@ -37,7 +38,7 @@ QualityStatus = DataQualityStatus
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC)
+    return utc_now()
 
 
 def _coerce_datetime(value: datetime | date | str | None) -> datetime | None:

@@ -16,7 +16,7 @@ from app.market_runtime_models import ProviderHealth
 from app.memory.models import DailyReviewRun, DecisionMemory
 from app.memory.review import run_daily_review
 from app.operations import workflow
-from app.operations.dashboard import build_daily_dashboard
+from app.operations.dashboard import _analysis_section, build_daily_dashboard
 from app.operations.models import DailyOperationalCheckpoint, DailyOperationalRun, OperatingNotification
 from app.operations.notifications import (
     OperatingNotificationEvent,
@@ -579,6 +579,49 @@ def test_dashboard_get_is_read_only_even_when_facts_are_missing(monkeypatch):
         )
         assert result["portfolio"]["snapshot_id"] is not None
         assert calls == []
+    finally:
+        db.close()
+
+
+def test_dashboard_analysis_excludes_runs_from_previous_local_day():
+    db = _db()
+    try:
+        user, portfolio, snapshot = _portfolio_fixture(db, trade_date=date(2026, 8, 20))
+        yesterday = _utc_naive(_local(date(2026, 8, 20), 10, 0))
+        job = AnalysisJob(
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            snapshot_id=snapshot.id,
+            status="succeeded",
+            mode="deep",
+            created_at=yesterday,
+            started_at=yesterday,
+            finished_at=yesterday,
+        )
+        db.add(job)
+        db.flush()
+        db.add(AnalysisRun(
+            job_id=job.id,
+            user_id=user.id,
+            portfolio_snapshot_id=snapshot.id,
+            final_rating="ACTION",
+            data_quality_grade="A",
+            summary="Yesterday action",
+            structured_result_json={"result": {"final_rating": "ACTION"}},
+            markdown_text="# Yesterday action",
+            created_at=yesterday,
+        ))
+        db.commit()
+
+        section = _analysis_section(
+            db,
+            user_id=user.id,
+            portfolio_id=portfolio.id,
+            cutoff=_utc_naive(_local(date(2026, 8, 21), 14, 0)),
+        )
+
+        assert section["latest"] is None
+        assert section["status"] == "MISSING"
     finally:
         db.close()
 

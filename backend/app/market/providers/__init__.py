@@ -32,6 +32,7 @@ from .health import (
     runtime_provider_health_snapshot,
 )
 from .inmemory import FixtureQuoteProvider, InMemoryQuoteProvider, MemoryQuoteProvider
+from .acceptance import AcceptanceQuoteProvider
 from .tencent import TencentQuoteProvider
 from .identity import (
     EastmoneyCalendarProvider,
@@ -79,5 +80,6 @@ __all__ = [
     "get_quote_provider",
     "make_provider",
     "MemoryQuoteProvider",
+    "AcceptanceQuoteProvider",
     "parse_eastmoney_row",
 ]

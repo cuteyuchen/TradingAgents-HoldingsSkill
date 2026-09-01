@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..config import settings
 from .backup import backup_freshness
 from .release import alembic_db_revision, schema_state
@@ -31,7 +32,7 @@ class RuntimeNotReadyError(RuntimeError):
 
 
 def liveness() -> dict[str, Any]:
-    return {"status": "ok", "time": datetime.now(UTC).isoformat()}
+    return {"status": "ok", "time": utc_now().isoformat()}
 
 
 def run_quick_check(db: Session) -> dict[str, Any]:
@@ -51,7 +52,7 @@ def run_quick_check(db: Session) -> dict[str, Any]:
         size = mtime = None
     _QUICK_CHECK_CACHE.update(
         {
-            "checked_at": datetime.now(UTC),
+            "checked_at": utc_now(),
             "source_path": str(path),
             "source_size": size,
             "source_mtime": mtime,
@@ -74,7 +75,7 @@ def _cached_quick_check() -> dict[str, Any] | None:
         or cache.get("source_path") != str(path)
         or cache.get("source_size") != stat.st_size
         or cache.get("source_mtime") != stat.st_mtime
-        or (datetime.now(UTC) - checked_at).total_seconds() > _QUICK_CHECK_TTL_SECONDS
+        or (utc_now() - checked_at).total_seconds() > _QUICK_CHECK_TTL_SECONDS
     ):
         return None
     return dict(cache["result"]) if cache.get("result") is not None else None
@@ -303,7 +304,7 @@ def shadow_status(db: Session) -> dict[str, Any]:
             **empty,
         }
 
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now = utc_now().replace(tzinfo=None)
     try:
         active_accounts = int(db.execute(text(
             "SELECT COUNT(*) FROM shadow_accounts WHERE status = 'ACTIVE'"
@@ -489,7 +490,7 @@ def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
     from ..v2_models import AnalysisRun, PortfolioSnapshot
     from ..services.trading_calendar import CHINA_TZ
 
-    now = datetime.now(UTC)
+    now = utc_now()
     local_now = now.astimezone(CHINA_TZ)
     checks: dict[str, dict[str, Any]] = {}
 
@@ -722,7 +723,7 @@ def operational_health(db: Session | None = None) -> dict[str, Any]:
         return {
             "status": status,
             "components": components,
-            "as_of": datetime.now(UTC).isoformat(),
+            "as_of": utc_now().isoformat(),
         }
     finally:
         if owns_session:

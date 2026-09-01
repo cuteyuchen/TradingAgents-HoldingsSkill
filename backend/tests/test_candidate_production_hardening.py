@@ -122,6 +122,24 @@ def test_run_payload_fail_closes_action_and_missing_ready():
     assert missing["ready"] == []
 
 
+def test_persisted_action_score_exposes_new_position_contract():
+    run = CandidateRun(
+        user_id=1,
+        portfolio_id=1,
+        calculation_key="persisted-action-contract-test",
+        trade_date=date(2026, 8, 26),
+        as_of=datetime(2026, 8, 26, 10, 0),
+        captured_at=datetime(2026, 8, 26, 10, 0),
+        quality_status="VALID",
+    )
+    run.scores = [CandidateScore(code="600001", security_type="STOCK", stage="ACTION", rank=1)]
+
+    payload = _run_payload(run)
+
+    assert payload["action"][0]["candidate_type"] == "new_position"
+    assert payload["action"][0]["action"] == "new_position"
+
+
 def test_analysis_normalization_rechecks_blocked_candidate_run():
     from app.services.analysis_engine import _normalize_final
 

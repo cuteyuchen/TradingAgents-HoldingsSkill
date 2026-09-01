@@ -7,11 +7,12 @@ from datetime import UTC, datetime
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column
 
+from ..clock import utc_now
 from ..database import Base
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return utc_now()
 
 
 class ParameterSetVersion(Base):

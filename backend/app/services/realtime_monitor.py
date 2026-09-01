@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from sqlalchemy import select
 
+from ..clock import utc_now
 from ..config import settings
 from ..database import SessionLocal
 from ..market_engine_models import MarketScoreSnapshot
@@ -40,7 +41,7 @@ class RealtimeMonitor:
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.now_provider = now_provider or (lambda: datetime.now(CHINA_TZ))
+        self.now_provider = now_provider or (lambda: utc_now().astimezone(CHINA_TZ))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._tick_lock = threading.Lock()

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..clock import china_now
 from ..market_models import TradingCalendar
 
 CN_MARKET = "CN"
@@ -189,7 +190,7 @@ class TradingCalendarService:
         ).scalar_one_or_none()
 
     def current_session(self, value: datetime | None = None) -> str:
-        moment = value or datetime.now(CHINA_TZ)
+        moment = value or china_now()
         if moment.tzinfo is not None:
             moment = moment.astimezone(CHINA_TZ)
         if not self.is_trading_day(moment.date()):

@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..candidates.service import latest_candidate_context, scan_candidates
 from ..config import settings
 from ..database import SessionLocal
@@ -1292,7 +1293,7 @@ def run_analysis_job(job_id: int) -> None:
         if job is None or job.status not in {"queued", "retrying"}:
             return
         job.status = "running"
-        job.started_at = datetime.now(UTC)
+        job.started_at = utc_now()
         job.error_code = None
         job.error_message = None
         db.commit()
@@ -1381,7 +1382,7 @@ def run_analysis_job(job_id: int) -> None:
             db,
             user_id=job.user_id,
             portfolio_id=job.portfolio_id,
-            as_of=job.started_at or datetime.now(UTC),
+            as_of=job.started_at or utc_now(),
             current_features=current_memory_features(
                 portfolio_context=portfolio_context,
                 candidate_context=candidate_context,
@@ -1801,7 +1802,7 @@ def run_analysis_job(job_id: int) -> None:
         job.status = "succeeded"
         job.current_stage = "completed"
         job.progress_percent = 100
-        job.finished_at = datetime.now(UTC)
+        job.finished_at = utc_now()
         db.commit()
         db.refresh(run)
 
@@ -1816,7 +1817,7 @@ def run_analysis_job(job_id: int) -> None:
                 capture_decision_memory(
                     memory_db,
                     persisted_run,
-                    available_at=datetime.now(UTC),
+                    available_at=utc_now(),
                     commit=True,
                 )
                 if persisted_run is not None
@@ -1913,7 +1914,7 @@ def run_analysis_job(job_id: int) -> None:
                     job.current_stage = "failed"
                     job.error_code = type(exc).__name__
                     job.error_message = str(exc)[:3000]
-                job.finished_at = datetime.now(UTC)
+                job.finished_at = utc_now()
                 db.commit()
     finally:
         if heartbeat is not None:

@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now_naive
 from ..candidates.models import CandidateRun, CandidateScore
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from ..memory.models import DecisionMemory, DecisionOutcome
@@ -88,12 +89,12 @@ def _date(value: date | datetime | str | None) -> date | None:
 
 def _as_of(value: datetime | date | None, *, fallback: date | None = None) -> datetime:
     if isinstance(value, datetime):
-        return _naive_utc(value) or datetime.now(UTC).replace(tzinfo=None)
+        return _naive_utc(value) or utc_now_naive()
     if isinstance(value, date):
         return datetime.combine(value, time(23, 59, 59))
     if fallback is not None:
         return datetime.combine(fallback, time(23, 59, 59))
-    return datetime.now(UTC).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 def _local_wall_time(value: datetime | None) -> time | None:

@@ -8,6 +8,7 @@ from typing import Any, Callable
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..candidates.models import CandidateRun, CandidateScore
 from ..candidates.service import latest_candidate_context
 from ..config import settings
@@ -53,7 +54,7 @@ def _iso(value: Any) -> Any:
 
 
 def _cutoff(as_of: datetime | None) -> datetime:
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now = utc_now().replace(tzinfo=None)
     value = _utc_naive(as_of) or now
     if value > now + timedelta(minutes=1):
         raise ValueError("as_of_cannot_be_in_the_future")
@@ -447,6 +448,7 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
         AnalysisJob.status == "succeeded",
         AnalysisJob.finished_at.is_not(None),
         AnalysisJob.finished_at <= cutoff,
+        AnalysisRun.created_at >= start,
         AnalysisRun.created_at <= cutoff,
     ).order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(20)).scalars().all()
     latest = runs[0] if runs else None

@@ -12,6 +12,7 @@ from .health import (
     get_runtime_provider_health_registry,
 )
 from .inmemory import InMemoryQuoteProvider
+from .acceptance import AcceptanceQuoteProvider
 from .tencent import TencentQuoteProvider
 
 
@@ -67,6 +68,7 @@ DEFAULT_PROVIDER_REGISTRY = ProviderRegistry(
         "inmemory": InMemoryQuoteProvider,
         "memory": InMemoryQuoteProvider,
         "fixture": InMemoryQuoteProvider,
+        "acceptance": AcceptanceQuoteProvider,
     }
 )
 
@@ -124,6 +126,8 @@ class QuoteProviderFactory:
         fallbacks: Iterable[str] = ("eastmoney_batch",),
         health: ProviderHealthRegistry | None = None,
     ) -> QuoteProvider:
+        if settings.ACCEPTANCE_MODE:
+            return self.build_chain(("acceptance",), health=health)
         return self.build_chain((primary, *tuple(fallbacks)), health=health)
 
     def build_all_a_quote_chain(
@@ -133,6 +137,8 @@ class QuoteProviderFactory:
         fallbacks: Iterable[str] = ("tencent",),
         health: ProviderHealthRegistry | None = None,
     ) -> QuoteProvider:
+        if settings.ACCEPTANCE_MODE:
+            return self.build_chain(("acceptance",), health=health)
         return self.build_chain((primary, *tuple(fallbacks)), health=health)
 
 

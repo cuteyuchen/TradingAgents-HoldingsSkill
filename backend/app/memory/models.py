@@ -19,12 +19,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from ..clock import utc_now
 from ..database import Base
 from .config import DAILY_REVIEW_VERSION, DECISION_MEMORY_VERSION, OUTCOME_VERSION
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return utc_now()
 
 
 class DecisionMemory(Base):

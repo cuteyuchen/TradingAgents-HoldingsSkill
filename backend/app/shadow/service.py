@@ -24,6 +24,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now_naive
 from ..candidates.models import CandidateRun
 from ..config import settings
 from ..decision_contract import CONTRACT_VERSION
@@ -74,7 +75,7 @@ def _utc_naive(value: datetime | None) -> datetime | None:
 
 
 def _now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 def _china_date(value: datetime | date) -> date:

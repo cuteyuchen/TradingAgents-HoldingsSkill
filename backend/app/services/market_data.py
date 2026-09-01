@@ -12,7 +12,10 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from ..clock import china_now, utc_now
+from ..config import settings
 from ..market.codes import normalize_security_code
+from ..market.providers.factory import create_quote_provider
 from ..market.providers.tencent import TencentQuoteProvider, parse_tencent_line as _normalized_parse_tencent_line
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -109,7 +112,7 @@ def fetch_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     normalized = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
     if not normalized:
         return {}
-    provider = TencentQuoteProvider(timeout=10)
+    provider = create_quote_provider("acceptance") if settings.ACCEPTANCE_MODE else TencentQuoteProvider(timeout=10)
     normalized_quotes = provider.get_quotes(normalized)
     results: dict[str, dict[str, Any]] = {}
     for code, quote in normalized_quotes.items():
@@ -127,7 +130,7 @@ def fetch_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
         parsed.update(
             {
                 "turnover": parsed.get("amount"),
-                "source": "Tencent qt.gtimg.cn",
+                "source": "Acceptance fixture" if settings.ACCEPTANCE_MODE else "Tencent qt.gtimg.cn",
                 "stale": parsed.get("quality_status") in {"STALE", "MISSING"},
                 "quote_time": legacy_quote_time,
             }
@@ -137,7 +140,7 @@ def fetch_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     for code in missing:
         results[code] = {
             "code": code,
-            "source": "Tencent qt.gtimg.cn",
+            "source": "Acceptance fixture" if settings.ACCEPTANCE_MODE else "Tencent qt.gtimg.cn",
             "error": "quote_missing",
             "stale": True,
         }
@@ -414,6 +417,39 @@ def _market_mood(index_quote: dict[str, Any], sector_heat: list[dict[str, Any]])
 
 def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
     normalized_codes = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
+    if settings.ACCEPTANCE_MODE:
+        quotes = fetch_quotes(normalized_codes + ["000001"])
+        complete = bool(normalized_codes) and all(code in quotes for code in normalized_codes)
+        return {
+            "captured_at": china_now().isoformat(timespec="seconds"),
+            "quotes": {code: quotes.get(code, {"code": code, "error": "quote_missing", "stale": True}) for code in normalized_codes},
+            "technicals": {
+                code: {
+                    "code": code,
+                    "trend": "up",
+                    "ma20": quotes.get(code, {}).get("price"),
+                    "source": "Acceptance fixture",
+                }
+                for code in normalized_codes
+            },
+            "fund_flows": {
+                code: {"code": code, "main_net": 1200000.0, "source": "Acceptance fixture"}
+                for code in normalized_codes
+            },
+            "announcements": {code: [] for code in normalized_codes},
+            "news": [{"title": "验收固定市场资讯", "source": "Acceptance fixture"}],
+            "indices": {"sh000001": quotes.get("000001", {})},
+            "sector_heat": [{"rank": 1, "name": "验收板块", "pct_change": 1.2, "source": "Acceptance fixture"}],
+            "candidate_pool": {"etf_leaders": []},
+            "market_mood": {
+                "mood": "constructive" if complete else "unknown",
+                "buy_mode_hint": "rotation_or_conditional_buy" if complete else "watch_only",
+                "source": "Acceptance fixture",
+            },
+            "quality_grade": "A" if complete else "F",
+            "errors": [] if complete else ["quote: acceptance fixture missing code"],
+            "source_chain": ["Acceptance deterministic fixture"],
+        }
     quotes: dict[str, Any]
     errors: list[str] = []
     try:
@@ -484,7 +520,7 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
         grade = "F"
     index_quote = quotes.get("000001", {})
     return {
-        "captured_at": datetime.now(CHINA_TZ).isoformat(timespec="seconds"),
+        "captured_at": china_now().isoformat(timespec="seconds"),
         "quotes": holding_quotes,
         "technicals": technicals,
         "fund_flows": fund_flows,
@@ -511,7 +547,7 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
 def refresh_snapshot_quotes(snapshot: dict[str, Any], codes: list[str]) -> dict[str, Any]:
     """Refresh quote-sensitive fields immediately before the visible decision."""
     refreshed = dict(snapshot)
-    refreshed["final_quote_refresh_at"] = datetime.now(CHINA_TZ).isoformat(timespec="seconds")
+    refreshed["final_quote_refresh_at"] = china_now().isoformat(timespec="seconds")
     try:
         quotes = fetch_quotes(codes)
         refreshed["quotes"] = {normalize_code(code): quotes.get(normalize_code(code), {}) for code in codes}
@@ -524,7 +560,7 @@ def refresh_snapshot_quotes(snapshot: dict[str, Any], codes: list[str]) -> dict[
 
 
 def is_a_share_trading_day(now: datetime | None = None) -> bool:
-    current = now.astimezone(CHINA_TZ) if now else datetime.now(CHINA_TZ)
+    current = now.astimezone(CHINA_TZ) if now else china_now()
     if current.weekday() >= 5:
         return False
     try:

@@ -32,3 +32,4 @@ frontend/node_modules/
 .playwright-cli/
 .DS_Store
 Thumbs.db
+output/

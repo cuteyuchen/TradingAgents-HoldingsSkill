@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..database import get_db
 from ..services.holdings_service import normalize_payload, parse_payload_dict, parse_upload
 from ..services.storage import resolve_storage_path, save_holding_image
@@ -334,7 +335,7 @@ def confirm_upload(
         portfolio_id=row.portfolio_id,
         upload_id=row.id,
         source="screenshot",
-        snapshot_time=datetime.now(UTC),
+        snapshot_time=utc_now(),
         total_assets=parsed.total_assets,
         total_market_value=parsed.total_market_value,
         broker_available_cash=parsed.broker_available_cash,
@@ -380,7 +381,7 @@ def confirm_upload(
     )
     if previous is not None:
         upsert_snapshot_diff(db, before=previous, after=snapshot)
-    row.confirmed_at = datetime.now(UTC)
+    row.confirmed_at = utc_now()
     row.parsing_status = "confirmed"
     db.commit()
     db.refresh(snapshot)

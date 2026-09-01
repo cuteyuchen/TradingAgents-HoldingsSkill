@@ -6,12 +6,13 @@ from datetime import UTC, date, datetime
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from ..clock import utc_now
 from ..database import Base
 from .config import WORKFLOW_VERSION
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return utc_now()
 
 
 class DailyOperationalRun(Base):

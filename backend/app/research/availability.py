@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..candidates.models import CandidateRun, CandidateScore
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
@@ -227,7 +228,7 @@ def build_replay_availability_manifest(
 
     start_date, end_date = _date_window(start_date, end_date)
     market = str(market or "CN").upper()
-    generated = generated_at or datetime.now(UTC)
+    generated = generated_at or utc_now()
     manifest: dict[str, Any] = {
         "manifest_version": "replay-availability-v1",
         "generated_at": generated.isoformat(),

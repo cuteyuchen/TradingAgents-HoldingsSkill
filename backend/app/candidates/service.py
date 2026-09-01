@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..config import settings
 from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 def _utc_naive(value: datetime | None = None) -> datetime:
-    moment = value or datetime.now(UTC)
+    moment = value or utc_now()
     if moment.tzinfo is not None:
         moment = moment.astimezone(UTC).replace(tzinfo=None)
     return moment
@@ -679,6 +680,11 @@ def _serialize_score(row: CandidateScore | Mapping[str, Any]) -> dict[str, Any]:
             "security_type": row.security_type,
             "etf_category": row.etf_category,
             "stage": row.stage,
+            # CandidateScore stores the lifecycle stage, while the action
+            # contract is derived from that stage at the service boundary.
+            # Keep persisted and freshly calculated candidates equivalent.
+            "candidate_type": "new_position" if str(row.stage or "").upper() == "ACTION" else "rotation_watch",
+            "action": "new_position" if str(row.stage or "").upper() == "ACTION" else "rotation_watch",
             "rank": row.rank,
             "score": row.score,
             "opportunity_score": row.opportunity_score,

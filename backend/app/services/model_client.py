@@ -560,6 +560,224 @@ def _gemini(
     return ModelResult(text=text, latency_ms=latency, raw=raw, streamed=True)
 
 
+def _acceptance_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    content = str(messages[-1].get("content") or "") if messages else ""
+    marker = "输入数据："
+    if marker not in content:
+        return {}
+    try:
+        value = json.loads(content.split(marker, 1)[1].strip())
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _acceptance_result(
+    messages: list[dict[str, Any]],
+    *,
+    image_bytes: bytes | None,
+    json_mode: bool,
+) -> ModelResult:
+    """Return deterministic provider facts for the isolated acceptance runner."""
+
+    content = str(messages[-1].get("content") or "") if messages else ""
+    if image_bytes is not None:
+        if b"acceptance-invalid" in image_bytes:
+            value: dict[str, Any] = {
+                "holdings": [],
+                "excluded_items": [],
+                "notes": ["acceptance_invalid_fixture"],
+            }
+        else:
+            value = {
+                "holdings": [
+                    {
+                        "code": "600519",
+                        "name": "贵州茅台",
+                        "market": "A_SHARE",
+                        "qty": 100,
+                        "available_qty": 80,
+                        "cost": 1500,
+                        "price": 1600,
+                        "market_value": 160000,
+                        "pnl": 0.0667,
+                        "pnl_amount": 10000,
+                        "weight": 0.8,
+                    },
+                    {
+                        "code": "510300",
+                        "name": "沪深300ETF",
+                        "market": "A_SHARE",
+                        "qty": 10000,
+                        "available_qty": 10000,
+                        "cost": 4.0,
+                        "price": 4.2,
+                        "market_value": 42000,
+                        "pnl": 0.05,
+                        "pnl_amount": 2000,
+                        "weight": 0.21,
+                    },
+                ],
+                "total_assets": 250000,
+                "total_market_value": 202000,
+                "broker_available_cash": 48000,
+                "corrected_unused_funds": 48000,
+                "repo_or_standard_bond_value": 0,
+                "excluded_items": [],
+                "notes": ["phase-o.1 deterministic vision fixture"],
+            }
+        raw = value
+    elif "匹配六位证券代码" in content:
+        input_value = _acceptance_input(messages)
+        matches = []
+        for item in input_value.get("holdings") or []:
+            name = str(item.get("name") or "")
+            code = "600519" if "茅台" in name else "510300" if "沪深" in name or "ETF" in name else None
+            matches.append({"index": item.get("index"), "code": code, "confidence": "high", "reason": "acceptance fixture"})
+        raw = {"matches": matches}
+    elif "证据包" in content:
+        raw = {
+            "market_read": "验收行情稳定，组合数据可用。",
+            "intent": {"goal": "验证真实分析链路"},
+            "analyst_reports": [
+                {"role": "technical", "summary": "固定行情与持仓快照一致。", "evidence": ["Acceptance fixture quote"]},
+                {"role": "risk", "summary": "可用数量与组合现金事实已进入门控。", "evidence": ["Confirmed snapshot"]},
+            ],
+            "holding_evidence": [],
+            "portfolio_risks": ["验收环境不代表真实市场证据"],
+            "data_gaps": [],
+            "quality_grade": "A",
+        }
+    elif "多空辩论" in content:
+        raw = {
+            "bull_claims": [{"claim_id": "INV-1", "speaker": "bull", "claim": "固定行情支持继续观察组合。", "evidence": ["quote"], "confidence": 0.8, "status": "addressed"}],
+            "bear_claims": [{"claim_id": "INV-2", "speaker": "bear", "claim": "验收事实不等同于实时生产证据。", "evidence": ["fixture"], "confidence": 0.7, "status": "open"}],
+            "unresolved_claim_ids": ["INV-2"],
+            "round_summaries": [{"round": 1, "goal": "建立核心论点", "summary": "验收固定事实完成攻防。"}],
+            "judge_decision": "组合动作由后端 Gate 最终决定。",
+        }
+    elif "研究总监裁决" in content:
+        raw = {
+            "rating": "Hold",
+            "winner": "balanced",
+            "unresolved_claim_treatment": ["INV-2"],
+            "strategic_action": "保持组合与候选事实分离。",
+            "confidence": "medium",
+            "reasoning": "确定性 provider 只用于浏览器验收。",
+        }
+    elif "交易员方案" in content:
+        input_value = _acceptance_input(messages)
+        snapshot = input_value.get("input", {}).get("snapshot") or input_value.get("snapshot") or {}
+        orders = [
+            {
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "action": "conditional_add" if item.get("code") == "510300" else ("reduce" if item.get("code") == "600519" else "hold"),
+                "trigger": "固定事实变化后重新复核",
+                "quantity": "20" if item.get("code") == "600519" else None,
+                "take_profit": "达到预设目标后复核",
+                "stop_loss": "质量门控失效",
+                "invalidating_condition": "关键行情缺失",
+                "checkpoint_rule": "验收固定检查点",
+            }
+            for item in snapshot.get("holdings") or []
+            if item.get("code")
+        ]
+        raw = {"orders": orders, "checkpoint_rule": "固定检查点复核", "cancel_all_buys_when": "质量门控阻断"}
+    elif "风控经理审查" in content:
+        raw = {
+            "decision": "pass",
+            "reason": "持仓动作均为 hold，候选仍由后端组合 Gate 约束。",
+            "hard_constraints": ["不得绕过 Portfolio Gate"],
+            "soft_constraints": ["验收环境不发送真实订单"],
+            "de_risk_triggers": ["quote_missing"],
+            "execution_prerequisites": ["paper-only shadow"],
+        }
+    elif "三方风控辩论" in content:
+        raw = {
+            "claims": [
+                {"claim_id": "RISK-1", "speaker": "aggressive", "claim": "只允许验证性纸面动作。", "evidence": ["shadow"], "confidence": 0.7, "status": "open"},
+                {"claim_id": "RISK-2", "speaker": "neutral", "claim": "后端 Gate 优先。", "evidence": ["portfolio context"], "confidence": 0.8, "status": "addressed"},
+                {"claim_id": "RISK-3", "speaker": "conservative", "claim": "现实行情仍需人工验证。", "evidence": ["NOT_READY"], "confidence": 0.9, "status": "open"},
+            ],
+            "unresolved_claim_ids": ["RISK-3"],
+            "round_summaries": [{"round": 1, "goal": "风险取舍", "summary": "三方确认只验证纸面链路。"}],
+            "judge_decision": "以保守约束为准。",
+        }
+    elif "只审查后端 deterministic_action_candidates" in content:
+        input_value = _acceptance_input(messages)
+        candidates = input_value.get("deterministic_action_candidates") or []
+        codes = [item.get("code") for item in candidates if item.get("code")]
+        veto_codes = [code for code in codes if code == "601318"]
+        raw = {
+            "accepted_codes": [code for code in codes if code not in veto_codes],
+            "veto_codes": veto_codes,
+            "explanations": {
+                code: {
+                    "reason_detail": {
+                        "catalyst": "验收固定催化",
+                        "capital_flow": "验收固定资金面证据",
+                        "sector_position": "验收固定板块位置证据",
+                    },
+                    "risk": ["组合层需最终批准"],
+                }
+                for code in codes
+            },
+            "candidate_blocked_reason": "候选达到 ACTION，但组合层未批准。" if veto_codes else "",
+            "hot_sectors": [{"name": "验收板块", "pct_change": 1.2}],
+        }
+    elif "组合经理最终决策" in content:
+        input_value = _acceptance_input(messages)
+        payload_input = input_value.get("input") or {}
+        snapshot = payload_input.get("snapshot") or {}
+        candidate_context = payload_input.get("candidate_context") or {}
+        candidate_rows = candidate_context.get("action") or []
+        vetoed_candidate = any(item.get("code") == "601318" for item in candidate_rows if isinstance(item, dict))
+        action_holding = any(item.get("code") == "600519" for item in snapshot.get("holdings") or [])
+        holdings = [
+            {
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "action": "conditional_add" if not vetoed_candidate and item.get("code") == "510300" else ("hold" if vetoed_candidate or item.get("code") != "600519" else "reduce"),
+                "reason": "验收固定证据支持保持当前持仓。",
+                "trigger": "关键事实变化后复核",
+                "quantity": None if vetoed_candidate or item.get("code") != "600519" else "20",
+                "target_weight": "0.22" if not vetoed_candidate and item.get("code") == "510300" else None,
+                "stop_loss": "质量门控失效",
+                "take_profit": "达到目标后复核",
+                "risk": "验收环境不替代真实市场风险",
+            }
+            for item in snapshot.get("holdings") or []
+            if item.get("code")
+        ]
+        raw = {
+            "data_quality_grade": "A",
+            "market_read": "验收固定行情已通过质量门控。",
+            "portfolio_conclusion": "候选达到 ACTION，但组合层未批准，保持 NO_ACTION。" if vetoed_candidate else ("ACTION：按固定验收事实执行可审计的减仓建议。" if action_holding else "当前组合保持不变。"),
+            "final_rating": "no_action" if vetoed_candidate or not action_holding else "reduce",
+            "cash_target": "保持现状",
+            "confidence": "medium",
+            "holdings": holdings,
+            "candidates": [],
+            "history_consistency": "固定交易日与 Asia/Shanghai 显示用于可重复验收。",
+            "bull_case": ["行情事实完整"],
+            "bear_case": ["现实 live evidence 尚未满足"],
+            "unresolved_claims": ["现实环境仍需人工确认"],
+            "risk_warnings": ["不会发送真实订单"],
+            "evidence": ["Acceptance deterministic fixture"],
+        }
+    else:
+        raw = {"status": "ok", "message": "OK"} if json_mode else "OK"
+
+    text = json.dumps(raw, ensure_ascii=False, separators=(",", ":")) if isinstance(raw, dict) else str(raw)
+    return ModelResult(
+        text=text,
+        latency_ms=0,
+        raw={"provider": "acceptance", "deterministic": True},
+        streamed=False,
+    )
+
+
 def call_model(
     profile: ModelProfile,
     messages: list[dict[str, Any]],
@@ -572,6 +790,10 @@ def call_model(
     if not provider.enabled:
         raise ModelCallError("模型供应商已停用")
     provider_name = provider.provider.lower()
+    if provider_name == "acceptance":
+        if not settings.ACCEPTANCE_MODE:
+            raise ModelCallError("Acceptance provider 仅允许在 ACCEPTANCE_MODE 下使用")
+        return _acceptance_result(messages, image_bytes=image_bytes, json_mode=json_mode)
     stream = _use_stream(profile)
     attempts = _max_retries(profile) + 1
     last_error: ModelCallError | None = None

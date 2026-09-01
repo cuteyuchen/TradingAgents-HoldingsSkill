@@ -9,6 +9,7 @@ import pytest
 from app.market.codes import exchange_for_code, normalize_security_code, provider_symbol
 from app.market.models import DataQualityStatus, NormalizedQuote
 from app.market.providers import (
+    AcceptanceQuoteProvider,
     EastmoneyBatchQuoteProvider,
     FallbackQuoteProvider,
     HealthTrackedQuoteProvider,
@@ -499,3 +500,11 @@ def test_legacy_fetch_quotes_keeps_quote_missing_error(monkeypatch):
     assert result["600519"]["error"] == "quote_missing"
     assert result["600519"]["stale"] is True
     assert result["600519"]["source"] == "Tencent qt.gtimg.cn"
+
+
+def test_acceptance_provider_is_disabled_outside_explicit_acceptance_mode(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+    with pytest.raises(RuntimeError, match="ACCEPTANCE_MODE=true"):
+        AcceptanceQuoteProvider().get_quotes(["600519"])

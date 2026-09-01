@@ -13,6 +13,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..config import settings
 from ..market.codes import normalize_security_code
 from ..market.models import NormalizedQuote, QuoteSnapshot
@@ -55,9 +56,9 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
     requested_name = str(request.get("route") or request.get("provider") or "").strip().lower()
     sanitized_request = {"codes": codes, "route": requested_name, "provider": requested_name}
     if _snapshot_provider is not None:
-        started_at = datetime.now(UTC)
+        started_at = utc_now()
         raw = _snapshot_provider(sanitized_request)
-        completed_at = datetime.now(UTC)
+        completed_at = utc_now()
         return _with_capture_metadata(raw, started_at, completed_at)
     known = {"tencent", "eastmoney", "eastmoney_batch", "critical", "holding", "all_a", "auto", "fallback"}
     if not requested_name:
@@ -95,9 +96,9 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
                 "requested_route": requested_name,
                 "errors": [{"code": "universe_not_supplied", "message": "Security universe is required for a quote snapshot."}],
             }
-        started_at = datetime.now(UTC)
+        started_at = utc_now()
         quotes = provider.get_all_a_share_quotes(codes)
-        completed_at = datetime.now(UTC)
+        completed_at = utc_now()
         run_metadata_method = getattr(provider, "get_run_metadata", None)
         run_metadata = run_metadata_method() if callable(run_metadata_method) else {}
         result = {
@@ -114,7 +115,7 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
                 result[key] = run_metadata[key]
         return result
     except Exception as exc:  # noqa: BLE001
-        completed_at = datetime.now(UTC)
+        completed_at = utc_now()
         metadata_method = getattr(provider, "get_run_metadata", None)
         run_metadata = metadata_method() if callable(metadata_method) else {}
         provider_name = (
@@ -356,8 +357,8 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
         snapshot_id=snapshot_id,
         snapshot_key=str(snapshot.get("snapshot_key") or snapshot["snapshot_id"]),
         market=str(snapshot.get("market") or "CN"),
-        started_at=_datetime(snapshot.get("started_at")) or datetime.now(UTC),
-        completed_at=_datetime(snapshot.get("completed_at")) or datetime.now(UTC),
+        started_at=_datetime(snapshot.get("started_at")) or utc_now(),
+        completed_at=_datetime(snapshot.get("completed_at")) or utc_now(),
         trade_date=_date(snapshot.get("trade_date")),
         provider=str(snapshot.get("provider") or "unknown"),
         fallback_level=int(snapshot.get("fallback_level") or 0),
@@ -551,7 +552,7 @@ def hydrate_runtime_provider_health(db: Session) -> list[dict[str, object]]:
 
 
 def record_provider_success(db: Session, provider_name: str, data_type: str, *, latency_ms: float | None = None) -> ProviderHealth:
-    now = datetime.now(UTC)
+    now = utc_now()
     row = _health_row(db, provider_name, data_type)
     row.success_count += 1
     row.consecutive_failures = 0
@@ -572,7 +573,7 @@ def record_provider_failure(
     latency_ms: float | None = None,
     failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
 ) -> ProviderHealth:
-    now = datetime.now(UTC)
+    now = utc_now()
     row = _health_row(db, provider_name, data_type)
     row.failure_count += 1
     row.consecutive_failures += 1

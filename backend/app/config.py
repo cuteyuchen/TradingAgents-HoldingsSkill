@@ -24,6 +24,14 @@ class Settings:
     APP_GIT_REF: str = os.getenv("APP_GIT_REF", "").strip()
     APP_BUILD_TIME: str = os.getenv("APP_BUILD_TIME", "").strip()
     APP_ENV: str = os.getenv("APP_ENV", "development").strip().lower() or "development"
+    # Acceptance is an explicit, local-only test mode. Production defaults to
+    # normal providers and never reads deterministic acceptance facts.
+    ACCEPTANCE_MODE: bool = _bool_env("ACCEPTANCE_MODE", "false")
+    ACCEPTANCE_TRADE_DATE: str = os.getenv("ACCEPTANCE_TRADE_DATE", "2026-08-21").strip()
+    ACCEPTANCE_NOW_UTC: str = os.getenv(
+        "ACCEPTANCE_NOW_UTC",
+        "2026-08-21T06:00:00+00:00",
+    ).strip()
 
     # Legacy archive auth. Kept during the V1 -> V2 migration window.
     ADVISOR_TOKEN: str = os.getenv("ADVISOR_TOKEN", "")

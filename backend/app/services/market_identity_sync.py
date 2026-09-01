@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from ..clock import china_now
 from ..config import settings
 from ..database import SessionLocal
 from ..market.providers.base import CalendarProvider, SecurityProvider
@@ -32,7 +33,7 @@ CALENDAR_OUT_OF_RANGE = "calendar_out_of_range"
 
 def _local_date(value: date | datetime | None = None) -> date:
     if value is None:
-        return datetime.now(CHINA_TZ).date()
+        return china_now().date()
     if isinstance(value, datetime):
         return value.astimezone(CHINA_TZ).date() if value.tzinfo else value.date()
     return value

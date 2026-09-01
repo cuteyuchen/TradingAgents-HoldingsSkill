@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import datetime
 from time import monotonic
 
 from ..codes import exchange_for_code, normalize_security_code
+from ...clock import utc_now
 from ..models import DataQualityStatus, NormalizedQuote
 from .base import QuoteProvider, apply_quote_validation
 from .health import ProviderHealthRegistry, get_runtime_provider_health_registry
@@ -112,7 +113,7 @@ class HealthTrackedQuoteProvider(QuoteProvider):
             raw_result = self.provider.get_quotes(requested) or {}
             if not isinstance(raw_result, Mapping):
                 raise TypeError("provider returned a non-mapping quote batch")
-            result = _normalized_batch(raw_result, provider_name=self.name, now=datetime.now(UTC))
+            result = _normalized_batch(raw_result, provider_name=self.name, now=utc_now())
             requested_set = set(requested)
             for code in sorted(set(result) - requested_set):
                 result.pop(code, None)
@@ -249,7 +250,7 @@ class FallbackQuoteProvider(QuoteProvider):
                 by_code = _normalized_batch(
                     batch,
                     provider_name=provider_name,
-                    now=datetime.now(UTC),
+                    now=utc_now(),
                 )
             except Exception as exc:
                 latency_ms = (monotonic() - started) * 1000

@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now_naive
 from ..decision_contract import CONTRACT_VERSION
 from ..research.models import BacktestRun, CalibrationReport
 from ..services.trading_calendar import CHINA_TZ, TradingCalendarService
@@ -49,7 +50,7 @@ def invalidate_parameter_cache() -> None:
 
 
 def _now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 def _audit(
