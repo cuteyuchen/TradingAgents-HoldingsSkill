@@ -1,184 +1,166 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import {
-  Bell,
-  Camera,
-  CheckCircle2,
-  CircleAlert,
-  ExternalLink,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  ShieldCheck,
-  TriangleAlert,
-} from 'lucide-vue-next'
+import { ArrowRight, CircleAlert, Plus, RefreshCw, Sparkles } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
+import type { DailyDashboard, ModelProfile, ModelProvider, Portfolio } from '../api/types'
+import DecisionHero from '../components/DecisionHero.vue'
+import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
+import FreshnessLabel from '../components/FreshnessLabel.vue'
+import LoadingState from '../components/LoadingState.vue'
+import MetricTile from '../components/MetricTile.vue'
+import PageHeader from '../components/PageHeader.vue'
+import SectionCard from '../components/SectionCard.vue'
+import StatusIndicator from '../components/StatusIndicator.vue'
+import TechnicalDetails from '../components/TechnicalDetails.vue'
 import { usePortfolioContext } from '../composables/portfolio'
-import { fmtDateTime } from '../utils/ui'
-import type {
-  AnalysisMode,
-  DailyDashboard,
-  ModelProfile,
-  OperatingNotification,
-  Portfolio,
-  Schedule,
-  SystemReadiness,
-} from '../api/types'
+import { formatCurrency, formatNumber, formatPercent } from '../utils/ui'
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-
-const loading = ref(false)
-const error = ref('')
-const profiles = ref<ModelProfile[]>([])
-const schedules = ref<Schedule[]>([])
 const dashboard = ref<DailyDashboard | null>(null)
-const systemReadiness = ref<SystemReadiness | null>(null)
-const candidateTab = ref<'action' | 'ready' | 'watchlist'>('action')
-const reconciling = ref(false)
+const providers = ref<ModelProvider[]>([])
+const profiles = ref<ModelProfile[]>([])
+const loading = ref(false)
+const error = ref<unknown>(null)
+const indicatorsOpen = ref(false)
 const createOpen = ref(false)
 const creating = ref(false)
-const newPortfolioName = ref('我的持仓')
-const analysisOpen = ref(false)
-const analysisPortfolio = ref<Portfolio | null>(null)
-const analysisMode = ref<AnalysisMode>('deep')
-const analysisCheckpoint = ref('10:30')
-const analysisNotify = ref(true)
-const startingAnalysis = ref(false)
+const newPortfolioName = ref('我的主账户')
 let refreshTimer: number | null = null
 
-const {
-  portfolios,
-  selectedPortfolioId: selectedId,
-  selectedPortfolio,
-  loadPortfolios,
-  setSelectedPortfolio,
-} = usePortfolioContext()
-const modelReady = computed(() => profiles.value.some((item) => ['analysis', 'deep_analysis'].includes(item.purpose) && item.is_default))
-const schedulesEnabled = computed(() => schedules.value.some((item) => item.enabled))
-const health = computed(() => dashboard.value?.data_health as any)
-const healthStatus = computed(() => String(health.value?.overall || health.value?.status || 'UNKNOWN').toUpperCase())
-const healthIssue = computed(() => health.value?.components?.find((item: any) => item.status !== 'OK'))
-const candidateItems = computed(() => dashboard.value?.candidates?.[candidateTab.value] || [])
-const staleCandidates = computed(() => dashboard.value?.candidates?.stale || [])
-const latestDecision = computed(() => dashboard.value?.decisions?.latest || null)
-const finalAction = computed(() => String(dashboard.value?.decisions?.final_action || 'NO_ACTION').toUpperCase())
-const latestAnalysis = computed(() => dashboard.value?.analysis?.latest || null)
-const todayAnalysisMissing = computed(() => Boolean(
-  dashboard.value
-  && !dashboard.value.analysis?.analysis_in_progress
-  && !latestAnalysis.value
-  && !latestDecision.value,
-))
-const currentCheckpoint = computed(() => dashboard.value?.timeline?.timeline?.find((item: any) => item.is_current))
-const nextCheckpoint = computed(() => dashboard.value?.timeline?.timeline?.find((item: any) => item.status === 'PENDING'))
-const unreadNotifications = computed(() => Number(dashboard.value?.notifications?.unread_count || 0))
+const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
+const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
+const market = computed<Record<string, any>>(() => dashboard.value?.market || {})
+const portfolio = computed<Record<string, any>>(() => dashboard.value?.portfolio || {})
+const health = computed<Record<string, any>>(() => dashboard.value?.data_health || {})
+const decision = computed<Record<string, any>>(() => dashboard.value?.decisions?.latest || {})
+const analysis = computed<Record<string, any>>(() => dashboard.value?.analysis?.latest || {})
+const hasTodayDecision = computed(() => Boolean(Object.keys(decision.value).length || Object.keys(analysis.value).length))
+const finalAction = computed(() => {
+  if (!hasTodayDecision.value) return 'NO_ACTION'
+  const grade = String(analysis.value.quality || decision.value.quality || '').toUpperCase()
+  if (grade === 'DATA_GAP') return 'DATA_GAP'
+  if (grade === 'BLOCKED') return 'BLOCKED'
+  return normalizeFinalAction(dashboard.value?.decisions?.final_action || decision.value.conclusion || analysis.value.portfolio_action)
+})
+const marketStatus = computed(() => String(market.value.health_status || market.value.freshness || market.value.status || 'MISSING').toUpperCase())
+const systemStatus = computed(() => {
+  const overall = String(health.value.overall || health.value.status || '').toUpperCase()
+  if (overall === 'OK') return 'ok'
+  if (overall === 'BLOCKED') return 'degraded'
+  if (!hasPortfolio.value) return 'setup'
+  return 'degraded'
+})
+const setupSteps = computed(() => [
+  { key: 'config', title: '配置行情与模型', description: '让系统能读取市场和运行分析。', done: providers.value.some((item) => item.enabled) && profiles.value.some((item) => item.is_default), action: () => router.push({ name: 'settings' }), actionLabel: '去配置' },
+  { key: 'holdings', title: '导入当前持仓', description: '上传券商截图并确认第一份组合快照。', done: hasPortfolio.value && Boolean(selectedPortfolio.value?.latest_snapshot_id), action: () => router.push({ name: 'holdings', query: { action: 'update' } }), actionLabel: '导入持仓' },
+  { key: 'analysis', title: '完成第一次分析', description: '基于最近确认快照生成今日建议。', done: hasTodayDecision.value, action: () => router.push({ name: 'analysis' }), actionLabel: '开始分析' },
+])
+const candidates = computed<any[]>(() => {
+  const source = (dashboard.value?.candidates || {}) as Record<string, any>
+  return [...(source.action || []), ...(source.ready || []), ...(source.watchlist || [])].slice(0, 3)
+})
+const reasons = computed(() => {
+  const raw = decision.value.reasons || decision.value.top_reasons || decision.value.blocking_reasons || analysis.value.reasons || []
+  const list = Array.isArray(raw) ? raw.map((item: any) => typeof item === 'string' ? item : item.reason || item.summary || JSON.stringify(item)).filter(Boolean) : []
+  if (list.length) return list
+  if (!hasTodayDecision.value) return ['今天还没有完成分析，现有组合数据仍可查看。']
+  if (finalAction.value === 'ACTION') return ['组合层已给出调整建议，请进入分析查看具体持仓动作和执行前提。']
+  if (['BLOCKED', 'DATA_GAP'].includes(finalAction.value)) return ['市场或组合数据质量尚未满足可靠行动条件。']
+  return ['当前没有足够的新信息改变组合决策。']
+})
+const holdingActions = computed<any[]>(() => {
+  const raw = decision.value.holding_actions || analysis.value.holding_actions || []
+  return Array.isArray(raw) ? raw : []
+})
+const marketRegime = computed(() => ({ BULL: '偏强', BEAR: '偏弱', NEUTRAL: '震荡', RANGE: '震荡', RISK_OFF: '风险偏高' }[String(market.value.regime || '').toUpperCase()] || market.value.regime || '状态未知'))
 
-function fmt(value?: string | null) {
-  return fmtDateTime(value)
+function metricValue(value: unknown, digits = 1) {
+  return value == null || value === '' ? '不可用' : formatNumber(value, digits)
 }
 
-function numberText(value: unknown, digits = 2) {
-  if (value === null || value === undefined || value === '') return '不可用'
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed.toFixed(digits) : String(value)
+function ratioOrScore(value: unknown) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '不可用'
+  return Math.abs(number) <= 1 ? formatPercent(number) : formatNumber(number, 1)
 }
 
-function percentText(value: unknown) {
-  if (value === null || value === undefined || value === '') return '不可用'
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(1)}%` : String(value)
-}
-
-function statusType(status?: string | null) {
-  const value = String(status || '').toUpperCase()
-  if (['OK', 'FRESH', 'SUCCESS', 'VALID', 'COMPLETED', 'HEALTHY'].includes(value)) return 'success'
-  if (['BLOCKED', 'ERROR', 'FAILED', 'MISSING', 'UNAVAILABLE'].includes(value)) return 'error'
-  if (['INFO', 'REUSED', 'SKIPPED', 'DASHBOARD_ONLY'].includes(value)) return 'info'
-  return 'warning'
-}
-
-function readinessType(status?: string | null) {
-  const value = String(status || '').toUpperCase()
-  if (value === 'READY') return 'success'
-  if (value === 'BLOCKED') return 'error'
-  return 'warning'
+function actionLabel(action?: string | null) {
+  return ({ ACTION: '需要调整', NO_ACTION: '暂不操作', BLOCKED: '暂不可形成可靠行动', DATA_GAP: '数据不完整' }[String(action || '').toUpperCase()] || String(action || '观察'))
 }
 
 function actionType(action?: string | null) {
   const value = String(action || '').toUpperCase()
-  if (['REDUCE', 'EXIT', 'SELL', 'BLOCKED'].includes(value)) return 'error'
-  if (value === 'ACTION') return 'warning'
-  return 'info'
+  return ['BLOCKED', 'DATA_GAP'].includes(value) ? 'error' : value === 'ACTION' ? 'warning' : 'info'
 }
 
-function actionText(action?: string | null) {
-  const value = String(action || 'NO_ACTION').toUpperCase()
-  return ['NO_ACTION', 'WATCH_ONLY', 'ACTION', 'REDUCE', 'BLOCKED'].includes(value) ? value : value
+function normalizeFinalAction(action: unknown): 'ACTION' | 'NO_ACTION' | 'BLOCKED' | 'DATA_GAP' {
+  const value = String(action || '').toUpperCase()
+  if (value === 'BLOCKED') return 'BLOCKED'
+  if (value === 'DATA_GAP') return 'DATA_GAP'
+  if (['ACTION', 'ADD', 'BUY', 'REDUCE', 'SELL', 'EXIT', 'REBALANCE'].includes(value)) return 'ACTION'
+  return 'NO_ACTION'
 }
 
 function candidateStage(item: any) {
-  return String(item.display_stage || item.stage || item.candidate_engine_stage || '—').toUpperCase()
+  const value = String(item.display_stage || item.stage || item.candidate_engine_stage || 'WATCH').toUpperCase()
+  return value === 'WATCHLIST' ? 'WATCH' : value
 }
 
 function candidateReason(item: any) {
-  const reasons = item.blocking_reasons || item.blocking_reasons_json || []
-  return Array.isArray(reasons) && reasons.length ? reasons.join('、') : '—'
+  const raw = item.reason || item.summary || item.rationale || item.blocking_reasons?.[0] || item.blocking_reasons_json?.[0]
+  return raw ? String(raw) : '等待更多确认信号'
 }
 
-function notificationType(item: OperatingNotification) {
-  return statusType(item.severity)
+function candidateGate(item: any) {
+  if (item.buyable === true || item.actionable === true || String(item.portfolio_gate || '').toUpperCase() === 'PASS') return '组合已通过'
+  return '组合层未批准'
+}
+
+function candidateRisk(item: any) {
+  const value = item.risk || item.risk_flags || item.risk_level
+  if (Array.isArray(value)) return value.join('、') || '不可用'
+  return value ? String(value) : '不可用'
+}
+
+function openAnalysis() {
+  void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined, run: analysis.value.analysis_run_id || decision.value.analysis_run_id || undefined } })
 }
 
 async function loadDashboard(silent = false) {
-  if (!selectedId.value) {
+  if (!selectedPortfolioId.value) {
     dashboard.value = null
     return
   }
   if (!silent) loading.value = true
-  error.value = ''
+  error.value = null
   try {
-    dashboard.value = await api.getDashboardToday(selectedId.value)
-  } catch (err) {
-    error.value = (err as Error).message
-    if (!silent) message.error(error.value)
+    dashboard.value = await api.getDashboardToday(selectedPortfolioId.value)
+  } catch (reason) {
+    error.value = reason
   } finally {
     if (!silent) loading.value = false
   }
 }
 
-async function loadSystemReadiness() {
-  try {
-    systemReadiness.value = await api.getSystemReadiness()
-  } catch {
-    systemReadiness.value = null
-  }
-}
-
 async function load() {
   loading.value = true
-  error.value = ''
+  error.value = null
   try {
-    const [portfolioRows, profileRows, scheduleRows] = await Promise.all([
-      loadPortfolios(),
-      api.listProfiles(),
-      api.listSchedules(),
-    ])
-    portfolios.value = portfolioRows
+    await loadPortfolios()
+    const requested = Number(route.query.portfolio)
+    if (requested && portfolios.value.some((item) => item.id === requested)) setSelectedPortfolio(requested)
+    const [providerRows, profileRows] = await Promise.all([api.listProviders(), api.listProfiles()])
+    providers.value = providerRows
     profiles.value = profileRows
-    schedules.value = scheduleRows
-    const requestedId = Number(route.query.portfolio)
-    const requested = portfolios.value.find((item) => item.id === requestedId)?.id
-    if (requested && requested !== selectedId.value) setSelectedPortfolio(requested)
-    await Promise.all([loadDashboard(true), loadSystemReadiness()])
-  } catch (err) {
-    error.value = (err as Error).message
-    message.error(error.value)
+    await loadDashboard(true)
+  } catch (reason) {
+    error.value = reason
   } finally {
     loading.value = false
   }
@@ -189,368 +171,92 @@ async function createPortfolio() {
   if (!name || creating.value) return
   creating.value = true
   try {
-    const portfolio = await api.createPortfolio({ name, is_default: portfolios.value.length === 0 })
-    portfolios.value.push(portfolio)
-    setSelectedPortfolio(portfolio.id)
+    const created = await api.createPortfolio({ name, is_default: portfolios.value.length === 0 })
+    portfolios.value.push(created)
+    setSelectedPortfolio(created.id)
     createOpen.value = false
     message.success('组合已创建')
     await loadDashboard()
-  } catch (err) {
-    message.error((err as Error).message)
+  } catch (reason) {
+    message.error((reason as Error).message)
   } finally {
     creating.value = false
   }
 }
 
-function openManualAnalysis(portfolio: Portfolio) {
-  if (!portfolio.latest_snapshot_id) {
-    message.warning('该组合还没有已确认持仓，请先上传并确认持仓截图')
-    void router.push({ name: 'upload', query: { portfolio: portfolio.id } })
-    return
-  }
-  if (!modelReady.value) {
-    message.warning('请先在系统设置中配置默认分析模型')
-    void router.push({ name: 'settings' })
-    return
-  }
-  analysisPortfolio.value = portfolio
-  analysisOpen.value = true
-}
-
-async function startManualAnalysis() {
-  const portfolio = analysisPortfolio.value
-  if (!portfolio?.latest_snapshot_id || startingAnalysis.value) return
-  startingAnalysis.value = true
-  try {
-    const job = await api.createAnalysisJob(
-      portfolio.latest_snapshot_id,
-      analysisMode.value,
-      analysisCheckpoint.value || undefined,
-      analysisNotify.value,
-    )
-    analysisOpen.value = false
-    message.success('手动分析任务已创建')
-    await router.push({ name: 'upload', query: { portfolio: portfolio.id, job: job.id, focus: 'analysis' } })
-  } catch (err) {
-    message.error((err as Error).message)
-  } finally {
-    startingAnalysis.value = false
-  }
-}
-
-async function reconcile() {
-  if (!selectedId.value || reconciling.value) return
-  reconciling.value = true
-  try {
-    await api.reconcileToday(selectedId.value)
-    message.success('今日运行状态已恢复')
-    await loadDashboard()
-  } catch (err) {
-    message.error((err as Error).message)
-  } finally {
-    reconciling.value = false
-  }
-}
-
-async function markRead(item: OperatingNotification) {
-  try {
-    await api.markOperatingNotificationRead(item.notification_id, item.portfolio_id)
-    item.read = true
-    item.read_at = new Date().toISOString()
-  } catch (err) {
-    message.error((err as Error).message)
-  }
-}
-
-function startAutoRefresh() {
+function startRefresh() {
   if (refreshTimer !== null) window.clearInterval(refreshTimer)
-  refreshTimer = window.setInterval(() => {
-    if (selectedId.value) void loadDashboard(true)
-  }, 20000)
+  refreshTimer = window.setInterval(() => void loadDashboard(true), 30_000)
 }
 
-onMounted(async () => {
-  await load()
-  startAutoRefresh()
-})
-
-watch(selectedId, (id, previous) => {
+watch(selectedPortfolioId, (id, previous) => {
   if (id && id !== previous) void loadDashboard()
 })
-
-onUnmounted(() => {
-  if (refreshTimer !== null) window.clearInterval(refreshTimer)
-})
+onMounted(async () => { await load(); startRefresh() })
+onUnmounted(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer) })
 </script>
 
 <template>
-  <section class="page-stack">
-    <header class="page-heading">
-      <div>
-        <p class="eyebrow">DAILY INVESTMENT WORKBENCH</p>
-        <h1>今日操作台</h1>
-        <p>市场、组合、候选、分析、执行和复盘统一对齐到同一数据时点。</p>
-      </div>
-      <div class="heading-actions">
-        <n-select :value="selectedId" :options="portfolios.map((item) => ({ label: item.name, value: item.id }))" placeholder="选择组合" class="portfolio-select" @update:value="setSelectedPortfolio" />
-        <n-button secondary :loading="loading" @click="loadDashboard()"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
-        <n-button secondary :loading="reconciling" :disabled="!selectedId" @click="reconcile"><template #icon><RotateCcw :size="16" /></template>恢复今日状态</n-button>
-        <n-button type="primary" :disabled="!selectedId" @click="router.push({ name: 'upload', query: { portfolio: selectedId } })"><template #icon><Camera :size="16" /></template>更新持仓</n-button>
-        <n-button secondary @click="createOpen = true"><template #icon><Plus :size="16" /></template>新建组合</n-button>
-      </div>
-    </header>
+  <section class="workbench-page">
+    <PageHeader :title="dashboard?.trade_date ? `今天 · ${dashboard.trade_date}` : '今天的投资驾驶舱'" description="先看市场，再看组合和今日建议。">
+      <template #actions>
+        <n-button secondary :loading="loading" @click="load"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
+        <n-button v-if="hasPortfolio" secondary @click="router.push({ name: 'holdings', query: { action: 'update' } })">更新持仓</n-button>
+        <n-button v-if="hasPortfolio" type="primary" @click="openAnalysis"><template #icon><Sparkles :size="16" /></template>查看今日分析</n-button>
+        <n-button v-else secondary @click="createOpen = true"><template #icon><Plus :size="16" /></template>新建组合</n-button>
+      </template>
+    </PageHeader>
 
     <ErrorState v-if="error" :error="error" @retry="load" />
+    <LoadingState v-else-if="loading && !dashboard && hasPortfolio" message="正在读取今天的市场与组合" />
 
-    <n-empty v-if="!loading && !portfolios.length" description="暂无持仓组合，请先创建组合或上传持仓。">
-      <template #extra><n-button type="primary" @click="createOpen = true"><template #icon><Plus :size="16" /></template>创建组合</n-button></template>
-    </n-empty>
+    <section v-if="!hasPortfolio && !loading && !error" class="setup-card panel-card">
+      <div class="setup-title"><div><p class="page-eyebrow">FIRST RUN</p><h2>开始使用</h2><p>完成下面三步，就可以每天快速看清市场、组合和建议。</p></div><Sparkles :size="25" /></div>
+      <ol class="setup-list"><li v-for="(step, index) in setupSteps" :key="step.key" :class="{ done: step.done }"><div class="step-index">{{ step.done ? '✓' : index + 1 }}</div><div class="step-copy"><strong>{{ step.title }}</strong><span>{{ step.done ? '已完成' : step.description }}</span></div><n-button v-if="!step.done" secondary size="small" @click="step.action">{{ step.actionLabel }}<ArrowRight :size="14" /></n-button><span v-else class="step-done">已完成</span></li></ol>
+      <p class="setup-note">技术状态会在需要时显示，现在只关注下一步。</p>
+    </section>
 
-    <n-spin v-else :show="loading && !dashboard">
-      <template v-if="dashboard">
-        <div class="as-of-line">
-          <span>组合：{{ selectedPortfolio?.name || '—' }}</span>
-          <span>数据时点：{{ fmt(dashboard.as_of) }}</span>
-          <span>工作流：{{ dashboard.workflow_state }}</span>
-          <span>当前节点：{{ currentCheckpoint?.label || '—' }}</span>
-          <span>下一节点：{{ nextCheckpoint?.time || '—' }}</span>
-          <span v-if="schedulesEnabled" class="schedule-mark">自动时间表已启用</span>
-          <n-tag v-if="unreadNotifications" type="warning" size="small" :bordered="false"><Bell :size="13" /> {{ unreadNotifications }} 条未读</n-tag>
-          <n-tag
-            v-if="systemReadiness"
-            :type="readinessType(systemReadiness.status)"
-            size="small"
-            :bordered="false"
-            class="readiness-badge"
-            @click="router.push({ name: 'system' })"
-          >系统 {{ systemReadiness.status }}</n-tag>
-        </div>
+    <template v-if="dashboard">
+      <div v-if="marketStatus === 'BLOCKED' || marketStatus === 'DATA_GAP' || marketStatus === 'MISSING'" class="quality-banner"><CircleAlert :size="17" /><div><strong>市场数据暂不完整</strong><p>当前不生成激进风险建议，已有持仓信息仍可查看。</p></div><n-button text @click="indicatorsOpen = true">查看原因</n-button></div>
 
-        <div class="hero-grid">
-          <section class="panel-card hero-card">
-            <div class="section-title"><div><h2>Market State</h2><p>{{ dashboard.market?.market_mode || '—' }} · {{ dashboard.market?.market_score_source || '—' }}</p></div><n-tag :type="statusType(dashboard.market?.freshness)" :bordered="false">{{ dashboard.market?.freshness || 'MISSING' }}</n-tag></div>
-            <div class="hero-value">{{ dashboard.market?.score == null ? '不可用' : numberText(dashboard.market.score, 1) }}</div>
-            <div class="hero-label">{{ dashboard.market?.regime || 'Regime 不可用' }}</div>
-            <div class="inline-meta"><span>Raw {{ numberText(dashboard.market?.raw_score, 1) }}</span><span>置信度 {{ dashboard.market?.confidence ?? '不可用' }}</span><span>15m {{ numberText(dashboard.market?.delta_15m, 1) }}</span></div>
-            <div class="metric-strip"><span>Breadth {{ numberText(dashboard.market?.components?.breadth, 1) }}</span><span>Trend {{ numberText(dashboard.market?.components?.trend, 1) }}</span><span>Top5 {{ numberText(dashboard.market?.components?.top5_turnover_concentration, 3) }}</span></div>
-            <small class="muted">捕获：{{ fmt(dashboard.market?.captured_at) }} · All-A Median {{ numberText(dashboard.market?.all_a_median?.index_value, 2) }}</small>
-          </section>
+      <SectionCard title="今日市场" :description="dashboard.market_open ? '市场数据来自最近可用的生产快照。' : 'A 股今日休市，下面展示最近一个交易日的市场状态。'">
+        <template #actions><FreshnessLabel :freshness="market.freshness" :at="market.captured_at" /><n-button text type="primary" @click="indicatorsOpen = !indicatorsOpen">{{ indicatorsOpen ? '收起指标' : '查看指标' }}<ArrowRight :size="14" /></n-button></template>
+        <div class="market-head"><div><strong class="market-score mono-number">{{ metricValue(market.score, 1) }}</strong><span>Market Score</span></div><div><strong>{{ marketRegime }}</strong><span>{{ market.regime || 'Regime 不可用' }}</span></div><StatusIndicator :status="marketStatus === 'VALID' || marketStatus === 'FRESH' ? 'ok' : 'degraded'" :label="market.quality_status === 'VALID' ? '质量正常' : '需要关注'" /></div>
+        <div class="market-metrics"><MetricTile label="全 A 中位数" :value="metricValue(market.all_a_median?.index_value, 2)" helper="最近可用交易日" /><MetricTile label="成交集中度" :value="formatPercent(market.components?.top5_turnover_concentration)" /><MetricTile label="市场广度" :value="ratioOrScore(market.advance_ratio ?? market.breadth_ratio ?? market.components?.breadth)" /><MetricTile label="覆盖率" :value="formatPercent(market.coverage ?? market.metrics?.coverage)" /></div>
+        <p class="market-summary">{{ market.summary || (market.components?.breadth != null ? `市场广度指标为 ${metricValue(market.components.breadth, 1)}，建议结合组合暴露决定是否增加风险。` : '当前市场数据已加载，可在详情中查看量化指标。') }}</p>
+        <TechnicalDetails v-if="indicatorsOpen" title="市场指标与数据质量" name="market-details" :default-open="true"><div class="detail-grid"><div><span>Trend</span><strong>{{ metricValue(market.components?.trend) }}</strong></div><div><span>Liquidity</span><strong>{{ metricValue(market.components?.liquidity) }}</strong></div><div><span>Profitability</span><strong>{{ metricValue(market.components?.profitability) }}</strong></div><div><span>Diffusion</span><strong>{{ metricValue(market.components?.diffusion) }}</strong></div><div><span>Crowding</span><strong>{{ metricValue(market.components?.crowding) }}</strong></div><div><span>Tail Risk</span><strong>{{ metricValue(market.components?.tail_risk) }}</strong></div><div><span>Coverage</span><strong>{{ formatPercent(market.coverage ?? market.metrics?.coverage) }}</strong></div><div><span>Source</span><strong>{{ market.market_score_source || '—' }}</strong></div></div><pre>{{ JSON.stringify({ market, data_health: dashboard.data_health }, null, 2) }}</pre></TechnicalDetails>
+      </SectionCard>
 
-          <section class="panel-card hero-card">
-            <div class="section-title"><div><h2>Portfolio Risk</h2><p>Snapshot {{ fmt(dashboard.portfolio?.snapshot_time) }}</p></div><n-tag :type="statusType(dashboard.portfolio?.status)" :bordered="false">{{ dashboard.portfolio?.status || 'MISSING' }}</n-tag></div>
-            <div class="hero-value">{{ percentText(dashboard.portfolio?.cash_ratio) }}</div>
-            <div class="hero-label">现金比例</div>
-            <div class="risk-grid"><span>资产 {{ numberText(dashboard.portfolio?.total_assets, 0) }}</span><span>储备 {{ percentText(dashboard.portfolio?.reserve_ratio) }}</span><span>暴露 {{ percentText(dashboard.portfolio?.gross_exposure) }}</span><span>HHI {{ numberText(dashboard.portfolio?.hhi, 3) }}</span><span>Vol20 {{ percentText(dashboard.portfolio?.portfolio_vol_20) }}</span><span>持仓 {{ dashboard.portfolio?.position_count ?? 0 }}</span></div>
-            <n-alert v-if="dashboard.portfolio?.hard_cap_breaches?.length" type="error" :show-icon="false" class="compact-alert">Hard Cap：{{ dashboard.portfolio.hard_cap_breaches.join('、') }}</n-alert>
-            <small v-else class="muted">未发现 Hard Cap breach</small>
-          </section>
+      <div class="decision-grid">
+        <DecisionHero class="decision-card" :action="finalAction" :summary="hasTodayDecision ? (decision.portfolio_conclusion || analysis.summary || '当前组合建议已生成，请根据持仓动作决定是否执行。') : '今天尚未完成分析，现有组合数据仍可查看。'" :reasons="reasons" :checkpoint="decision.checkpoint || analysis.checkpoint" :finalized-at="decision.decision_at || analysis.finished_at" :quality="decision.quality || analysis.quality" :freshness="market.freshness">
+          <template #actions><n-button type="primary" @click="openAnalysis">{{ hasTodayDecision ? '查看完整分析' : '完成第一次分析' }}<ArrowRight :size="14" /></n-button></template>
+        </DecisionHero>
 
-          <section class="panel-card hero-card decision-card">
-            <div class="section-title"><div><h2>Today's Decision</h2><p>{{ fmt(latestDecision?.decision_at || latestAnalysis?.finished_at) }}</p></div><n-tag :type="actionType(finalAction)" :bordered="false">{{ actionText(finalAction) }}</n-tag></div>
-            <div class="decision-copy">{{ actionText(finalAction) }}</div>
-            <p v-if="todayAnalysisMissing" class="decision-message">今日尚未完成分析。</p>
-            <p v-else-if="finalAction === 'NO_ACTION'" class="decision-message">当前建议：保持组合不变。</p>
-            <p v-else-if="finalAction === 'BLOCKED'" class="decision-message">组合 Gate 或数据质量阻断风险增加。</p>
-            <p v-else class="decision-message">请查看最新报告中的持仓动作与执行前提。</p>
-            <div class="decision-meta"><span>质量 {{ latestDecision?.quality || latestAnalysis?.quality || '不可用' }}</span><span>置信度 {{ latestDecision?.confidence || latestAnalysis?.confidence || '不可用' }}</span></div>
-            <n-button v-if="latestAnalysis?.analysis_run_id" text type="primary" @click="router.push({ name: 'reports', query: { run: latestAnalysis.analysis_run_id } })">查看完整报告 <ExternalLink :size="14" /></n-button>
-            <p class="muted semantic-note">Candidate ACTION 只是进入决策候选，Portfolio Gate 具有最终优先级。</p>
-          </section>
+        <SectionCard title="我的组合" description="截至最近确认快照">
+          <template #actions><n-button text type="primary" @click="router.push({ name: 'holdings' })">查看持仓<ArrowRight :size="14" /></n-button></template>
+          <div class="portfolio-metrics"><MetricTile label="总资产" :value="formatCurrency(portfolio.total_assets, 2)" /><MetricTile label="持仓市值" :value="formatCurrency(portfolio.market_value, 2)" /><MetricTile label="可用现金" :value="formatCurrency(portfolio.spendable_cash, 2)" /><MetricTile label="仓位" :value="formatPercent(portfolio.gross_exposure)" tone="risk" /></div>
+          <div class="portfolio-meta"><span>持仓 {{ portfolio.position_count ?? '不可用' }} 个</span><span>确认时间 {{ portfolio.snapshot_time ? new Date(portfolio.snapshot_time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }}</span></div>
+          <p v-if="portfolio.risk_flags?.length" class="risk-note">主要风险：{{ portfolio.risk_flags.slice(0, 2).join('、') }}</p>
+        </SectionCard>
+      </div>
 
-          <section class="panel-card hero-card">
-            <div class="section-title"><div><h2>System Health</h2><p>{{ dashboard.trade_date }} · {{ dashboard.workflow_state }}</p></div><ShieldCheck v-if="healthStatus === 'OK'" :size="22" class="ok-icon" /><TriangleAlert v-else :size="22" class="warn-icon" /></div>
-            <div class="health-value" :class="`health-${healthStatus.toLowerCase()}`">{{ healthStatus }}</div>
-            <p class="health-reason">{{ healthIssue?.name || '关键组件运行正常' }}<span v-if="healthIssue">：{{ healthIssue.status }}</span></p>
-            <div class="health-summary"><span>组件 {{ health?.components?.length || 0 }}</span><span>Mandatory {{ health?.components?.filter((item: any) => item.mandatory).length || 0 }}</span></div>
-            <small class="muted">Dashboard 只读取已持久化事实，不触发重新计算。</small>
-          </section>
-        </div>
+      <SectionCard title="关注机会" description="最多展示三个值得继续观察的候选，候选不是最终交易指令。">
+        <template #actions><n-button text type="primary" @click="router.push({ name: 'analysis' })">查看全部<ArrowRight :size="14" /></n-button></template>
+        <div v-if="candidates.length" class="opportunity-list"><article v-for="item in candidates" :key="item.code || item.name" class="opportunity-row"><div class="opportunity-identity"><strong>{{ item.name || item.code || '未命名标的' }}</strong><small>{{ item.code || '代码待匹配' }}</small></div><n-tag size="small" :bordered="false" :type="candidateStage(item) === 'ACTION' ? 'warning' : candidateStage(item) === 'READY' ? 'info' : 'default'">{{ candidateStage(item) === 'ACTION' ? '需要调整' : candidateStage(item) === 'READY' ? '准备' : '观察' }}</n-tag><p>{{ candidateReason(item) }}</p><span class="opportunity-meta">风险：{{ candidateRisk(item) }}</span><span class="opportunity-gate">{{ candidateGate(item) }}</span></article></div>
+        <EmptyState v-else title="当前没有明显的新机会" description="当前没有明显优于保持现状的机会。系统仍会在下一次可靠扫描后更新候选。" />
+      </SectionCard>
 
-        <div class="section-grid wide-first">
-          <section class="panel-card">
-            <div class="section-title"><div><h2>Candidates</h2><p>确定性候选阶段，不是交易指令</p></div><n-tag :bordered="false">W {{ dashboard.candidates?.counts?.watchlist ?? 0 }} · R {{ dashboard.candidates?.counts?.ready ?? 0 }} · A {{ dashboard.candidates?.counts?.action ?? 0 }}</n-tag></div>
-            <n-alert v-if="dashboard.candidates?.freshness === 'STALE'" type="warning" :show-icon="false" class="compact-alert">上次可靠 CandidateRun 已过期，ACTION 已暂停为可操作展示。</n-alert>
-            <n-tabs v-model:value="candidateTab" type="line" animated>
-              <n-tab-pane name="action" tab="ACTION">
-                <div v-if="candidateItems.length" class="candidate-list"><article v-for="item in candidateItems.slice(0, 10)" :key="item.code" class="candidate-row"><div class="candidate-main"><div><strong>{{ item.name || item.code }}</strong><small>{{ item.code }} · {{ candidateStage(item) }}</small></div><n-tag size="small" type="warning" :bordered="false">进入决策候选</n-tag></div><div class="candidate-metrics"><span>Opportunity {{ numberText(item.opportunity_score, 1) }}</span><span>Entry {{ numberText(item.entry_score, 1) }}</span><span>Fit {{ numberText(item.portfolio_fit_score, 1) }}</span><span>Edge {{ numberText(item.decision_edge, 1) }}</span><span>R/R {{ numberText(item.risk_reward_ratio, 2) }}</span><span>置信度 {{ item.confidence ?? '不可用' }}</span></div><small class="muted">{{ item.funding_mode || 'funding mode 不可用' }} · {{ candidateReason(item) }}</small></article></div>
-                <n-empty v-else description="当前没有 ACTION 候选" />
-              </n-tab-pane>
-              <n-tab-pane name="ready" tab="READY">
-                <div v-if="candidateItems.length" class="candidate-list"><article v-for="item in candidateItems.slice(0, 10)" :key="item.code" class="candidate-row"><div class="candidate-main"><div><strong>{{ item.name || item.code }}</strong><small>{{ item.code }}</small></div><n-tag size="small" type="info" :bordered="false">READY</n-tag></div><div class="candidate-metrics"><span>Opportunity {{ numberText(item.opportunity_score, 1) }}</span><span>Entry {{ numberText(item.entry_score, 1) }}</span><span>Fit {{ numberText(item.portfolio_fit_score, 1) }}</span><span>Edge {{ numberText(item.decision_edge, 1) }}</span></div></article></div>
-                <n-empty v-else description="当前没有 READY 候选" />
-              </n-tab-pane>
-              <n-tab-pane name="watchlist" tab="WATCHLIST">
-                <div v-if="candidateItems.length" class="candidate-list"><article v-for="item in candidateItems.slice(0, 10)" :key="item.code" class="candidate-row"><div class="candidate-main"><div><strong>{{ item.name || item.code }}</strong><small>{{ item.code }}</small></div><n-tag size="small" :bordered="false">WATCHLIST</n-tag></div><div class="candidate-metrics"><span>Opportunity {{ numberText(item.opportunity_score, 1) }}</span><span>Edge {{ numberText(item.decision_edge, 1) }}</span><span>质量 {{ item.quality_status || '不可用' }}</span></div></article></div>
-                <n-empty v-else description="当前没有 WATCHLIST 候选" />
-              </n-tab-pane>
-            </n-tabs>
-            <div v-if="staleCandidates.length" class="stale-list"><strong>旧候选保留</strong><span v-for="item in staleCandidates.slice(0, 5)" :key="item.code">{{ item.name || item.code }} · STALE</span></div>
-            <div class="section-footer"><span>Run #{{ dashboard.candidates?.run_id || '—' }} · {{ fmt(dashboard.candidates?.captured_at) }}</span><span v-if="dashboard.candidates?.scan_in_progress">正在扫描 Run #{{ dashboard.candidates.in_progress_run_id }}</span></div>
-          </section>
+      <div class="home-system-line"><StatusIndicator :status="systemStatus" /><span>数据状态 · {{ dashboard.as_of ? new Date(dashboard.as_of).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }}</span><button type="button" @click="router.push({ name: 'settings', query: { section: 'system' } })">查看系统状态<ArrowRight :size="13" /></button></div>
+      <p class="disclaimer">系统提供研究与决策辅助，不保证收益。</p>
+    </template>
 
-          <section class="panel-card">
-            <div class="section-title"><div><h2>Triggers</h2><p>Trigger = 需要重新分析，不是买卖信号</p></div><n-tag :bordered="false">今日 {{ dashboard.triggers?.today_count ?? 0 }}</n-tag></div>
-            <div v-if="dashboard.triggers?.items?.length" class="trigger-list"><article v-for="item in dashboard.triggers.items.slice(0, 10)" :key="item.id" class="trigger-row"><div><strong>{{ item.priority }} · {{ item.trigger_type }}</strong><small>{{ item.target || '市场' }} · {{ fmt(item.detected_at) }}</small><span>{{ item.reason || '—' }}</span></div><div class="trigger-status"><n-tag size="small" :type="statusType(item.status)" :bordered="false">{{ item.status }}</n-tag><small v-if="item.analysis_job_id">Job #{{ item.analysis_job_id }}</small></div></article></div>
-            <n-empty v-else description="当前没有已确认触发" />
-          </section>
-        </div>
-
-        <div class="section-grid">
-          <section class="panel-card">
-            <div class="section-title"><div><h2>Today Timeline</h2><p>Asia/Shanghai · {{ dashboard.timeline?.workflow_state }}</p></div><n-tag type="info" :bordered="false">{{ currentCheckpoint?.label || '—' }}</n-tag></div>
-            <div class="timeline-list"><article v-for="item in dashboard.timeline?.timeline || []" :key="item.key" class="timeline-row" :class="{ current: item.is_current }"><span class="timeline-time">{{ item.time }}</span><span class="timeline-dot" /><div><strong>{{ item.label }}</strong><small>{{ item.mode || item.kind }}<span v-if="item.reason"> · {{ item.reason }}</span></small></div><n-tag size="small" :type="statusType(item.status)" :bordered="false">{{ item.status || 'PENDING' }}</n-tag></article></div>
-          </section>
-
-          <section class="panel-card">
-            <div class="section-title"><div><h2>Analysis</h2><p>最新成功 Decision 与当前进行中任务分开显示</p></div><n-tag :type="statusType(latestAnalysis?.status)" :bordered="false">{{ dashboard.analysis?.analysis_in_progress ? 'RUNNING' : latestAnalysis?.status || 'MISSING' }}</n-tag></div>
-            <div v-if="dashboard.analysis?.analysis_in_progress" class="running-box"><CircleAlert :size="18" /><div><strong>分析进行中</strong><span v-for="job in dashboard.analysis.running_jobs || []" :key="job.id">{{ job.mode }} · {{ job.checkpoint || 'trigger' }} · Job #{{ job.id }}</span></div></div>
-            <div class="analysis-detail"><span>最近模式 <strong>{{ latestAnalysis?.mode || '—' }}</strong></span><span>完成 {{ fmt(latestAnalysis?.finished_at) }}</span><span>质量 {{ latestAnalysis?.quality || '不可用' }}</span><span>ACTION 候选 {{ latestAnalysis?.candidate_action_count ?? 0 }}</span></div>
-            <n-button v-if="latestAnalysis?.analysis_run_id" text type="primary" @click="router.push({ name: 'reports', query: { run: latestAnalysis.analysis_run_id } })">打开分析报告 <ExternalLink :size="14" /></n-button>
-          </section>
-        </div>
-
-        <section class="panel-card health-panel">
-          <div class="section-title"><div><h2>Data Health</h2><p>统一状态：OK / DEGRADED / BLOCKED / UNKNOWN</p></div><n-tag :type="statusType(healthStatus)" :bordered="false">{{ healthStatus }}</n-tag></div>
-          <div class="health-grid"><article v-for="item in health?.components || []" :key="item.name" class="health-item"><div class="health-item-title"><strong>{{ item.name }}</strong><n-tag size="small" :type="statusType(item.status)" :bordered="false">{{ item.status }}</n-tag></div><small>{{ item.detail?.reason || item.detail?.freshness || item.detail?.status || (item.mandatory ? 'mandatory' : 'optional') }}</small><small v-if="item.detail?.last_error" class="error-text">{{ item.detail.last_error }}</small></article></div>
-        </section>
-
-        <div class="section-grid">
-          <section class="panel-card">
-            <div class="section-title"><div><h2>Memory / Review</h2><p>迟到 Outcome 会刷新同一 ReviewRun</p></div><n-tag :type="statusType(dashboard.memory?.review?.review_stale ? 'DEGRADED' : dashboard.memory?.review?.status)" :bordered="false">{{ dashboard.memory?.review?.review_stale ? '待刷新' : dashboard.memory?.review?.status || 'MISSING' }}</n-tag></div>
-            <div class="review-stat-grid"><div><strong>{{ dashboard.memory?.today_decisions ?? 0 }}</strong><span>今日 Decision</span></div><div><strong>{{ dashboard.memory?.outcomes_matured ?? 0 }}</strong><span>今日成熟 Outcome</span></div><div><strong>{{ dashboard.memory?.review?.actual_execution_count ?? 0 }}</strong><span>实际执行</span></div><div><strong>{{ dashboard.memory?.historical_analogue_count ?? 0 }}</strong><span>历史案例</span></div></div>
-            <div class="section-footer"><span>Review {{ fmt(dashboard.memory?.review?.last_refreshed_at || dashboard.memory?.review?.completed_at) }}</span><span>刷新 {{ dashboard.memory?.review?.refresh_count ?? 0 }} 次</span></div>
-            <div v-if="dashboard.memory?.outcomes_matured_today?.length" class="outcome-list"><div v-for="item in dashboard.memory.outcomes_matured_today.slice(0, 6)" :key="item.id"><span>H{{ item.horizon_trading_days }} · {{ item.target_key }}</span><n-tag size="small" :type="statusType(item.quality_status || item.status)" :bordered="false">{{ item.status }}</n-tag></div></div>
-          </section>
-
-          <section class="panel-card">
-            <div class="section-title"><div><h2>Today's Execution</h2><p>Ledger 事实与建议保持分离</p></div><n-tag :bordered="false">{{ dashboard.executions?.today_count ?? 0 }} 笔</n-tag></div>
-            <div v-if="dashboard.executions?.items?.length" class="execution-list"><article v-for="item in dashboard.executions.items.slice(0, 10)" :key="item.id" class="execution-row"><div><strong>{{ item.code }}</strong><small>{{ item.side }} {{ item.qty }} @ {{ item.price }} · {{ fmt(item.executed_at) }}</small></div><div><n-tag size="small" :type="statusType(item.execution_alignment)" :bordered="false">{{ item.execution_alignment }}</n-tag><small v-if="item.linked_decision">Decision #{{ item.linked_decision }}</small></div></article></div>
-            <n-empty v-else description="今日暂无确认成交" />
-          </section>
-        </div>
-
-        <section class="panel-card notification-panel">
-          <div class="section-title"><div><h2>Operating Notifications</h2><p>INFO 默认只在 Dashboard 展示，重要状态变化才尝试推送</p></div><n-tag :type="unreadNotifications ? 'warning' : 'success'" :bordered="false">未读 {{ unreadNotifications }}</n-tag></div>
-          <div v-if="dashboard.notifications?.items?.length" class="notification-list"><article v-for="item in dashboard.notifications.items.slice(0, 12)" :key="item.notification_id" class="notification-row" :class="{ unread: !item.read }"><div><div class="notification-title"><Bell :size="14" /><strong>{{ item.title }}</strong><n-tag size="tiny" :type="notificationType(item)" :bordered="false">{{ item.severity }}</n-tag></div><p>{{ item.summary }}</p><small>{{ item.event_type }} · {{ fmt(item.occurred_at) }}</small></div><n-button v-if="!item.read" quaternary circle aria-label="标记已读" title="标记已读" @click="markRead(item)"><CheckCircle2 :size="16" /></n-button><span v-else class="read-mark">已读</span></article></div>
-          <n-empty v-else description="暂无重要运行通知" />
-        </section>
-
-        <section class="panel-card holdings-panel">
-          <div class="section-title"><div><h2>Holdings</h2><p>最新确认组合快照 · {{ fmt(dashboard.portfolio?.snapshot_time) }}</p></div><n-button secondary size="small" :disabled="!selectedId" @click="router.push({ name: 'upload', query: { portfolio: selectedId } })"><template #icon><Camera :size="14" /></template>上传新快照</n-button></div>
-          <div v-if="dashboard.portfolio?.holdings?.length" class="holding-grid"><article v-for="item in dashboard.portfolio.holdings.slice(0, 12)" :key="item.code" class="holding-row"><div><strong>{{ item.name || item.code }}</strong><small>{{ item.code }} · 权重 {{ percentText(item.weight) }}</small></div><div><span>{{ numberText(item.price, 2) }}</span><small>Keep {{ item.keep_score ?? '不可用' }}</small></div><n-tag size="small" :type="actionType(item.holding_action)" :bordered="false">{{ item.holding_action || '未设动作' }}</n-tag></article></div>
-          <n-empty v-else description="当前快照没有持仓明细" />
-        </section>
-      </template>
-      <n-empty v-else description="暂无可读取的 Dashboard 数据" />
-    </n-spin>
-
-    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, 92vw)">
-      <n-form label-placement="top"><n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" aria-label="组合名称" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item><n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button></n-form>
-    </n-modal>
-
-    <n-modal v-model:show="analysisOpen" preset="card" title="手动分析最新持仓" style="width: min(480px, 92vw)">
-      <n-alert type="info" :show-icon="false">使用 <strong>{{ analysisPortfolio?.name }}</strong> 的最新确认快照 #{{ analysisPortfolio?.latest_snapshot_id }}，不会重新识图或修改持仓。</n-alert>
-      <n-form label-placement="top" class="analysis-modal-form">
-        <n-form-item label="分析模式">
-          <n-radio-group v-model:value="analysisMode">
-            <n-radio-button value="fast">快速</n-radio-button>
-            <n-radio-button value="standard">标准</n-radio-button>
-            <n-radio-button value="deep">深度</n-radio-button>
-          </n-radio-group>
-        </n-form-item>
-        <n-form-item label="检查点">
-          <n-select v-model:value="analysisCheckpoint" :options="['09:35', '10:30', '13:05', '14:30', '15:10'].map((value) => ({ label: value, value }))" />
-        </n-form-item>
-        <n-form-item label="完成后发送通知">
-          <n-switch v-model:value="analysisNotify" />
-        </n-form-item>
-        <n-button type="primary" block size="large" :loading="startingAnalysis" @click="startManualAnalysis">开始分析</n-button>
-      </n-form>
-    </n-modal>
+    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, calc(100vw - 32px))"><n-form label-placement="top"><n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" aria-label="组合名称" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item><n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button></n-form></n-modal>
   </section>
 </template>
 
 <style scoped>
-.page-stack { display: grid; gap: 18px; }
-.page-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
-.eyebrow { margin: 0 0 5px; color: var(--app-primary); font-size: 11px; font-weight: 900; letter-spacing: .13em; }
-h1 { margin: 0; font-size: 36px; }
-.page-heading p:not(.eyebrow), .section-title p { margin: 6px 0 0; color: var(--app-text-muted); }
-.heading-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
-.portfolio-select { min-width: 170px; }
-.as-of-line, .section-footer, .inline-meta, .health-summary, .decision-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; color: var(--app-text-muted); font-size: 12px; }
-.as-of-line { min-height: 28px; }
-.schedule-mark { color: var(--app-success); }
-.readiness-badge { cursor: pointer; }
-.hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-.section-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
-.wide-first { grid-template-columns: minmax(0, 1.45fr) minmax(320px, .8fr); }
-.panel-card { min-width: 0; padding: 20px; }
-.section-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.section-title h2 { margin: 0; font-size: 17px; }
-.hero-value { margin-top: 4px; font-size: 34px; font-weight: 900; line-height: 1.1; }
-.hero-label { margin-top: 4px; color: var(--app-text-muted); font-size: 12px; }
-.inline-meta { margin-top: 14px; }
-.metric-strip { display: flex; flex-wrap: wrap; gap: 7px 12px; margin: 16px 0 10px; color: var(--app-text-muted); font-size: 11px; }
-.metric-strip span { border-bottom: 1px solid var(--app-border-soft); padding-bottom: 3px; }
-.risk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin: 16px 0; color: var(--app-text-muted); font-size: 12px; }
-.decision-card { border-top: 3px solid var(--app-primary); }
-.decision-copy { margin: 12px 0 8px; font-size: 28px; font-weight: 900; }
-.decision-message { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
-.semantic-note { margin: 14px 0 0; font-size: 11px; line-height: 1.6; }
-.health-value { font-size: 29px; font-weight: 900; }
-.health-ok, .ok-icon { color: var(--app-success); }
-.health-degraded, .health-unknown, .warn-icon { color: var(--app-warning); }
-.health-blocked { color: var(--app-danger); }
-.health-reason { min-height: 42px; margin: 10px 0; color: var(--app-text-muted); }
-.health-reason span { display: block; margin-top: 3px; }
-.compact-alert { margin: 10px 0 14px; }
-.candidate-list, .trigger-list, .timeline-list, .execution-list, .notification-list, .holding-grid, .outcome-list { display: grid; gap: 8px; }
-.candidate-row, .trigger-row, .timeline-row, .execution-row, .notification-row, .holding-row { border-bottom: 1px solid var(--app-border-soft); padding: 10px 0; }
-.candidate-row:last-child, .trigger-row:last-child, .timeline-row:last-child, .execution-row:last-child, .notification-row:last-child, .holding-row:last-child { border-bottom: 0; }
-.candidate-main, .notification-title, .health-item-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.candidate-main > div, .trigger-row > div:first-child, .execution-row > div:first-child, .holding-row > div { display: grid; gap: 3px; }
-.candidate-main small, .trigger-row small, .execution-row small, .holding-row small, .health-item small, .notification-row small, .timeline-row small { color: var(--app-text-muted); font-size: 11px; }
-.candidate-metrics { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0 6px; color: var(--app-text-muted); font-size: 11px; }
-.stale-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; color: var(--app-warning); font-size: 11px; }
-.stale-list span { border: 1px solid color-mix(in srgb, var(--app-warning) 35%, transparent); padding: 3px 6px; }
-.trigger-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.trigger-row > div:first-child { flex: 1; }
-.trigger-row span { color: var(--app-text-muted); font-size: 12px; }
-.trigger-status { display: grid; justify-items: end; gap: 4px; }
-.timeline-row { display: grid; grid-template-columns: 46px 9px minmax(0, 1fr) auto; align-items: center; gap: 9px; }
-.timeline-row.current { background: var(--app-primary-soft); padding: 10px 8px; }
-.timeline-time { color: var(--app-primary); font-family: ui-monospace, monospace; font-size: 12px; }
-.timeline-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--app-border); }
-.timeline-row.current .timeline-dot { background: var(--app-primary); box-shadow: 0 0 0 4px var(--app-primary-soft); }
-.timeline-row div { display: grid; gap: 3px; }
-.running-box { display: flex; align-items: flex-start; gap: 10px; border-left: 3px solid var(--app-primary); background: var(--app-primary-soft); padding: 10px 12px; color: var(--app-primary); }
-.running-box div { display: grid; gap: 3px; }
-.running-box span { color: var(--app-text-muted); font-size: 11px; }
-.analysis-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 16px 0; color: var(--app-text-muted); font-size: 12px; }
-.analysis-detail strong { display: block; margin-top: 2px; color: var(--app-text); }
-.health-panel { padding-bottom: 16px; }
-.health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
-.health-item { display: grid; gap: 7px; border: 1px solid var(--app-border-soft); padding: 11px; }
-.health-item-title { align-items: flex-start; }
-.error-text { color: var(--app-danger) !important; overflow-wrap: anywhere; }
-.review-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.review-stat-grid div { display: grid; gap: 4px; }
-.review-stat-grid strong { color: var(--app-primary); font-size: 27px; line-height: 1; }
-.review-stat-grid span { color: var(--app-text-muted); font-size: 11px; }
-.outcome-list { margin-top: 16px; }
-.outcome-list div { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--app-border-soft); padding: 7px 0; color: var(--app-text-muted); font-size: 12px; }
-.execution-row, .holding-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.execution-row > div:last-child { display: grid; justify-items: end; gap: 3px; }
-.notification-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.notification-row.unread { border-left: 3px solid var(--app-primary); padding-left: 10px; }
-.notification-title { justify-content: flex-start; }
-.notification-title svg { color: var(--app-primary); }
-.notification-row p { margin: 6px 0; color: var(--app-text-muted); font-size: 12px; line-height: 1.6; }
-.read-mark { color: var(--app-text-muted); font-size: 11px; }
-.muted { color: var(--app-text-muted); }
-.analysis-modal-form { margin-top: 16px; }
-@media (max-width: 1250px) { .hero-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 900px) { .page-heading { align-items: flex-start; flex-direction: column; } .heading-actions { width: 100%; justify-content: flex-start; } .section-grid, .wide-first { grid-template-columns: 1fr; } }
-@media (max-width: 620px) { h1 { font-size: 30px; } .heading-actions > * { flex: 1 1 auto; } .portfolio-select { min-width: 140px; } .hero-grid, .health-grid { grid-template-columns: 1fr; } .panel-card { padding: 16px; } .review-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .timeline-row { grid-template-columns: 42px 8px minmax(0, 1fr); } .timeline-row .n-tag { grid-column: 3; justify-self: start; } .execution-row, .holding-row { align-items: flex-start; flex-wrap: wrap; } }
+.workbench-page { display: grid; gap: 18px; }.setup-card { padding: 26px; }.setup-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-bottom: 18px; }.setup-title h2 { margin: 0; font-size: 25px; }.setup-title p:not(.page-eyebrow) { margin: 7px 0 0; color: var(--text-muted); }.setup-title > svg { color: var(--primary); }.page-eyebrow { margin: 0 0 5px; color: var(--primary); font-size: 10px; font-weight: 800; letter-spacing: .08em; }.setup-list { display: grid; gap: 0; margin: 20px 0 0; padding: 0; list-style: none; }.setup-list li { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); padding: 15px 0; }.setup-list li:last-child { border-bottom: 0; }.step-index { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-weight: 800; }.setup-list li.done .step-index { background: color-mix(in srgb, var(--negative) 14%, transparent); color: var(--negative); }.step-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }.step-copy span { color: var(--text-muted); font-size: 12px; }.step-done { color: var(--negative); font-size: 12px; }.setup-note { margin: 18px 0 0; color: var(--text-muted); font-size: 12px; }.quality-banner { display: flex; align-items: flex-start; gap: 10px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--warning) 9%, var(--surface)); padding: 12px 14px; }.quality-banner > svg { flex: none; color: var(--warning); margin-top: 2px; }.quality-banner div { flex: 1; min-width: 0; }.quality-banner p { margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }.market-head { display: grid; grid-template-columns: 1.4fr 1fr auto; align-items: center; gap: 22px; border-bottom: 1px solid var(--border); padding: 4px 0 18px; }.market-head > div { display: grid; gap: 4px; }.market-head span { color: var(--text-muted); font-size: 12px; }.market-head strong { font-size: 19px; }.market-head .market-score { font-size: 36px; line-height: 1; color: var(--primary); }.market-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 18px 0 2px; }.market-summary { max-width: 760px; margin: 16px 0 0; color: var(--text-muted); line-height: 1.65; }.detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }.detail-grid div { display: grid; gap: 4px; border-left: 2px solid var(--border); padding-left: 10px; }.detail-grid span { color: var(--text-muted); font-size: 11px; }.detail-grid strong { color: var(--text); font-size: 13px; }.detail-grid + pre { max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }.decision-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 18px; align-items: stretch; }.decision-card { height: 100%; }.portfolio-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 14px; }.portfolio-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 22px; color: var(--text-muted); font-size: 12px; }.risk-note { margin: 14px 0 0; border-left: 3px solid var(--risk-high); background: color-mix(in srgb, var(--risk-high) 9%, transparent); padding: 8px 10px; color: var(--text-muted); font-size: 12px; }.opportunity-list { display: grid; }.opportunity-row { display: grid; grid-template-columns: minmax(150px, .7fr) auto minmax(0, 1.8fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid var(--border); padding: 14px 0; }.opportunity-row:first-child { border-top: 0; padding-top: 0; }.opportunity-row:last-child { padding-bottom: 0; }.opportunity-identity { display: grid; gap: 3px; }.opportunity-identity small { color: var(--text-muted); font-size: 11px; }.opportunity-row p { margin: 0; color: var(--text-muted); line-height: 1.5; }.opportunity-meta, .opportunity-gate { color: var(--text-muted); font-size: 11px; white-space: nowrap; }.home-system-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; color: var(--text-muted); font-size: 12px; }.home-system-line button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--primary); cursor: pointer; }.disclaimer { margin: -7px 0 0; color: var(--text-muted); font-size: 11px; text-align: center; }
+@media (max-width: 850px) { .decision-grid { grid-template-columns: 1fr; }.market-head { grid-template-columns: 1fr 1fr; }.market-head .status-indicator { grid-column: 1 / -1; }.opportunity-row { grid-template-columns: minmax(120px, .7fr) auto; }.opportunity-row p, .opportunity-meta, .opportunity-gate { grid-column: 1 / -1; } }
+@media (max-width: 640px) { .market-metrics, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.portfolio-metrics { grid-template-columns: 1fr; }.setup-card { padding: 18px; }.setup-list li { align-items: flex-start; }.setup-list li .n-button { align-self: center; }.quality-banner { flex-wrap: wrap; }.quality-banner > .n-button { margin-left: 27px; } }
+@media (max-width: 430px) { .market-head { grid-template-columns: 1fr; }.market-head .status-indicator { grid-column: auto; }.market-metrics, .detail-grid { grid-template-columns: 1fr; }.setup-list li { flex-wrap: wrap; }.setup-list li .n-button { margin-left: 42px; } }
 </style>
