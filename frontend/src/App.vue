@@ -16,7 +16,7 @@ import {
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
 
 import { api, clearSession, hasSession } from './api'
-import type { LiveValidationReadiness, SystemHealth } from './api/types'
+import type { FuyaoStatus, LiveValidationReadiness, SystemHealth } from './api/types'
 import { clearPortfolioContext, usePortfolioContext } from './composables/portfolio'
 
 const route = useRoute()
@@ -30,6 +30,7 @@ const loadingSystemStatus = ref(false)
 const systemStatusError = ref(false)
 const systemHealth = ref<SystemHealth | null>(null)
 const liveReadiness = ref<LiveValidationReadiness | null>(null)
+const fuyaoStatus = ref<FuyaoStatus | null>(null)
 let systemStatusRequest: Promise<void> | null = null
 const isLogin = computed(() => route.name === 'login')
 const {
@@ -66,10 +67,11 @@ const systemStatus = computed<'ok' | 'setup' | 'degraded' | 'loading'>(() => {
   if (!systemHealth.value || !liveReadiness.value) return 'degraded'
   if (systemHealth.value.status !== 'OK') return 'degraded'
   if (!portfolios.value.length) return 'setup'
+  if (fuyaoStatus.value && !fuyaoStatus.value.configured) return 'setup'
   return liveReadiness.value.status === 'READY' ? 'ok' : 'setup'
 })
-const systemStatusLabel = computed(() => ({ ok: '正常', setup: '需要配置', degraded: '异常', loading: '检查中' }[systemStatus.value]))
-const systemStatusHint = computed(() => ({ ok: '系统健康且已具备当前验证条件', setup: '系统尚未满足当前验证条件', degraded: '系统健康检查失败或存在异常', loading: '正在检查系统状态' }[systemStatus.value]))
+const systemStatusLabel = computed(() => ({ ok: '正常', setup: '需要配置', degraded: '数据受限', loading: '检查中' }[systemStatus.value]))
+const systemStatusHint = computed(() => ({ ok: '系统健康且已具备当前验证条件', setup: '系统尚未满足当前验证条件或 Fuyao 尚未配置', degraded: '系统健康检查失败或核心数据受限', loading: '正在检查系统状态' }[systemStatus.value]))
 
 async function loadSystemStatus(): Promise<void> {
   if (systemStatusRequest) return systemStatusRequest
@@ -77,14 +79,16 @@ async function loadSystemStatus(): Promise<void> {
 
   loadingSystemStatus.value = true
   systemStatusError.value = false
-  const request = Promise.all([api.getSystemHealth(), api.getLiveValidationReadiness()])
-    .then(([health, readiness]) => {
+  const request = Promise.all([api.getSystemHealth(), api.getLiveValidationReadiness(), api.getFuyaoStatus()])
+    .then(([health, readiness, fuyao]) => {
       systemHealth.value = health
       liveReadiness.value = readiness
+      fuyaoStatus.value = fuyao
     })
     .catch(() => {
       systemHealth.value = null
       liveReadiness.value = null
+      fuyaoStatus.value = null
       systemStatusError.value = true
     })
   systemStatusRequest = request
@@ -100,6 +104,7 @@ async function loadSystemStatus(): Promise<void> {
 function resetSystemStatus() {
   systemHealth.value = null
   liveReadiness.value = null
+  fuyaoStatus.value = null
   systemStatusError.value = false
 }
 

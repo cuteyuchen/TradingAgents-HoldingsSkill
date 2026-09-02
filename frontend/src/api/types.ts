@@ -63,6 +63,71 @@ export interface DailyDashboard {
   notifications: OperatingNotificationList & DashboardSection
 }
 
+export interface FuyaoCapabilityStatus {
+  status: string
+  code?: number | null
+  request_id?: string | null
+  latency_ms?: number | null
+  message?: string | null
+}
+
+export interface FuyaoStatus {
+  provider: 'fuyao' | string
+  configured: boolean
+  connection_status: string
+  capabilities: Record<string, FuyaoCapabilityStatus>
+}
+
+export interface FuyaoMarketBrief {
+  risk: Record<string, any>
+  breadth: Record<string, any>
+  turnover: Record<string, any>
+  major_indices: Array<Record<string, any>>
+  industry: Record<string, any>
+  sentiment: Record<string, any>
+  data_quality: Record<string, any>
+}
+
+export interface FuyaoContributionItem {
+  code: string
+  name?: string | null
+  qty?: number | null
+  confirmed_market_value?: number | null
+  current_price?: number | null
+  today_change_pct?: number | null
+  market_value?: number | null
+  contribution_pct?: number | null
+  quote_quality: string
+  provider?: string | null
+}
+
+export interface FuyaoContribution {
+  portfolio_id: number
+  snapshot_id: number
+  snapshot_time: string
+  confirmed: boolean
+  provider?: string | null
+  provider_attempts?: Array<Record<string, any>>
+  items: FuyaoContributionItem[]
+  requested_count: number
+  quoted_count: number
+  coverage: number
+  missing_quote_count: number
+  quality_status: string
+  missing_aware: boolean
+}
+
+export interface FuyaoSecurityContext {
+  code: string
+  quote?: Record<string, any> | null
+  fundamental_summary: Record<string, any>
+  valuation: Record<string, any>
+  financials: Record<string, any>
+  pit_status: string
+  historical_pit_status: string
+  evidence?: Record<string, any>
+}
+
 export interface User {
   id: number
   email: string

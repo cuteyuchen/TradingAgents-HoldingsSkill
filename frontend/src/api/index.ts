@@ -6,6 +6,10 @@ import type {
   BacktestRun,
   CalibrationReport,
   DailyDashboard,
+  FuyaoContribution,
+  FuyaoMarketBrief,
+  FuyaoSecurityContext,
+  FuyaoStatus,
   DashboardDiagnostics,
   DashboardHealth,
   DashboardTimeline,
@@ -353,6 +357,10 @@ export const api = {
   getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
+  getFuyaoStatus: (probe = false) => request<FuyaoStatus>(`/api/v3/fuyao/status${probe ? '?probe=true' : ''}`),
+  getFuyaoMarketBrief: (refresh = false) => request<{ brief: FuyaoMarketBrief; score: Record<string, any>; production_score_changed: boolean; all_a_median_definition: string; top5_definition: string }>(`/api/v3/fuyao/market-brief${refresh ? '?refresh=true' : ''}`),
+  getFuyaoSecurityContext: (code: string) => request<FuyaoSecurityContext>(`/api/v3/fuyao/securities/${encodeURIComponent(code)}`),
+  getPortfolioContribution: (portfolioId: number) => request<FuyaoContribution>(`/api/v3/fuyao/portfolios/${portfolioId}/contribution`),
   getReplayAvailability: (params: { start_date?: string; end_date?: string; portfolio_id?: number } = {}) => {
     const query = new URLSearchParams()
     if (params.start_date) query.set('start_date', params.start_date)

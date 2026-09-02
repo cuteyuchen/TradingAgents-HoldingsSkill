@@ -5,7 +5,7 @@ import { ArrowRight, CircleAlert, Plus, RefreshCw, Sparkles } from 'lucide-vue-n
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { DailyDashboard, ModelProfile, ModelProvider, Portfolio } from '../api/types'
+import type { DailyDashboard, FuyaoMarketBrief, ModelProfile, ModelProvider, Portfolio } from '../api/types'
 import DecisionHero from '../components/DecisionHero.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
@@ -23,6 +23,7 @@ const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const dashboard = ref<DailyDashboard | null>(null)
+const marketBrief = ref<FuyaoMarketBrief | null>(null)
 const providers = ref<ModelProvider[]>([])
 const profiles = ref<ModelProfile[]>([])
 const loading = ref(false)
@@ -83,6 +84,18 @@ const marketRegime = computed(() => ({ BULL: '偏强', BEAR: '偏弱', NEUTRAL: 
 
 function metricValue(value: unknown, digits = 1) {
   return value == null || value === '' ? '不可用' : formatNumber(value, digits)
+}
+
+function percentPoint(value: unknown, digits = 2) {
+  if (value == null || value === '') return '不可用'
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? `${parsed.toFixed(digits)}%` : '不可用'
+}
+
+function countValue(value: unknown) {
+  if (value == null || value === '') return '不可用'
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? String(Math.round(parsed)) : '不可用'
 }
 
 function ratioOrScore(value: unknown) {
@@ -149,6 +162,15 @@ async function loadDashboard(silent = false) {
   }
 }
 
+async function loadMarketBrief() {
+  try {
+    marketBrief.value = (await api.getFuyaoMarketBrief()).brief
+  } catch {
+    // Enrichment is optional; the persisted Market Score remains visible.
+    marketBrief.value = null
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = null
@@ -159,7 +181,7 @@ async function load() {
     const [providerRows, profileRows] = await Promise.all([api.listProviders(), api.listProfiles()])
     providers.value = providerRows
     profiles.value = profileRows
-    await loadDashboard(true)
+    await Promise.all([loadDashboard(true), loadMarketBrief()])
   } catch (reason) {
     error.value = reason
   } finally {
@@ -187,7 +209,7 @@ async function createPortfolio() {
 
 function startRefresh() {
   if (refreshTimer !== null) window.clearInterval(refreshTimer)
-  refreshTimer = window.setInterval(() => void loadDashboard(true), 30_000)
+  refreshTimer = window.setInterval(() => void Promise.all([loadDashboard(true), loadMarketBrief()]), 30_000)
 }
 
 watch(selectedPortfolioId, (id, previous) => {
@@ -225,6 +247,11 @@ onUnmounted(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer
         <div class="market-head"><div><strong class="market-score mono-number">{{ metricValue(market.score, 1) }}</strong><span>Market Score</span></div><div><strong>{{ marketRegime }}</strong><span>{{ market.regime || 'Regime 不可用' }}</span></div><StatusIndicator :status="marketStatus === 'VALID' || marketStatus === 'FRESH' ? 'ok' : 'degraded'" :label="market.quality_status === 'VALID' ? '质量正常' : '需要关注'" /></div>
         <div class="market-metrics"><MetricTile label="全 A 中位数" :value="metricValue(market.all_a_median?.index_value, 2)" helper="最近可用交易日" /><MetricTile label="成交集中度" :value="formatPercent(market.components?.top5_turnover_concentration)" /><MetricTile label="市场广度" :value="ratioOrScore(market.advance_ratio ?? market.breadth_ratio ?? market.components?.breadth)" /><MetricTile label="覆盖率" :value="formatPercent(market.coverage ?? market.metrics?.coverage)" /></div>
         <p class="market-summary">{{ market.summary || (market.components?.breadth != null ? `市场广度指标为 ${metricValue(market.components.breadth, 1)}，建议结合组合暴露决定是否增加风险。` : '当前市场数据已加载，可在详情中查看量化指标。') }}</p>
+        <div v-if="marketBrief" class="market-context" data-testid="fuyao-market-context">
+          <div class="context-block"><span class="context-label">主要指数</span><div v-if="marketBrief.major_indices.length" class="context-items"><span v-for="index in marketBrief.major_indices.slice(0, 3)" :key="index.thscode || index.name"><strong>{{ index.name || index.thscode || '指数' }}</strong><em :class="Number(index.change_pct) >= 0 ? 'pos' : 'neg'">{{ percentPoint(index.change_pct) }}</em></span></div><span v-else class="context-empty">不可用</span></div>
+          <div class="context-block"><span class="context-label">行业强弱</span><div class="context-items"><span><strong>领涨 {{ marketBrief.industry?.leaders?.[0]?.name || '不可用' }}</strong><em class="pos">{{ percentPoint(marketBrief.industry?.leaders?.[0]?.change_pct) }}</em></span><span><strong>领跌 {{ marketBrief.industry?.laggards?.[0]?.name || '不可用' }}</strong><em class="neg">{{ percentPoint(marketBrief.industry?.laggards?.[0]?.change_pct) }}</em></span></div></div>
+          <div class="context-block"><span class="context-label">市场情绪</span><div class="context-items"><span><strong>涨停</strong><em>{{ countValue(marketBrief.sentiment?.limit_up_count) }}</em></span><span><strong>跌停</strong><em>{{ countValue(marketBrief.sentiment?.limit_down_count) }}</em></span><span><strong>异动</strong><em>{{ countValue(marketBrief.sentiment?.abnormal_count) }}</em></span></div></div>
+        </div>
         <TechnicalDetails v-if="indicatorsOpen" title="市场指标与数据质量" name="market-details" :default-open="true"><div class="detail-grid"><div><span>Trend</span><strong>{{ metricValue(market.components?.trend) }}</strong></div><div><span>Liquidity</span><strong>{{ metricValue(market.components?.liquidity) }}</strong></div><div><span>Profitability</span><strong>{{ metricValue(market.components?.profitability) }}</strong></div><div><span>Diffusion</span><strong>{{ metricValue(market.components?.diffusion) }}</strong></div><div><span>Crowding</span><strong>{{ metricValue(market.components?.crowding) }}</strong></div><div><span>Tail Risk</span><strong>{{ metricValue(market.components?.tail_risk) }}</strong></div><div><span>Coverage</span><strong>{{ formatPercent(market.coverage ?? market.metrics?.coverage) }}</strong></div><div><span>Source</span><strong>{{ market.market_score_source || '—' }}</strong></div></div><pre>{{ JSON.stringify({ market, data_health: dashboard.data_health }, null, 2) }}</pre></TechnicalDetails>
       </SectionCard>
 
@@ -256,8 +283,8 @@ onUnmounted(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer
 </template>
 
 <style scoped>
-.workbench-page { display: grid; gap: 18px; }.setup-card { padding: 26px; }.setup-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-bottom: 18px; }.setup-title h2 { margin: 0; font-size: 25px; }.setup-title p:not(.page-eyebrow) { margin: 7px 0 0; color: var(--text-muted); }.setup-title > svg { color: var(--primary); }.page-eyebrow { margin: 0 0 5px; color: var(--primary); font-size: 10px; font-weight: 800; letter-spacing: .08em; }.setup-list { display: grid; gap: 0; margin: 20px 0 0; padding: 0; list-style: none; }.setup-list li { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); padding: 15px 0; }.setup-list li:last-child { border-bottom: 0; }.step-index { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-weight: 800; }.setup-list li.done .step-index { background: color-mix(in srgb, var(--negative) 14%, transparent); color: var(--negative); }.step-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }.step-copy span { color: var(--text-muted); font-size: 12px; }.step-done { color: var(--negative); font-size: 12px; }.setup-note { margin: 18px 0 0; color: var(--text-muted); font-size: 12px; }.quality-banner { display: flex; align-items: flex-start; gap: 10px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--warning) 9%, var(--surface)); padding: 12px 14px; }.quality-banner > svg { flex: none; color: var(--warning); margin-top: 2px; }.quality-banner div { flex: 1; min-width: 0; }.quality-banner p { margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }.market-head { display: grid; grid-template-columns: 1.4fr 1fr auto; align-items: center; gap: 22px; border-bottom: 1px solid var(--border); padding: 4px 0 18px; }.market-head > div { display: grid; gap: 4px; }.market-head span { color: var(--text-muted); font-size: 12px; }.market-head strong { font-size: 19px; }.market-head .market-score { font-size: 36px; line-height: 1; color: var(--primary); }.market-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 18px 0 2px; }.market-summary { max-width: 760px; margin: 16px 0 0; color: var(--text-muted); line-height: 1.65; }.detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }.detail-grid div { display: grid; gap: 4px; border-left: 2px solid var(--border); padding-left: 10px; }.detail-grid span { color: var(--text-muted); font-size: 11px; }.detail-grid strong { color: var(--text); font-size: 13px; }.detail-grid + pre { max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }.decision-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 18px; align-items: stretch; }.decision-card { height: 100%; }.portfolio-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 14px; }.portfolio-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 22px; color: var(--text-muted); font-size: 12px; }.risk-note { margin: 14px 0 0; border-left: 3px solid var(--risk-high); background: color-mix(in srgb, var(--risk-high) 9%, transparent); padding: 8px 10px; color: var(--text-muted); font-size: 12px; }.opportunity-list { display: grid; }.opportunity-row { display: grid; grid-template-columns: minmax(150px, .7fr) auto minmax(0, 1.8fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid var(--border); padding: 14px 0; }.opportunity-row:first-child { border-top: 0; padding-top: 0; }.opportunity-row:last-child { padding-bottom: 0; }.opportunity-identity { display: grid; gap: 3px; }.opportunity-identity small { color: var(--text-muted); font-size: 11px; }.opportunity-row p { margin: 0; color: var(--text-muted); line-height: 1.5; }.opportunity-meta, .opportunity-gate { color: var(--text-muted); font-size: 11px; white-space: nowrap; }.home-system-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; color: var(--text-muted); font-size: 12px; }.home-system-line button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--primary); cursor: pointer; }.disclaimer { margin: -7px 0 0; color: var(--text-muted); font-size: 11px; text-align: center; }
+.workbench-page { display: grid; gap: 18px; }.setup-card { padding: 26px; }.setup-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-bottom: 18px; }.setup-title h2 { margin: 0; font-size: 25px; }.setup-title p:not(.page-eyebrow) { margin: 7px 0 0; color: var(--text-muted); }.setup-title > svg { color: var(--primary); }.page-eyebrow { margin: 0 0 5px; color: var(--primary); font-size: 10px; font-weight: 800; letter-spacing: .08em; }.setup-list { display: grid; gap: 0; margin: 20px 0 0; padding: 0; list-style: none; }.setup-list li { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); padding: 15px 0; }.setup-list li:last-child { border-bottom: 0; }.step-index { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-weight: 800; }.setup-list li.done .step-index { background: color-mix(in srgb, var(--negative) 14%, transparent); color: var(--negative); }.step-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }.step-copy span { color: var(--text-muted); font-size: 12px; }.step-done { color: var(--negative); font-size: 12px; }.setup-note { margin: 18px 0 0; color: var(--text-muted); font-size: 12px; }.quality-banner { display: flex; align-items: flex-start; gap: 10px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--warning) 9%, var(--surface)); padding: 12px 14px; }.quality-banner > svg { flex: none; color: var(--warning); margin-top: 2px; }.quality-banner div { flex: 1; min-width: 0; }.quality-banner p { margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }.market-head { display: grid; grid-template-columns: 1.4fr 1fr auto; align-items: center; gap: 22px; border-bottom: 1px solid var(--border); padding: 4px 0 18px; }.market-head > div { display: grid; gap: 4px; }.market-head span { color: var(--text-muted); font-size: 12px; }.market-head strong { font-size: 19px; }.market-head .market-score { font-size: 36px; line-height: 1; color: var(--primary); }.market-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 18px 0 2px; }.market-summary { max-width: 760px; margin: 16px 0 0; color: var(--text-muted); line-height: 1.65; }.market-context { display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 14px; margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }.context-block { display: grid; gap: 7px; min-width: 0; }.context-label { color: var(--text-muted); font-size: 11px; }.context-items { display: flex; flex-wrap: wrap; gap: 7px 14px; }.context-items span { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--text); font-size: 12px; }.context-items strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.context-items em { color: var(--text-muted); font-style: normal; font-variant-numeric: tabular-nums; white-space: nowrap; }.context-empty { color: var(--text-muted); font-size: 12px; }.detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }.detail-grid div { display: grid; gap: 4px; border-left: 2px solid var(--border); padding-left: 10px; }.detail-grid span { color: var(--text-muted); font-size: 11px; }.detail-grid strong { color: var(--text); font-size: 13px; }.detail-grid + pre { max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }.decision-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 18px; align-items: stretch; }.decision-card { height: 100%; }.portfolio-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 14px; }.portfolio-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 22px; color: var(--text-muted); font-size: 12px; }.risk-note { margin: 14px 0 0; border-left: 3px solid var(--risk-high); background: color-mix(in srgb, var(--risk-high) 9%, transparent); padding: 8px 10px; color: var(--text-muted); font-size: 12px; }.opportunity-list { display: grid; }.opportunity-row { display: grid; grid-template-columns: minmax(150px, .7fr) auto minmax(0, 1.8fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid var(--border); padding: 14px 0; }.opportunity-row:first-child { border-top: 0; padding-top: 0; }.opportunity-row:last-child { padding-bottom: 0; }.opportunity-identity { display: grid; gap: 3px; }.opportunity-identity small { color: var(--text-muted); font-size: 11px; }.opportunity-row p { margin: 0; color: var(--text-muted); line-height: 1.5; }.opportunity-meta, .opportunity-gate { color: var(--text-muted); font-size: 11px; white-space: nowrap; }.home-system-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; color: var(--text-muted); font-size: 12px; }.home-system-line button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--primary); cursor: pointer; }.disclaimer { margin: -7px 0 0; color: var(--text-muted); font-size: 11px; text-align: center; }
 @media (max-width: 850px) { .decision-grid { grid-template-columns: 1fr; }.market-head { grid-template-columns: 1fr 1fr; }.market-head .status-indicator { grid-column: 1 / -1; }.opportunity-row { grid-template-columns: minmax(120px, .7fr) auto; }.opportunity-row p, .opportunity-meta, .opportunity-gate { grid-column: 1 / -1; } }
-@media (max-width: 640px) { .market-metrics, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.portfolio-metrics { grid-template-columns: 1fr; }.setup-card { padding: 18px; }.setup-list li { align-items: flex-start; }.setup-list li .n-button { align-self: center; }.quality-banner { flex-wrap: wrap; }.quality-banner > .n-button { margin-left: 27px; } }
+@media (max-width: 640px) { .market-context { grid-template-columns: 1fr; }.market-metrics, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.portfolio-metrics { grid-template-columns: 1fr; }.setup-card { padding: 18px; }.setup-list li { align-items: flex-start; }.setup-list li .n-button { align-self: center; }.quality-banner { flex-wrap: wrap; }.quality-banner > .n-button { margin-left: 27px; } }
 @media (max-width: 430px) { .market-head { grid-template-columns: 1fr; }.market-head .status-indicator { grid-column: auto; }.market-metrics, .detail-grid { grid-template-columns: 1fr; }.setup-list li { flex-wrap: wrap; }.setup-list li .n-button { margin-left: 42px; } }
 </style>

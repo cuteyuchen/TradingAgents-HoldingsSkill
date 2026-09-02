@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { BarChart3, Bot, CalendarClock, Database, Palette, Plus, Server, ShieldCheck, SlidersHorizontal } from 'lucide-vue-next'
+import { BarChart3, Bot, CalendarClock, Database, Palette, Plus, RefreshCw, Server, ShieldCheck, SlidersHorizontal } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { ModelProvider } from '../api/types'
+import type { FuyaoCapabilityStatus, FuyaoStatus, ModelProvider } from '../api/types'
 import EmptyState from '../components/EmptyState.vue'
 import MetricTile from '../components/MetricTile.vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -26,6 +26,8 @@ const THEME_KEY = 'advisor_theme'
 const activeSection = ref<SettingSection>(sectionFromQuery(route.query.section))
 const theme = ref<'light' | 'dark'>(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light')
 const providers = ref<ModelProvider[]>([])
+const fuyaoStatus = ref<FuyaoStatus | null>(null)
+const fuyaoProbeLoading = ref(false)
 const loading = ref(false)
 const loadError = ref<unknown>(null)
 const createOpen = ref(false)
@@ -63,6 +65,27 @@ const dataStatus = computed<'ok' | 'setup' | 'degraded'>(() => {
 })
 const dataStatusLabel = computed(() => ({ ok: '数据入口正常', setup: '需要配置', degraded: '需要检查' }[dataStatus.value]))
 const currentSnapshotText = computed(() => selectedPortfolio.value?.latest_snapshot_time || '尚未确认')
+const fuyaoCapabilityLabels: Record<string, string> = {
+  quotes: '行情',
+  calendar: '交易日历',
+  historical: '历史行情',
+  market_dumps: '市场导出',
+  corporate_actions: '复权事件',
+  financials: '财务',
+  valuation: '估值',
+  index: '指数',
+  fund: '基金 / ETF',
+  special_data: '特色数据',
+}
+const fuyaoCapabilities = computed(() => Object.entries(fuyaoStatus.value?.capabilities || {}).map(([key, value]) => ({ key, label: fuyaoCapabilityLabels[key] || key, value })))
+
+function fuyaoStatusType(status: FuyaoCapabilityStatus | string | undefined): 'success' | 'warning' | 'error' | 'info' | 'default' {
+  const value = typeof status === 'string' ? status : status?.status
+  if (value === '已连接' || value === '已配置') return 'success'
+  if (value === '上游异常') return 'error'
+  if (value === '未授权' || value === '限流' || value === '数据未就绪' || value === '未配置') return 'warning'
+  return 'info'
+}
 
 async function load() {
   loading.value = true
@@ -70,10 +93,24 @@ async function load() {
   try {
     await loadPortfolios()
     providers.value = await api.listProviders()
+    fuyaoStatus.value = await api.getFuyaoStatus().catch(() => null)
   } catch (reason) {
     loadError.value = reason
   } finally {
     loading.value = false
+  }
+}
+
+async function probeFuyao() {
+  if (!fuyaoStatus.value?.configured || fuyaoProbeLoading.value) return
+  fuyaoProbeLoading.value = true
+  try {
+    fuyaoStatus.value = await api.getFuyaoStatus(true)
+    message.success('Fuyao 能力状态已更新')
+  } catch (reason) {
+    message.error((reason as Error).message)
+  } finally {
+    fuyaoProbeLoading.value = false
   }
 }
 
@@ -133,6 +170,12 @@ onMounted(() => void load())
               <MetricTile label="最近确认快照" :value="currentSnapshotText" />
               <MetricTile label="可用模型供应商" :value="providers.filter((item) => item.enabled).length" />
             </div>
+          </SectionCard>
+          <SectionCard title="同花顺金融数据" description="Fuyao 是主要 production financial data provider；能力不可用时，核心行情仍按配置回退，状态不会被伪装为健康。">
+            <template #actions><n-button secondary size="small" :loading="fuyaoProbeLoading" :disabled="!fuyaoStatus?.configured" @click="probeFuyao"><template #icon><RefreshCw :size="14" /></template>探测能力</n-button></template>
+            <div class="fuyao-summary"><div><span>连接状态</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(fuyaoStatus?.connection_status)">{{ fuyaoStatus?.connection_status || '未读取' }}</n-tag></div><div><span>配置状态</span><n-tag size="small" :bordered="false" :type="fuyaoStatus?.configured ? 'success' : 'warning'">{{ fuyaoStatus?.configured ? '已配置' : '未配置' }}</n-tag></div></div>
+            <div class="capability-grid"><div v-for="item in fuyaoCapabilities" :key="item.key"><span>{{ item.label }}</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(item.value)">{{ item.value.status || '未知' }}</n-tag></div><p v-if="!fuyaoCapabilities.length" class="muted">暂未读取能力状态。</p></div>
+            <p class="fuyao-note">API Key 仅在后端运行时使用；此处不会显示、保存或回传密钥。</p>
           </SectionCard>
           <SectionCard title="我的组合" description="组合仍由后端 Auth/Ownership 保护；这里只提供进入持仓工作流的入口。">
             <template #actions><n-button secondary size="small" @click="createOpen = true"><template #icon><Plus :size="15" /></template>新建组合</n-button></template>
@@ -206,6 +249,7 @@ onMounted(() => void load())
 .flow-summary strong { color: var(--primary); font-size: 22px; }
 .flow-summary span { color: var(--text-muted); font-size: 12px; }
 .section-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.fuyao-summary { display: flex; flex-wrap: wrap; gap: 12px 28px; margin-bottom: 16px; }.fuyao-summary > div { display: flex; align-items: center; gap: 8px; }.fuyao-summary span, .capability-grid span { color: var(--text-muted); font-size: 12px; }.capability-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }.capability-grid > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding: 10px 0; }.capability-grid p { grid-column: 1 / -1; margin: 0; }.fuyao-note { margin: 16px 0 0; color: var(--text-muted); font-size: 12px; }
 .appearance-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .theme-choice { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 13px; color: var(--text); text-align: left; cursor: pointer; }
 .theme-choice.selected { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
@@ -218,5 +262,5 @@ onMounted(() => void load())
 .preference-note strong { color: var(--text); }
 .preference-note p { margin: 4px 0 0; color: var(--text-muted); }
 @media (max-width: 900px) { .settings-layout { grid-template-columns: 1fr; }.settings-sidebar { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); }.metric-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 620px) { .settings-sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }.appearance-choice, .flow-summary { grid-template-columns: 1fr; }.portfolio-row { grid-template-columns: 1fr auto; }.portfolio-row > .n-button { grid-column: 1 / -1; width: 100%; }.metric-grid.four { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .settings-sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }.appearance-choice, .flow-summary, .capability-grid { grid-template-columns: 1fr; }.portfolio-row { grid-template-columns: 1fr auto; }.portfolio-row > .n-button { grid-column: 1 / -1; width: 100%; }.metric-grid.four { grid-template-columns: 1fr; } }
 </style>
