@@ -2,9 +2,9 @@
 
 ## 当前状态
 
-记录日期：2026-09-01
+记录日期：2026-09-02
 
-阶段：O.2-A 环境准备完成；O.2-B 尚未开始，等待用户本人完成 Manual UAT。
+阶段：O.2-A 环境准备完成；O.2 UX 重构自动化通过；O.2-B 尚未开始，等待用户本人完成新版 Manual UAT。
 
 应用代码基线 SHA：`d6f9d91543aa90eef0fcbf414ac869ad1b85a646`
 
@@ -18,6 +18,17 @@ Acceptance mode：`OFF`
 
 本文件记录 O.2-A 的 readiness 基线，不把 smoke 结果写成 Live Evidence，也不提前进入
 Phase P。只有用户明确确认 `MANUAL_UAT = PASS` 后，才可以按实时 endpoint 重新开始 O.2-B。
+
+## O.2 UX 自动化记录
+
+2026-09-02 的本地工程验证已完成：前端 typecheck/build 通过，后端全量 `428 passed`，
+Playwright acceptance `20 passed`，Alembic `heads/current` 均为 `20260829_0020`，无新增
+migration；独立 Docker smoke 完成 health、注册登录、鉴权 API、六个新路由和六个旧 alias
+的 HTML 及无头 Chromium 渲染检查后已清理。
+
+这些结果只证明实现和自动化验证，不产生真实行情、真实组合快照、真实分析或 Live Evidence。
+新版界面的 `MANUAL_UAT` 仍为 `REQUIRED`，由用户本人实际使用确认；`LIVE_READINESS` 仍为
+`NOT_READY`，`PHASE_O_FINAL` 仍为 `HOLD_FOR_REDESIGNED_MANUAL_UAT`。
 
 ## Readiness Endpoint 基线
 
@@ -64,4 +75,5 @@ quote observation 已产生，也不绕过 readiness gate。
 - 用户通过 UI 创建的 paper-only Shadow，以及真实 future quote observation。
 - verified backup freshness、monitor/scheduler authority 和其余运行治理核验。
 
-当前结论：`LIVE_READINESS = NOT_READY`；`MANUAL_UAT = REQUIRED`；`PHASE_O_FINAL = HOLD_FOR_MANUAL_UAT`。
+当前结论：`LIVE_READINESS = NOT_READY`；`MANUAL_UAT = REQUIRED`；
+`PHASE_O_FINAL = HOLD_FOR_REDESIGNED_MANUAL_UAT`。

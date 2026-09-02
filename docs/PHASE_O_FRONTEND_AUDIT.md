@@ -1,10 +1,10 @@
 # Phase O Frontend Product Audit
 
-审计日期：2026-09-01
-Baseline SHA：`3d68a777ebfd9aed6117778397bae99ba53edccc`
+审计日期：2026-09-02
+Baseline SHA：`1e000b086e45cf550ae7740199cd9b4a3111afc7`
 Branch：`codex/phase-o-frontend-productization`
 Phase O 实现基线 SHA：`c6147bc979c629ab7e339b4bab4355347a023a6d`
-Phase O.1 验证结果以最终交付报告中的提交 SHA 为准。
+Phase O.2 UX 重构的最终提交 SHA 以最终交付报告中的提交 SHA 为准。
 
 ## 审计范围
 
@@ -30,6 +30,20 @@ FastAPI 路由，以及 Phase H～N 验收文档。`当前可用` 描述源码�
 
 页面 PASS 仅表示源码、真实 API 链路和可重复浏览器验收已经通过；它不代表真实
 行情已经具备，也不替代人工 UAT。
+
+## O.2 UX 页面矩阵补充
+
+| 用户页面 | 用户问题 | 旧能力来源 | 自动化状态 |
+|---|---|---|---|
+| `/dashboard` | 今天该不该动 | Dashboard、市场摘要、Final Decision | PASS |
+| `/holdings` | 我现在持有什么，如何更新 | Upload、Portfolio Snapshot | PASS |
+| `/analysis` | 为什么这样建议 | Reports、Decision、Candidate | PASS |
+| `/simulation` | 如果跟随建议会发生什么 | Shadow Validation | PASS |
+| `/history` | 过去表现与研究证据是什么 | Shadow、Research | PASS |
+| `/settings` | 如何配置与检查系统 | Settings、Governance、System | PASS |
+
+旧 `/upload`、`/reports`、`/shadow`、`/research`、`/governance`、`/system` 均由
+router alias 兼容，并在浏览器验收中验证。
 
 ## 共享产品基础设施
 
@@ -78,12 +92,13 @@ FastAPI 路由，以及 Phase H～N 验收文档。`当前可用` 描述源码�
 
 ## 自动化 Gate 结果
 
-- Playwright acceptance：`PASS`，15/15，运行于真实 Vue + FastAPI + SQLAlchemy +
-  isolated SQLite。
+- Playwright acceptance：`PASS`，20/20，运行于真实 Vue + FastAPI + SQLAlchemy +
+  isolated SQLite；包含新 Shell、First Run、Final Decision、技术详情、旧 alias、
+  1366×768 / 1440×900 / 1920×1080 smoke。
 - Browser console/pageerror：`PASS`，未发现未处理 `console.error`、`pageerror` 或
   unhandled rejection。
 - Desktop screenshots：`PASS`，覆盖 1366×768、1440×900、1920×1080。
-- Backend regression：`PASS`，当前本地全量 `427 passed`。
+- Backend regression：`PASS`，当前本地全量 `428 passed`。
 - Frontend typecheck/build：`PASS`。
 - Alembic：`20260829_0020`，无 Phase O.1 migration。
 - Docker build 和独立 Compose runtime smoke：`PASS`；使用独立 project、volume 和

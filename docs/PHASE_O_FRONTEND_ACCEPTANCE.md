@@ -1,32 +1,36 @@
-# Phase O Frontend Acceptance
+# Phase O Frontend Acceptance / O.2 UX Rework
 
-验收日期：2026-09-01
-Baseline SHA：`3d68a777ebfd9aed6117778397bae99ba53edccc`
+验收日期：2026-09-02
+Baseline SHA：`1e000b086e45cf550ae7740199cd9b4a3111afc7`
 Branch：`codex/phase-o-frontend-productization`
-Phase O 实现基线 SHA：`c6147bc979c629ab7e339b4bab4355347a023a6d`
-Phase O.1 验证结果以最终交付报告中的提交 SHA 为准。
+当前记录：Phase O.2 Single-User Investment Workbench UX Rework。
 
 ## Gate 结论
 
 | Gate | 结论 | 依据 |
 |---|---|---|
-| Frontend source/product audit | PASS | `PHASE_O_FRONTEND_AUDIT.md`、`PHASE_O_API_UI_MATRIX.md` |
+| UX-0 Implementation Map | PASS | `docs/PHASE_O2_UX_IMPLEMENTATION_MAP.md` |
+| UX-1 Shell / Navigation / Alias | PASS | 六个用户路由、旧 deep-link、Auth/Ownership 和单用户 Header |
+| UX-2 Home / Holdings | PASS | First Run、Market Pulse、Final Decision、持仓表和更新 Drawer |
+| UX-3 Analysis / Simulation | PASS | 分析状态、四类决策语义、Candidate Veto、Shadow 时间线 |
+| UX-4 History / Settings | PASS | 历史表现、Research、Governance/System 高级设置分区 |
+| UX-5 Empty / Error / Responsive | PASS | Light/Dark、1366×768、1440×900、1920×1080 和稳定占位 |
 | Frontend typecheck | PASS | `frontend`: `npm run typecheck` |
 | Frontend production build | PASS | `frontend`: `npm run build` |
-| Backend full regression | PASS | `backend`: `427 passed` |
-| Real browser Playwright acceptance | PASS | `npm run e2e:acceptance`；15/15；真实 Vue + FastAPI + SQLAlchemy + isolated SQLite |
-| Desktop visual QA | PASS | 同一 acceptance 覆盖 1366×768、1440×900、1920×1080，并保存 screenshots |
-| Docker production-like build/runtime | PASS | `docker compose build`；独立 Compose project/volume 完成 health、注册登录、API、deep-link HTML 刷新 smoke |
-| GitHub CI acceptance configuration | PASS | `.github/workflows/ci.yml` 已加入 Node 20、Python 3.12、Chromium 和 artifact 上传的 `frontend-acceptance` job |
-| Frontend Acceptance overall | PASS | 自动化 acceptance 已封板；人工 UAT 仍保持 `REQUIRED` |
+| Backend full regression | PASS | `backend`: `python -m pytest tests -q`；`428 passed` |
+| Real browser Playwright acceptance | PASS | `npm run e2e:acceptance`；隔离 SQLite；`20 passed`；包含 UX acceptance |
+| Docker production-like build/runtime | PASS | build、health、注册登录、鉴权 API、六个新路由和六个旧 alias；HTTP 与无头 Chromium smoke |
+| GitHub exact-head CI | 待 push 后验证 | backend、frontend、frontend-acceptance、docker |
+| Frontend Acceptance overall | PASS（本地自动化） | 自动化通过后仍保持 `MANUAL_UAT = REQUIRED`；远端 exact-head CI 待 push |
 
 远端精确 SHA 的 GitHub Actions 结果以 PR/Actions 为准；本地自动化验证不替代远端
 CI，也不替代用户人工 UAT。
 
 ## 已验证的功能面
 
-- 路由覆盖 `/login`、`/dashboard`、`/upload`、`/reports`、`/shadow`、
-  `/research`、`/governance`、`/system`、`/settings`。
+- 路由覆盖 `/login`、`/dashboard`、`/holdings`、`/analysis`、`/simulation`、
+  `/history`、`/settings`；`/upload`、`/reports`、`/shadow`、`/research`、
+  `/governance`、`/system` 继续作为兼容 alias。
 - Auth happy path、logout、access token 失效后 refresh 成功，以及 refresh 失效后清
   session 并跳转 `/login?expired=1`。
 - Portfolio context 在 Dashboard、Reports、Research、Shadow 间保持正确组合；
@@ -66,35 +70,39 @@ CI，也不替代用户人工 UAT。
   生效；生产默认关闭，不提供 production HTTP test-control 路由，不绕过 Auth/Ownership，
   不改变投资算法或 Shadow authority。
 - Acceptance artifacts：`output/playwright/acceptance/`，包含 `playwright-report`、
-  `test-results`、trace、screenshots、video（失败时）、service logs 和 `facts.json`。
+  `test-results`、screenshots、service logs 和 `facts.json`；PNG/日志只作 CI artifact，
+  不提交到 Git。失败 trace/video 是否启用由磁盘容量和 CI 配置决定。
 - Alembic：`heads/current/upgrade head` 均为 `20260829_0020`；Phase O.1 无 migration。
 - Docker：镜像 `docker compose build` 通过；独立 Compose project、volume、高位临时端口
-  完成 health、注册登录、受保护 API 和 `/shadow`、`/research`、`/system` 的 HTML
-  deep-link smoke，测试后清理 volume。未触碰已有运行容器或真实数据卷。
+  完成 health、注册登录、受保护 API、六个新路由和六个旧 alias 的 HTML deep-link smoke，
+  并由无头 Chromium 完成登录后 12 条路由渲染 smoke；测试后清理 volume。未触碰已有
+  `phase-o2-manual-uat` 容器或真实数据卷。
 - GitHub CI 已配置 backend、frontend、docker 和 `frontend-acceptance` jobs；acceptance
   job 不依赖 OpenAI、broker、webhook 或私有行情 credential。
 
-## 仍然保留
+## O.2 UX 重构状态
 
 ```text
+AUTOMATED_IMPLEMENTATION = PASS
 AUTOMATED_FRONTEND_ACCEPTANCE = PASS
 LIVE_READINESS = NOT_READY
 MANUAL_UAT = REQUIRED
+PHASE_O_FINAL = HOLD_FOR_REDESIGNED_MANUAL_UAT
 ```
 
-自动化 acceptance PASS 不等于 Manual UAT PASS。用户完成
-`docs/PHASE_O_MANUAL_UAT.md` 前，不得把 `MANUAL_UAT` 改为 PASS，不得进入 Phase P，
-也不得把整个 Phase O 的最终状态写成 PASS。
+自动化 acceptance PASS 不等于 Manual UAT PASS。用户必须重新实际使用新版工作台并完成
+`docs/PHASE_O_MANUAL_UAT.md`；在此之前不得把 `MANUAL_UAT` 改为 PASS，不得进入 O.2-B
+或 Phase P，也不得把整个 Phase O 的最终状态写成 PASS。
 
 ## O.2-A 环境记录
 
-- 记录日期：2026-09-01。
+- 记录日期：2026-09-01；该环境记录早于本次 UX 重构，不能替代新版 UAT。
 - 环境应用代码基线：`d6f9d91543aa90eef0fcbf414ac869ad1b85a646`；本次 O.2-A 的配置、脚本和文档
   变更 exact SHA 以当前分支最终提交为准。
 - Manual UAT Docker URL：`http://127.0.0.1:18082`。
 - Acceptance mode：`OFF`；独立 Compose project 为 `phase-o2-manual-uat`，使用全新
   `phase-o2-manual-uat_advisor-data` volume。
-- 该环境的 `/dashboard`、`/reports`、`/shadow`、`/research`、`/system`、`/settings`
-  在 `Accept: text/html` 下均返回 SPA `index.html`。
+- 该环境的旧入口和新版六个用户路由均应在 `Accept: text/html` 下返回 SPA `index.html`；
+  本轮最终 Docker smoke 以 exact final SHA 重新记录。
 - 带认证的真实 readiness endpoint 当前返回 `NOT_READY`；这只是 O.2-A 环境基线，
   不代表 Manual UAT 已完成，也不启动 O.2-B。

@@ -1,10 +1,23 @@
-# Phase O Manual UAT
+# Phase O Manual UAT / UX Rework
+
+## 当前状态（2026-09-02，O.2 UX 重构后重置）
+
+```text
+AUTOMATED_FRONTEND_ACCEPTANCE = PASS
+MANUAL_UAT = REQUIRED
+LIVE_READINESS = NOT_READY
+PHASE_O_FINAL = HOLD_FOR_REDESIGNED_MANUAL_UAT
+```
+
+本轮已针对旧版“像后台管理系统、不适合每天使用”的反馈完成单用户投资驾驶舱
+重构。以上 `MANUAL_UAT = REQUIRED` 只等待用户本人重新使用新版界面确认，Codex
+不得代替用户把它改成 `PASS`。
 
 这份清单写给实际使用系统的人。Phase O.1 的自动化浏览器 acceptance 已通过，但
 它不替代目标浏览器、真实部署和用户本人确认。请逐项填写“实际”和“结果”，附截图、
 时间和 request ID（若有）；没有可用的真实数据时填写 `BLOCKED`，不要猜测通过。
 
-测试环境：Docker production-like（`phase-o2-manual-uat`）  测试用户：用户本人  日期：2026-09-01
+测试环境：Docker production-like（`phase-o2-manual-uat`）  测试用户：用户本人  日期：2026-09-02
 
 ## 运行环境记录
 
@@ -24,6 +37,22 @@ Acceptance mode：`OFF`；确认方式：System release/health 或容器有效�
 
 真实数据只保存在本地运行环境，不得提交截图、CSV、SQLite 或券商凭据。
 
+## 新版导航与兼容入口
+
+日常一级入口只有：首页、持仓、分析、模拟、历史；设置为唯一高级入口。
+
+| 用户入口 | 目标路由 | 兼容旧链接 |
+|---|---|---|
+| 首页 | `/dashboard` | `/` |
+| 持仓 | `/holdings` | `/upload` → `/holdings?action=update` |
+| 分析 | `/analysis` | `/reports` → `/analysis` |
+| 模拟 | `/simulation` | `/shadow` → `/simulation` |
+| 历史 | `/history` | `/research` → `/history?tab=research` |
+| 设置 | `/settings` | `/governance`、`/system` 分别进入设置高级分区 |
+
+人工检查时优先从 `/dashboard` 开始；旧链接只用于确认收藏链接仍可打开，不作为新版
+信息架构的主入口。
+
 ## 1. Login
 
 操作步骤：打开 `/`，确认跳转 `/login`；输入账号密码登录；退出后再次访问私有路由；
@@ -37,8 +66,9 @@ Acceptance mode：`OFF`；确认方式：System release/health 或容器有效�
 
 ## 2. Portfolio Create / Select
 
-操作步骤：登录后新建一个 Portfolio；再在 Dashboard、Reports、Research、Shadow 和
-System 间切换 Portfolio，最后切回刚创建的 Portfolio。
+操作步骤：登录后新建一个 Portfolio；再在首页、持仓、分析、模拟、历史和设置间切换，
+最后切回刚创建的 Portfolio。存在多个组合时检查 Header selector；只有一个组合时确认
+selector 隐藏。
 
 预期：Portfolio 创建成功；当前 Portfolio 标识在各页面一致；切换不会串出其他用户或其他
 Portfolio 的持仓、报告和 Shadow 数据。
@@ -49,7 +79,7 @@ Portfolio 的持仓、报告和 Shadow 数据。
 
 ## 3. Upload
 
-操作步骤：进入 `/upload`，选择或粘贴持仓截图；等待识别；检查总资产、现金、持仓和
+操作步骤：进入 `/holdings?action=update`（同时验证 `/upload` alias），选择或粘贴持仓截图；等待识别；检查总资产、现金、持仓和
 可用数量；必要时手工修正并保存；点击“仅确认快照”。
 
 预期：上传、解析、人工确认分阶段显示；未通过质量校验不能自动 confirmed；确认后出现
@@ -61,7 +91,7 @@ snapshot ID 和时间。
 
 ## 4. Holdings Review
 
-操作步骤：在 Upload 解析完成后逐项检查代码、名称、数量、可用数量、成本、现金和解析质量；
+操作步骤：在持仓页 Drawer 解析完成后逐项检查代码、名称、数量、可用数量、成本、现金和解析质量；
 手工修正一项字段后保存，再返回 Review。
 
 预期：Review 显示结构化持仓和质量问题；手工修正可保存；解析失败停留在 Review，不生成
@@ -85,8 +115,8 @@ snapshot 的 ID、时间和来源。
 
 ## 6. Dashboard / Market Card
 
-操作步骤：进入 `/dashboard`，切换至少两个 Portfolio；检查 Market、Portfolio、Today's
-Decision、Candidate、System Health、时间和 freshness。
+操作步骤：进入 `/dashboard`，切换至少两个 Portfolio；按“今日市场 → 今日建议 → 我的组合
+→ 关注机会”的顺序检查信息，确认首页只保留一行数据状态，不把 System Dashboard 搬回首页。
 
 预期：页面明确当前 Portfolio；数据来自后端；freshness、质量和 snapshot 时间可读；无
 数据时有下一步操作；昨天的 ACTION 不冒充今天结果。
@@ -121,7 +151,7 @@ Reports。
 
 ## 9. Reports
 
-操作步骤：打开 `/reports` 的 list 和 detail，查看完整分析流程、结构化证据和原始报告；
+操作步骤：打开 `/analysis`（同时验证 `/reports` alias）的 list 和 detail，查看完整分析流程、结构化证据和原始报告；
 核对 checkpoint、mode、holding actions、Candidate、quality、market context、lineage。
 
 预期：Final Portfolio Decision 比 Candidate 更明确；detail 不是只有 HTTP 200；关键证据
@@ -168,7 +198,7 @@ Candidate 不替代 Final Portfolio Decision，不显示为已执行订单。
 
 ## 13. Research
 
-操作步骤：进入 `/research`，选择 scope、replay mode、日期和 horizon，创建 Backtest；
+操作步骤：进入 `/history?tab=research`（同时验证 `/research` alias），选择 scope、replay mode、日期和 horizon，创建 Backtest；
 在运行中刷新、取消；对完成 Run 查看 metrics、limitations、hash 和 FULL/PARTIAL/DATA_GAP。
 
 预期：运行状态可恢复；取消后不能继续伪装为完成；`PARTIAL_PIT_RECOMPUTE` 明确提示
@@ -180,7 +210,7 @@ Candidate 不替代 Final Portfolio Decision，不显示为已执行订单。
 
 ## 14. Governance
 
-操作步骤：进入 `/governance`，检查 proposal/detail、DRAFT/REVIEW/ACTIVE/SUPERSEDED/
+操作步骤：进入 `/settings?section=strategy`（同时验证 `/governance` alias），检查 proposal/detail、DRAFT/REVIEW/ACTIVE/SUPERSEDED/
 REJECTED；对 APPROVED 版本点击激活。
 
 预期：出现二次确认，显示 parameter version、config hash、关键变更和 evidence；没有
@@ -192,7 +222,7 @@ Auto Apply；请求 `emergency_override=false`。
 
 ## 15. System Health / Live Readiness
 
-操作步骤：进入 `/system`，查看 DB、Schema、Disk、Backup、Provider、Scheduler、History、
+操作步骤：进入 `/settings?section=system`（同时验证 `/system` alias），查看 DB、Schema、Disk、Backup、Provider、Scheduler、History、
 Worker recovery、Monitor 和 Live Validation Readiness；点击刷新并记录 readiness endpoint
 返回的真实状态。
 
@@ -205,7 +235,7 @@ Worker recovery、Monitor 和 Live Validation Readiness；点击刷新并记录 
 
 ## 16. Shadow
 
-操作步骤：选择有 confirmed snapshot 的 Portfolio，进入 `/shadow`，创建 Shadow Account；
+操作步骤：选择有 confirmed snapshot 的 Portfolio，进入 `/simulation`（同时验证 `/shadow` alias），创建 Shadow Account；
 打开 ACTION observation，分别查看 Decision、Execution、Outcome；检查 PENDING、FILLED、
 BLOCKED、EXPIRED 和缺失数据场景。
 
@@ -252,10 +282,10 @@ Outcome 分开；`conditional_add` 明确 V1 不模拟；`DATA_GAP` 不显示 0�
 
 ## 20. SPA Refresh
 
-操作步骤：直接打开并刷新 `/dashboard`、`/reports`、`/shadow`、`/research`、`/system`、
-`/settings`，并验证浏览器前进/后退后当前 Portfolio 和 session 仍正确。
+操作步骤：直接打开并刷新 `/dashboard`、`/holdings`、`/analysis`、`/simulation`、`/history`、
+`/settings`，并验证浏览器前进/后退后当前 Portfolio 和 session 仍正确；再刷新一组旧 alias。
 
-预期：production-like 服务不返回 404；刷新后仍由 auth guard 正确判断登录状态，页面能正常加载。
+预期：production-like 服务不返回 404；刷新后仍由 auth guard 正确判断登录状态，页面能正常加载，旧 alias 仍完成迁移。
 
 实际：________________________________________________________________________________
 
