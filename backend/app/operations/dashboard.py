@@ -243,6 +243,8 @@ def _market_section(db: Session, *, cutoff: datetime) -> dict[str, Any]:
         "market_mode": market_mode,
         "market_score_source": "PREVIOUS_CLOSE" if is_previous_close else "PERSISTED_SNAPSHOT",
         "health_status": _health_status(freshness, mandatory=True, market_open=not is_pre_market),
+        "coverage": metric.coverage if metric else None,
+        "advance_ratio": metric.advance_ratio if metric else None,
         "source_lineage_status": str(metadata.get("source_lineage_status") or metadata.get("lineage_status") or "AVAILABLE").upper(),
         "delta_15m": (row.display_score - baseline.display_score) if row.display_score is not None and baseline and baseline.display_score is not None else None,
         "delta_from_open": (row.display_score - open_row.display_score) if row.display_score is not None and open_row and open_row.display_score is not None else None,

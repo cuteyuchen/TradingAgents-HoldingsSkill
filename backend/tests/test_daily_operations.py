@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.market_engine_models import MarketScoreSnapshot
+from app.market_engine_models import MarketMetricSnapshot, MarketScoreSnapshot
 from app.market_models import TradingCalendar
 from app.market_runtime_models import ProviderHealth
 from app.memory.models import DailyReviewRun, DecisionMemory
@@ -1156,6 +1156,42 @@ def test_dashboard_delta_15m_uses_matching_same_day_baseline():
             cutoff=_utc_naive(_local(day, 10, 30)),
         )
         assert section["delta_15m"] == pytest.approx(10)
+    finally:
+        db.close()
+
+
+def test_market_dashboard_exposes_authoritative_coverage_and_breadth():
+    db = _db()
+    try:
+        _user, _portfolio, _snapshot = _portfolio_fixture(db)
+        day = date(2026, 8, 20)
+        captured_at = _utc_naive(_local(day, 10, 30))
+        db.add(MarketMetricSnapshot(
+            snapshot_id="phase-o2-market-metric",
+            market="CN",
+            trade_date=day,
+            captured_at=captured_at,
+            coverage=0.97,
+            advance_ratio=0.58,
+        ))
+        db.add(MarketScoreSnapshot(
+            snapshot_id="phase-o2-market-score",
+            metric_snapshot_id="phase-o2-market-metric",
+            market="CN",
+            trade_date=day,
+            captured_at=captured_at,
+            display_score=70,
+            raw_score=70,
+            quality_status="VALID",
+            is_frozen=False,
+        ))
+        db.commit()
+
+        from app.operations import dashboard as dashboard_module
+
+        section = dashboard_module._market_section(db, cutoff=captured_at)
+        assert section["coverage"] == pytest.approx(0.97)
+        assert section["advance_ratio"] == pytest.approx(0.58)
     finally:
         db.close()
 
