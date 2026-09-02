@@ -29,6 +29,7 @@ const accounts = ref<ShadowAccount[]>([])
 const performance = ref<ShadowPerformance | null>(null)
 const validation = ref<ShadowValidation | null>(null)
 const selectedAccountId = ref<number | null>(null)
+let mounted = false
 
 const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
 const selectedAccount = computed(() => accounts.value.find((item) => item.id === selectedAccountId.value) || null)
@@ -140,13 +141,13 @@ function openRun(run: AnalysisRunSummary) {
 }
 
 watch(selectedPortfolioId, (value, previous) => {
-  if (value !== previous) void load()
+  if (mounted && value !== previous) void load()
 })
 watch(() => route.query.tab, (value) => {
   activeTab.value = value === 'research' ? 'research' : 'performance'
 })
 
-onMounted(() => void load())
+onMounted(async () => { await load(); mounted = true })
 </script>
 
 <template>

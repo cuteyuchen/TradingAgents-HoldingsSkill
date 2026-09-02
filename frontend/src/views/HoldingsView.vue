@@ -25,6 +25,7 @@ const snapshot = ref<PortfolioSnapshot | null>(null)
 const updateOpen = ref(route.query.action === 'update')
 const selectedHolding = ref<Holding | null>(null)
 const detailOpen = ref(false)
+let mounted = false
 
 const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
 const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
@@ -81,10 +82,10 @@ function openAnalysis() {
   void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined } })
 }
 
-watch(selectedPortfolioId, () => void load())
+watch(selectedPortfolioId, (id, previous) => { if (mounted && id !== previous) void load() })
 watch(() => route.query.action, (value) => { updateOpen.value = value === 'update' })
 
-onMounted(() => void load())
+onMounted(async () => { await load(); mounted = true })
 </script>
 
 <template>

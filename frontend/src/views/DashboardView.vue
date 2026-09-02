@@ -32,6 +32,7 @@ const createOpen = ref(false)
 const creating = ref(false)
 const newPortfolioName = ref('我的主账户')
 let refreshTimer: number | null = null
+let mounted = false
 
 const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
 const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
@@ -190,9 +191,9 @@ function startRefresh() {
 }
 
 watch(selectedPortfolioId, (id, previous) => {
-  if (id && id !== previous) void loadDashboard()
+  if (mounted && id && id !== previous) void loadDashboard()
 })
-onMounted(async () => { await load(); startRefresh() })
+onMounted(async () => { await load(); mounted = true; startRefresh() })
 onUnmounted(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer) })
 </script>
 
