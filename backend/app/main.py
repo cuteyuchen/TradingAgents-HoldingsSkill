@@ -147,6 +147,7 @@ from .routers import (  # noqa: E402
     portfolio_v3,
     shadow_v3,
     triggers_v3,
+    fuyao_v3,
 )
 
 app.include_router(auth_v2.router)
@@ -167,6 +168,7 @@ app.include_router(operations_v3.router)
 app.include_router(triggers_v3.router)
 app.include_router(portfolio_v3.router)
 app.include_router(shadow_v3.router)
+app.include_router(fuyao_v3.router)
 app.include_router(system_v3.router)
 
 

@@ -60,7 +60,19 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
         raw = _snapshot_provider(sanitized_request)
         completed_at = utc_now()
         return _with_capture_metadata(raw, started_at, completed_at)
-    known = {"tencent", "eastmoney", "eastmoney_batch", "critical", "holding", "all_a", "auto", "fallback"}
+    known = {
+        "tencent",
+        "eastmoney",
+        "eastmoney_batch",
+        "fuyao",
+        "ths",
+        "tonghuashun",
+        "critical",
+        "holding",
+        "all_a",
+        "auto",
+        "fallback",
+    }
     if not requested_name:
         return {
             "quotes": [],
@@ -77,7 +89,7 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
         }
     provider = None
     try:
-        if requested_name in {"tencent", "eastmoney", "eastmoney_batch"}:
+        if requested_name in {"tencent", "eastmoney", "eastmoney_batch", "fuyao", "ths", "tonghuashun"}:
             provider = create_quote_provider(requested_name)
         elif requested_name in {"critical", "holding"}:
             provider = build_critical_quote_provider(
@@ -110,7 +122,7 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
             "started_at": started_at,
             "completed_at": completed_at,
         }
-        for key in ("provider_counts", "provider_endpoints", "fallback_level", "fallback_errors"):
+        for key in ("provider_counts", "provider_endpoints", "provider_request_ids", "fallback_level", "fallback_errors"):
             if key in run_metadata:
                 result[key] = run_metadata[key]
         return result
@@ -136,7 +148,7 @@ def collect_snapshot_quotes(request: Mapping[str, Any]) -> Any:
             "started_at": started_at if "started_at" in locals() else completed_at,
             "completed_at": completed_at,
         }
-        for key in ("provider_counts", "provider_endpoints", "fallback_level", "fallback_errors"):
+        for key in ("provider_counts", "provider_endpoints", "provider_request_ids", "fallback_level", "fallback_errors"):
             if key in run_metadata:
                 result[key] = run_metadata[key]
         return result
@@ -233,7 +245,7 @@ def _coerce_raw_quotes(raw_quotes: Any) -> tuple[list[Any], dict[str, Any]]:
         for key in (
             "provider", "requested_route", "market", "errors", "provider_counts",
             "provider_endpoints", "provider_attempts", "fallback_level",
-            "provider_fallback_levels", "provider_source_timestamps",
+            "provider_fallback_levels", "provider_source_timestamps", "provider_request_ids",
             "provider_quality_statuses", "started_at", "completed_at",
         ):
             value = _value(raw_quotes, key, default=None)
@@ -378,6 +390,7 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
         if str(name).strip() and int(count or 0) > 0
     }
     raw_endpoints = metadata.get("provider_endpoints") or {}
+    raw_request_ids = metadata.get("provider_request_ids") or {}
     provider_attempts = metadata.get("provider_attempts") or []
     raw_fallback_levels = metadata.get("provider_fallback_levels") or {}
     raw_source_timestamps = metadata.get("provider_source_timestamps") or {}
@@ -458,6 +471,8 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
                 "requested_route": (snapshot.get("metadata") or {}).get("requested_route"),
                 "provider_counts": (snapshot.get("metadata") or {}).get("provider_counts", {}),
                 "provider_endpoints": (snapshot.get("metadata") or {}).get("provider_endpoints", {}),
+                "provider_request_ids": (snapshot.get("metadata") or {}).get("provider_request_ids", {}),
+                "request_ids": raw_request_ids.get(provider_name, []) if isinstance(raw_request_ids, Mapping) else [],
                 "provider_contribution_count": provider_counts.get(
                     provider_name,
                     row.received_count if not provider_counts and provider_name == row.provider else 0,

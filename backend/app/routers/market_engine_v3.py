@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
-from ..market.engine.history import LegacyMarketDataHistoryProvider
+from ..market.providers.factory import build_kline_provider
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
 from ..services.daily_bar_cache import sync_daily_bar_cache
@@ -89,7 +89,7 @@ def _run_daily_bar_sync(codes: list[str], as_of: date, limit: int) -> None:
     try:
         result = sync_daily_bar_cache(
             db,
-            LegacyMarketDataHistoryProvider(),
+            build_kline_provider(),
             codes,
             as_of=as_of,
             bootstrap_limit=limit,
