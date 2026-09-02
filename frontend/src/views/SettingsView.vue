@@ -1,853 +1,222 @@
 <script setup lang="ts">
-import {computed, onMounted, reactive, ref, watch} from 'vue'
-import {Bell, Bot, CalendarClock, CheckCircle2, KeyRound, Pencil, Play, Plus, TestTube2, Trash2} from 'lucide-vue-next'
-import {useDialog, useMessage} from 'naive-ui'
+import { computed, onMounted, ref, watch } from 'vue'
+import { BarChart3, Bot, CalendarClock, Database, Palette, Plus, Server, ShieldCheck, SlidersHorizontal } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
 
-import {api} from '../api'
-import ErrorState from '../components/ErrorState.vue'
-import LoadingState from '../components/LoadingState.vue'
-import {usePortfolioContext} from '../composables/portfolio'
-import {fmtDateTime} from '../utils/ui'
-import type {AnalysisMode, ModelProfile, ModelProvider, NotificationChannel, Schedule} from '../api/types'
+import { api } from '../api'
+import type { ModelProvider } from '../api/types'
+import EmptyState from '../components/EmptyState.vue'
+import MetricTile from '../components/MetricTile.vue'
+import PageHeader from '../components/PageHeader.vue'
+import SectionCard from '../components/SectionCard.vue'
+import StatusIndicator from '../components/StatusIndicator.vue'
+import TechnicalDetails from '../components/TechnicalDetails.vue'
+import { usePortfolioContext } from '../composables/portfolio'
+import SettingsOperationsView from './SettingsOperationsView.vue'
+import GovernanceView from './GovernanceView.vue'
+import SystemView from './SystemView.vue'
 
+type SettingSection = 'data' | 'ai' | 'automation' | 'strategy' | 'system' | 'appearance'
+
+const route = useRoute()
+const router = useRouter()
 const message = useMessage()
-const dialog = useDialog()
+const THEME_KEY = 'advisor_theme'
+const activeSection = ref<SettingSection>(sectionFromQuery(route.query.section))
+const theme = ref<'light' | 'dark'>(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light')
+const providers = ref<ModelProvider[]>([])
 const loading = ref(false)
 const loadError = ref<unknown>(null)
-const providers = ref<ModelProvider[]>([])
-const profiles = ref<ModelProfile[]>([])
-const schedules = ref<Schedule[]>([])
-const notifications = ref<NotificationChannel[]>([])
-const activeTab = ref('models')
-const providerOpen = ref(false)
-const editingProviderId = ref<number | null>(null)
-const profileOpen = ref(false)
-const scheduleOpen = ref(false)
-const notificationOpen = ref(false)
-const saving = ref(false)
-const testingId = ref<number | null>(null)
-const writeLoading = ref<string | null>(null)
+const createOpen = ref(false)
+const creating = ref(false)
+const newPortfolioName = ref('')
 
-const {portfolios, loadPortfolios} = usePortfolioContext()
+const {
+  portfolios,
+  selectedPortfolioId,
+  selectedPortfolio,
+  loading: portfoliosLoading,
+  error: portfolioError,
+  loadPortfolios,
+  setSelectedPortfolio,
+} = usePortfolioContext()
 
-const providerForm = reactive({
-  provider: 'openai_compatible',
-  display_name: '',
-  base_url: '',
-  api_key: '',
-  enabled: true
-})
-const profileForm = reactive({
-  provider_id: null as number | null,
-  purpose: 'vision',
-  model_name: '',
-  temperature: 0.2,
-  max_tokens: 4096,
-  // 开启流式后，超时只约束"两个数据块之间的静默间隔"，因此默认值可以远小于总耗时。
-  timeout: 180,
-  stream: true,
-  max_retries: 1,
-  is_default: true
-})
-const scheduleForm = reactive({
-  portfolio_id: null as number | null,
-  name: '开盘后分析',
-  timezone: 'Asia/Shanghai',
-  hour: 9,
-  minute: 35,
-  checkpoint: '09:35',
-  mode: 'deep' as AnalysisMode,
-  stale_snapshot_days: 3,
-  notify: true,
-  enabled: true
-})
-const notificationForm = reactive({type: 'dingtalk', name: '', webhook: '', secret: '', enabled: true})
-
-const providerOptions = [
-  {label: 'OpenAI', value: 'openai'}, {label: 'OpenAI Compatible', value: 'openai_compatible'},
-  {label: 'DeepSeek', value: 'deepseek'}, {label: '通义千问 Qwen', value: 'qwen'},
-  {label: '智谱 GLM', value: 'glm'}, {label: 'MiniMax', value: 'minimax'},
-  {label: 'Anthropic', value: 'anthropic'}, {label: 'Google Gemini', value: 'gemini'},
-  {label: 'OpenRouter', value: 'openrouter'}, {label: 'Ollama', value: 'ollama'},
+const sections: Array<{ key: SettingSection; label: string; description: string; icon: typeof Database }> = [
+  { key: 'data', label: '数据与行情', description: '组合与数据入口', icon: Database },
+  { key: 'ai', label: 'AI 模型', description: '供应商与模型用途', icon: Bot },
+  { key: 'automation', label: '自动分析', description: '计划与通知', icon: CalendarClock },
+  { key: 'strategy', label: '策略参数', description: '高级治理与审批', icon: SlidersHorizontal },
+  { key: 'system', label: '系统状态', description: '高级诊断与就绪度', icon: Server },
+  { key: 'appearance', label: '外观', description: '亮色与暗色', icon: Palette },
 ]
-const purposeOptions = [
-  {label: '识图模型', value: 'vision'}, {label: '分析模型（快速）', value: 'analysis'}, {
-    label: '深度裁决模型',
-    value: 'deep_analysis'
-  },
-]
-const purposeLabels: Record<string, string> = {vision: '识图', analysis: '快速分析', deep_analysis: '深度裁决'}
-const analysisModeLabels: Record<AnalysisMode, string> = {
-  quick: '快速分析',
-  fast: '快速分析',
-  standard: '标准分析',
-  deep: '深度分析',
+
+function sectionFromQuery(value: unknown): SettingSection {
+  const key = String(value || '')
+  return ['data', 'ai', 'automation', 'strategy', 'system', 'appearance'].includes(key) ? key as SettingSection : 'data'
 }
-const providerById = computed(() => Object.fromEntries(providers.value.map(item => [item.id, item])))
 
-// 流式与非流式下"超时"的含义完全不同，直接把区别写在表单里，避免用户误配。
-const streamHint = computed(() => profileForm.stream
-  ? '推荐。超时只计算两次输出之间的间隔，模型思考再久也不会误判超时。'
-  : '关闭后超时必须覆盖模型完整思考时间，推理模型建议设为 600 秒以上。')
-
-// 切换流式时同步一个合理的超时默认值：流式看静默间隔，非流式要覆盖整段思考。
-watch(() => profileForm.stream, (streaming) => {
-  profileForm.timeout = streaming ? 180 : 600
+const dataStatus = computed<'ok' | 'setup' | 'degraded'>(() => {
+  if (portfolioError.value || loadError.value) return 'degraded'
+  if (!portfoliosLoading.value && !portfolios.value.length) return 'setup'
+  return 'ok'
 })
-
-function fmt(value?: string | null) {
-  return fmtDateTime(value)
-}
-
-function beginWrite(key: string) {
-  if (writeLoading.value) return false
-  writeLoading.value = key
-  return true
-}
+const dataStatusLabel = computed(() => ({ ok: '数据入口正常', setup: '需要配置', degraded: '需要检查' }[dataStatus.value]))
+const currentSnapshotText = computed(() => selectedPortfolio.value?.latest_snapshot_time || '尚未确认')
 
 async function load() {
   loading.value = true
   loadError.value = null
   try {
     await loadPortfolios()
-    const values = await Promise.all([api.listProviders(), api.listProfiles(), api.listSchedules(), api.listNotifications()])
-    providers.value = values[0];
-    profiles.value = values[1];
-    schedules.value = values[2];
-    notifications.value = values[3]
-  } catch (e) {
-    loadError.value = e
+    providers.value = await api.listProviders()
+  } catch (reason) {
+    loadError.value = reason
   } finally {
     loading.value = false
   }
 }
 
-function resetProviderForm() {
-  editingProviderId.value = null
-  Object.assign(providerForm, {
-    provider: 'openai_compatible',
-    display_name: '',
-    base_url: '',
-    api_key: '',
-    enabled: true
-  })
-}
-
-function openCreateProvider() {
-  resetProviderForm()
-  providerOpen.value = true
-}
-
-function openEditProvider(provider: ModelProvider) {
-  editingProviderId.value = provider.id
-  Object.assign(providerForm, {
-    provider: provider.provider,
-    display_name: provider.display_name,
-    base_url: provider.base_url || '',
-    api_key: '',
-    enabled: provider.enabled
-  })
-  providerOpen.value = true
-}
-
-async function saveProvider() {
-  if (!providerForm.display_name.trim()) return
-  if (!beginWrite('provider-save')) return
-  saving.value = true
+async function createPortfolio() {
+  const name = newPortfolioName.value.trim()
+  if (!name || creating.value) return
+  creating.value = true
   try {
-    const payload: Record<string, unknown> = {
-      provider: providerForm.provider,
-      display_name: providerForm.display_name.trim(),
-      base_url: providerForm.base_url || null,
-      enabled: providerForm.enabled
-    }
-    if (providerForm.api_key) payload.api_key = providerForm.api_key
-    if (editingProviderId.value === null) {
-      await api.createProvider({...payload, api_key: providerForm.api_key || null})
-    } else {
-      await api.updateProvider(editingProviderId.value, payload)
-    }
-    providerOpen.value = false
-    message.success(editingProviderId.value === null ? '模型供应商已添加' : '模型供应商已更新')
-    resetProviderForm()
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
+    const created = await api.createPortfolio({ name, is_default: portfolios.value.length === 0 })
+    portfolios.value.push(created)
+    setSelectedPortfolio(created.id)
+    newPortfolioName.value = ''
+    createOpen.value = false
+    message.success('组合已创建')
+  } catch (reason) {
+    message.error((reason as Error).message)
   } finally {
-    saving.value = false
-    writeLoading.value = null
+    creating.value = false
   }
 }
 
-async function createProfile() {
-  if (!profileForm.provider_id || !profileForm.model_name.trim()) return
-  if (!beginWrite('profile-save')) return
-  saving.value = true
-  try {
-    await api.createProfile({
-      provider_id: profileForm.provider_id, purpose: profileForm.purpose, model_name: profileForm.model_name.trim(),
-      parameters: {
-        temperature: profileForm.temperature,
-        max_tokens: profileForm.max_tokens,
-        // 流式下这个值是静默间隔阈值，非流式下是整次请求的读超时。
-        timeout: profileForm.timeout,
-        stream_idle_timeout: profileForm.timeout,
-        stream: profileForm.stream,
-        max_retries: profileForm.max_retries
-      }, is_default: profileForm.is_default,
-    })
-    profileOpen.value = false
-    profileForm.model_name = ''
-    message.success('模型用途配置已保存')
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    saving.value = false
-    writeLoading.value = null
-  }
+function selectSection(section: SettingSection) {
+  activeSection.value = section
+  void router.replace({ name: 'settings', query: section === 'data' ? {} : { section } })
 }
 
-async function testProfile(id: number) {
-  if (!beginWrite('profile-test-' + id)) return
-  testingId.value = id
-  try {
-    const result = await api.testProfile(id)
-    message.success(`${result.message}${result.latency_ms ? `，${result.latency_ms} ms` : ''}`)
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    testingId.value = null
-    writeLoading.value = null
-  }
+function setTheme(value: 'light' | 'dark') {
+  theme.value = value
+  localStorage.setItem(THEME_KEY, value)
+  window.dispatchEvent(new CustomEvent('advisor-theme-changed', { detail: { theme: value } }))
 }
 
-async function setDefault(profile: ModelProfile) {
-  if (!beginWrite('profile-default-' + profile.id)) return
-  try {
-    await api.updateProfile(profile.id, {is_default: true});
-    await load();
-    message.success('默认模型已切换')
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    writeLoading.value = null
-  }
-}
-
-async function createSchedule() {
-  if (!scheduleForm.portfolio_id || !scheduleForm.name.trim()) return
-  if (!beginWrite('schedule-save')) return
-  saving.value = true
-  try {
-    scheduleForm.checkpoint = `${String(scheduleForm.hour).padStart(2, '0')}:${String(scheduleForm.minute).padStart(2, '0')}`
-    await api.createSchedule({...scheduleForm})
-    scheduleOpen.value = false
-    message.success('自动分析计划已创建')
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    saving.value = false
-    writeLoading.value = null
-  }
-}
-
-async function toggleSchedule(row: Schedule) {
-  if (!beginWrite('schedule-toggle-' + row.id)) return
-  try {
-    await api.updateSchedule(row.id, {enabled: !row.enabled});
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    writeLoading.value = null
-  }
-}
-
-async function runSchedule(row: Schedule) {
-  if (!beginWrite('schedule-run-' + row.id)) return
-  testingId.value = row.id
-  try {
-    const job = await api.runScheduleNow(row.id);
-    message.success(`已创建任务 #${job.id}`)
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    testingId.value = null
-    writeLoading.value = null
-  }
-}
-
-async function createNotification() {
-  if (!notificationForm.name.trim() || !notificationForm.webhook.trim()) return
-  if (!beginWrite('notification-save')) return
-  saving.value = true
-  try {
-    await api.createNotification({...notificationForm, secret: notificationForm.secret || null})
-    notificationOpen.value = false
-    Object.assign(notificationForm, {type: 'dingtalk', name: '', webhook: '', secret: '', enabled: true})
-    message.success('通知渠道已保存')
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    saving.value = false
-    writeLoading.value = null
-  }
-}
-
-async function testNotification(row: NotificationChannel) {
-  if (!beginWrite('notification-test-' + row.id)) return
-  testingId.value = row.id
-  try {
-    const result = await api.testNotification(row.id);
-    message.success(result.message || '测试消息已发送');
-    await load()
-  } catch (e) {
-    message.error((e as Error).message)
-  } finally {
-    testingId.value = null
-    writeLoading.value = null
-  }
-}
-
-function confirmDelete(label: string, action: () => Promise<void>) {
-  dialog.warning({
-    title: '确认删除',
-    content: `删除“${label}”后无法恢复。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    async onPositiveClick() {
-      if (!beginWrite('delete')) return
-      try {
-        await action();
-        message.success('已删除');
-        await load()
-      } catch (e) {
-        message.error((e as Error).message)
-      } finally {
-        writeLoading.value = null
-      }
-    }
-  })
-}
-
-onMounted(load)
+watch(() => route.query.section, (value) => { activeSection.value = sectionFromQuery(value) })
+onMounted(() => void load())
 </script>
 
 <template>
-  <section class="page-stack">
-    <div class="page-heading">
-      <div><p class="eyebrow">SYSTEM CONFIGURATION</p>
-        <h1>系统设置</h1>
-        <p>模型密钥、Webhook 和加签 Secret 均加密保存，页面不会回显明文。</p></div>
+  <section class="settings-workbench">
+    <PageHeader title="设置" description="把数据、模型和自动化安排好，日常页面只保留和投资决策有关的信息。">
+      <template #actions><StatusIndicator :status="dataStatus" :label="dataStatusLabel" /><n-button secondary :loading="loading" @click="load">刷新</n-button></template>
+    </PageHeader>
+
+    <div class="settings-layout">
+      <aside class="settings-sidebar" aria-label="设置分区">
+        <button v-for="item in sections" :key="item.key" class="settings-nav-item" :class="{ active: activeSection === item.key }" @click="selectSection(item.key)">
+          <component :is="item.icon" :size="17" aria-hidden="true" />
+          <span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span>
+        </button>
+      </aside>
+
+      <main class="settings-main">
+        <template v-if="activeSection === 'data'">
+          <SectionCard title="数据与行情" description="这里确认你的个人工作区是否有可用于分析的组合快照；行情质量和新鲜度会在首页与系统状态中显示。">
+            <div class="metric-grid four">
+              <MetricTile label="持仓组合" :value="portfolios.length" />
+              <MetricTile label="当前组合" :value="selectedPortfolio?.name || '未选择'" />
+              <MetricTile label="最近确认快照" :value="currentSnapshotText" />
+              <MetricTile label="可用模型供应商" :value="providers.filter((item) => item.enabled).length" />
+            </div>
+          </SectionCard>
+          <SectionCard title="我的组合" description="组合仍由后端 Auth/Ownership 保护；这里只提供进入持仓工作流的入口。">
+            <template #actions><n-button secondary size="small" @click="createOpen = true"><template #icon><Plus :size="15" /></template>新建组合</n-button></template>
+            <div v-if="portfolios.length" class="portfolio-list">
+              <div v-for="portfolio in portfolios" :key="portfolio.id" class="portfolio-row">
+                <div><strong>{{ portfolio.name }}</strong><small>{{ portfolio.market }} · {{ portfolio.currency }} · 最近快照 {{ portfolio.latest_snapshot_time || '尚未确认' }}</small></div>
+                <n-tag size="small" :bordered="false" :type="portfolio.id === selectedPortfolioId ? 'success' : 'default'">{{ portfolio.id === selectedPortfolioId ? '当前' : '可切换' }}</n-tag>
+                <n-button secondary size="small" @click="router.push({ name: 'holdings', query: { portfolio: portfolio.id } })">查看持仓</n-button>
+              </div>
+            </div>
+            <EmptyState v-else title="还没有个人投资组合" description="先进入持仓页导入一份确认快照，首页才会开始显示市场、组合和建议。">
+              <template #action><n-button type="primary" @click="router.push({ name: 'holdings', query: { action: 'update' } })">开始导入</n-button></template>
+            </EmptyState>
+          </SectionCard>
+          <SectionCard title="数据工作流" description="低质量识别不会自动确认；所有用于分析的持仓都必须经过 Review → Confirm。">
+            <div class="flow-summary"><div><strong>1</strong><span>导入券商截图</span></div><div><strong>2</strong><span>核对并修正</span></div><div><strong>3</strong><span>确认快照</span></div><div><strong>4</strong><span>开始分析</span></div></div>
+            <div class="section-actions"><n-button type="primary" @click="router.push({ name: 'holdings', query: { action: 'update' } })">更新持仓</n-button><n-button secondary @click="router.push({ name: 'settings', query: { section: 'system' } })">检查系统状态</n-button></div>
+          </SectionCard>
+        </template>
+
+        <SettingsOperationsView v-else-if="activeSection === 'ai'" initial-tab="models" />
+        <SettingsOperationsView v-else-if="activeSection === 'automation'" initial-tab="schedules" />
+        <GovernanceView v-else-if="activeSection === 'strategy'" />
+        <SystemView v-else-if="activeSection === 'system'" />
+
+        <template v-else>
+          <SectionCard title="外观" description="新环境默认使用亮色；已经明确保存的偏好会继续保留。">
+            <div class="appearance-choice" role="radiogroup" aria-label="主题">
+              <button class="theme-choice" :class="{ selected: theme === 'light' }" role="radio" :aria-checked="theme === 'light'" @click="setTheme('light')"><span class="theme-swatch light-swatch" /><span><strong>亮色</strong><small>清晰、适合日常查看</small></span><n-tag v-if="theme === 'light'" size="small" type="success">当前</n-tag></button>
+              <button class="theme-choice" :class="{ selected: theme === 'dark' }" role="radio" :aria-checked="theme === 'dark'" @click="setTheme('dark')"><span class="theme-swatch dark-swatch" /><span><strong>暗色</strong><small>低亮度环境使用</small></span><n-tag v-if="theme === 'dark'" size="small" type="success">当前</n-tag></button>
+            </div>
+          </SectionCard>
+          <SectionCard title="阅读偏好" description="主界面优先展示市场、组合和最终建议；运行时、参数 hash 与 source lineage 默认收进技术详情。">
+            <div class="preference-note"><BarChart3 :size="18" /><div><strong>决策优先</strong><p>首页先回答“今天该不该动”，高级证据按需展开。</p></div></div>
+            <TechnicalDetails title="外观设置技术详情"><pre>{{ JSON.stringify({ theme, storageKey: THEME_KEY }, null, 2) }}</pre></TechnicalDetails>
+          </SectionCard>
+        </template>
+      </main>
     </div>
 
-    <ErrorState v-if="loadError" :error="loadError" @retry="load" />
-    <LoadingState v-if="loading && !providers.length && !profiles.length && !schedules.length && !notifications.length" message="正在读取系统设置" />
-    <n-tabs v-model:value="activeTab" type="line" animated>
-      <n-tab-pane name="models" tab="模型配置">
-        <div class="settings-stack">
-          <section class="panel-card">
-            <div class="section-title">
-              <div><h2>模型供应商</h2>
-                <p>支持官方接口、OpenAI Compatible 和本地 Ollama</p></div>
-              <n-button type="primary" :disabled="Boolean(writeLoading)" @click="openCreateProvider">
-                <template #icon>
-                  <Plus :size="16"/>
-                </template>
-                新增供应商
-              </n-button>
-            </div>
-            <div v-if="providers.length" class="card-grid">
-              <article v-for="row in providers" :key="row.id" class="setting-card">
-                <div class="setting-icon">
-                  <KeyRound :size="19"/>
-                </div>
-                <div><strong>{{ row.display_name }}</strong>
-                  <p>{{ row.provider }} · {{ row.base_url || '使用默认地址' }}</p></div>
-                <n-tag :bordered="false" :type="row.enabled ? 'success' : 'default'">{{
-                    row.enabled ? '启用' : '停用'
-                  }}
-                </n-tag>
-                <div class="secret-state">API Key：{{ row.has_api_key ? row.api_key_masked : '未配置' }}</div>
-                <div class="setting-actions">
-                  <n-button quaternary circle title="编辑供应商" :disabled="Boolean(writeLoading)" @click="openEditProvider(row)">
-                    <template #icon><Pencil :size="16"/></template>
-                  </n-button>
-                  <n-button quaternary circle type="error" title="删除供应商" :disabled="Boolean(writeLoading)"
-                            @click="confirmDelete(row.display_name, () => api.deleteProvider(row.id))">
-                    <template #icon><Trash2 :size="16"/></template>
-                  </n-button>
-                </div>
-              </article>
-            </div>
-            <n-empty v-else description="先配置模型供应商和 API Key"/>
-          </section>
-
-          <section class="panel-card">
-            <div class="section-title">
-              <div><h2>模型用途</h2>
-                <p>识图与分析可以使用不同供应商和模型</p></div>
-              <n-button secondary :disabled="!providers.length || Boolean(writeLoading)" @click="profileOpen = true">
-                <template #icon>
-                  <Plus :size="16"/>
-                </template>
-                新增模型用途
-              </n-button>
-            </div>
-            <div v-if="profiles.length" class="profile-list">
-              <article v-for="row in profiles" :key="row.id" class="profile-row">
-                <div class="setting-icon">
-                  <Bot :size="19"/>
-                </div>
-                <div><strong>{{ purposeLabels[row.purpose] }}</strong>
-                  <p>{{ providerById[row.provider_id]?.display_name }} / {{ row.model_name }}</p></div>
-                <n-tag v-if="row.is_default" :bordered="false" type="success">默认</n-tag>
-                <n-tag v-else :bordered="false">备用</n-tag>
-                <span class="health" :class="row.last_health_status || ''"><CheckCircle2
-                    :size="14"/>{{ row.last_health_status || '未测试' }}</span>
-                <n-button v-if="!row.is_default" text type="primary" :loading="writeLoading === 'profile-default-' + row.id" :disabled="Boolean(writeLoading)" @click="setDefault(row)">设为默认</n-button>
-                <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="testProfile(row.id)">
-                  <template #icon>
-                    <TestTube2 :size="15"/>
-                  </template>
-                  测试
-                </n-button>
-                <n-button quaternary circle type="error" :disabled="Boolean(writeLoading)"
-                          @click="confirmDelete(row.model_name, () => api.deleteProfile(row.id))">
-                  <template #icon>
-                    <Trash2 :size="16"/>
-                  </template>
-                </n-button>
-              </article>
-            </div>
-            <n-empty v-else description="至少配置一个默认识图模型和一个默认分析模型"/>
-          </section>
-        </div>
-      </n-tab-pane>
-
-      <n-tab-pane name="schedules" tab="自动分析">
-        <section class="panel-card">
-          <div class="section-title">
-            <div><h2>每日分析计划</h2>
-              <p>到点后校验 A 股交易日，并使用最近一次已确认持仓</p></div>
-            <n-button type="primary" :disabled="!portfolios.length || Boolean(writeLoading)" @click="scheduleOpen = true">
-              <template #icon>
-                <Plus :size="16"/>
-              </template>
-              新增计划
-            </n-button>
-          </div>
-          <div v-if="schedules.length" class="schedule-list">
-            <article v-for="row in schedules" :key="row.id" class="schedule-row">
-              <div class="setting-icon">
-                <CalendarClock :size="19"/>
-              </div>
-              <div><strong>{{ row.name }}</strong>
-                <p>{{ portfolios.find(p => p.id === row.portfolio_id)?.name }} · {{ row.timezone }}</p></div>
-              <div class="schedule-time">{{ String(row.hour).padStart(2, '0') }}:{{
-                  String(row.minute).padStart(2, '0')
-                }}<span>{{ analysisModeLabels[row.mode] }}</span></div>
-              <div class="schedule-meta"><span>下次：{{
-                  fmt(row.next_run_at)
-                }}</span><span>连续失败：{{ row.consecutive_failures }}/{{ row.max_consecutive_failures }}</span></div>
-              <n-switch :value="row.enabled" :disabled="Boolean(writeLoading)" @update:value="toggleSchedule(row)"/>
-              <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="runSchedule(row)">
-                <template #icon>
-                  <Play :size="15"/>
-                </template>
-                立即执行
-              </n-button>
-              <n-button quaternary circle type="error" :disabled="Boolean(writeLoading)"
-                        @click="confirmDelete(row.name, () => api.deleteSchedule(row.id))">
-                <template #icon>
-                  <Trash2 :size="16"/>
-                </template>
-              </n-button>
-            </article>
-          </div>
-          <n-empty v-else description="尚未配置自动分析计划"/>
-        </section>
-      </n-tab-pane>
-
-      <n-tab-pane name="notifications" tab="钉钉 / 企微">
-        <section class="panel-card">
-          <div class="section-title">
-            <div><h2>通知渠道</h2>
-              <p>分析完成后发送摘要和完整报告链接；发送失败不影响报告</p></div>
-            <n-button type="primary" :disabled="Boolean(writeLoading)" @click="notificationOpen = true">
-              <template #icon>
-                <Plus :size="16"/>
-              </template>
-              新增渠道
-            </n-button>
-          </div>
-          <div v-if="notifications.length" class="card-grid">
-            <article v-for="row in notifications" :key="row.id" class="setting-card">
-              <div class="setting-icon">
-                <Bell :size="19"/>
-              </div>
-              <div><strong>{{ row.name }}</strong>
-                <p>{{ row.type === 'dingtalk' ? '钉钉机器人' : '企业微信机器人' }} · {{ row.webhook_masked }}</p></div>
-              <n-tag :bordered="false"
-                     :type="row.last_test_status === 'ok' ? 'success' : row.last_test_status === 'failed' ? 'error' : 'default'">
-                {{ row.last_test_status || '未测试' }}
-              </n-tag>
-              <div class="secret-state">加签：{{ row.has_secret ? '已配置' : '未配置' }}</div>
-              <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="testNotification(row)">
-                <template #icon>
-                  <TestTube2 :size="15"/>
-                </template>
-                测试发送
-              </n-button>
-              <n-button quaternary circle type="error" :disabled="Boolean(writeLoading)"
-                        @click="confirmDelete(row.name, () => api.deleteNotification(row.id))">
-                <template #icon>
-                  <Trash2 :size="16"/>
-                </template>
-              </n-button>
-            </article>
-          </div>
-          <n-empty v-else description="尚未配置通知渠道"/>
-        </section>
-      </n-tab-pane>
-    </n-tabs>
-
-    <n-modal
-      v-model:show="providerOpen"
-      preset="card"
-      class="provider-modal"
-      :title="editingProviderId === null ? '新增模型供应商' : '编辑模型供应商'"
-      style="width: min(560px, calc(100vw - 32px)); max-width: calc(100vw - 32px)"
-    >
-      <n-form label-placement="top" class="provider-form">
-        <n-form-item label="供应商类型">
-          <n-select v-model:value="providerForm.provider" :options="providerOptions"/>
+    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, calc(100vw - 32px))">
+      <n-form label-placement="top" @submit.prevent="createPortfolio">
+        <n-form-item label="组合名称">
+          <n-input v-model:value="newPortfolioName" aria-label="组合名称" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" />
         </n-form-item>
-        <n-form-item label="显示名称">
-          <n-input v-model:value="providerForm.display_name" placeholder="例如：我的 DeepSeek"/>
-        </n-form-item>
-        <n-form-item label="Base URL">
-          <n-input v-model:value="providerForm.base_url" placeholder="可留空使用内置默认地址"/>
-        </n-form-item>
-        <n-form-item label="API Key">
-          <n-input v-model:value="providerForm.api_key" type="password" show-password-on="mousedown"
-                   :placeholder="editingProviderId === null ? '本地无鉴权模型可留空' : '留空则保留现有 API Key'"/>
-        </n-form-item>
-        <n-form-item label="启用供应商">
-          <n-switch v-model:value="providerForm.enabled"/>
-        </n-form-item>
-        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="saveProvider">保存供应商</n-button>
-      </n-form>
-    </n-modal>
-    <n-modal v-model:show="profileOpen" preset="card" title="新增模型用途" style="width: min(560px, 94vw)">
-      <n-form label-placement="top">
-        <n-form-item label="供应商">
-          <n-select v-model:value="profileForm.provider_id"
-                    :options="providers.map(p => ({ label: p.display_name, value: p.id }))"/>
-        </n-form-item>
-        <n-form-item label="用途">
-          <n-select v-model:value="profileForm.purpose" :options="purposeOptions"/>
-        </n-form-item>
-        <n-form-item label="模型名称">
-          <n-input v-model:value="profileForm.model_name" placeholder="例如 gpt-4.1-mini / qwen-vl-max"/>
-        </n-form-item>
-        <div class="form-grid model-param-grid">
-          <n-form-item label="Temperature">
-            <n-input-number v-model:value="profileForm.temperature" :min="0" :max="2" :step="0.1"/>
-          </n-form-item>
-          <n-form-item label="Max Tokens">
-            <n-input-number v-model:value="profileForm.max_tokens" :min="256" :max="128000"/>
-          </n-form-item>
-          <n-form-item :label="profileForm.stream ? '静默超时（秒）' : '超时（秒）'">
-            <n-input-number v-model:value="profileForm.timeout" :min="10" :max="3600"/>
-          </n-form-item>
-          <n-form-item label="超时重试次数">
-            <n-input-number v-model:value="profileForm.max_retries" :min="0" :max="5"/>
-          </n-form-item>
-        </div>
-        <n-form-item label="流式输出">
-          <div class="stream-field">
-            <n-switch v-model:value="profileForm.stream"/>
-            <span class="hint">{{ streamHint }}</span>
-          </div>
-        </n-form-item>
-        <n-form-item label="设为该用途默认模型">
-          <n-switch v-model:value="profileForm.is_default"/>
-        </n-form-item>
-        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createProfile">保存模型用途</n-button>
-      </n-form>
-    </n-modal>
-    <n-modal v-model:show="scheduleOpen" preset="card" title="新增自动分析计划" style="width: min(560px, 94vw)">
-      <n-form label-placement="top">
-        <n-form-item label="持仓组合">
-          <n-select v-model:value="scheduleForm.portfolio_id"
-                    :options="portfolios.map(p => ({ label: p.name, value: p.id }))"/>
-        </n-form-item>
-        <n-form-item label="计划名称">
-          <n-input v-model:value="scheduleForm.name"/>
-        </n-form-item>
-        <div class="form-grid">
-          <n-form-item label="小时">
-            <n-input-number v-model:value="scheduleForm.hour" :min="0" :max="23"/>
-          </n-form-item>
-          <n-form-item label="分钟">
-            <n-input-number v-model:value="scheduleForm.minute" :min="0" :max="59"/>
-          </n-form-item>
-          <n-form-item label="模式">
-            <n-select v-model:value="scheduleForm.mode"
-                      :options="[{ label: '快速', value: 'fast' }, { label: '标准', value: 'standard' }, { label: '深度', value: 'deep' }]"/>
-          </n-form-item>
-        </div>
-        <n-form-item label="时区">
-          <n-input v-model:value="scheduleForm.timezone"/>
-        </n-form-item>
-        <n-form-item label="持仓超过多少天视为过期">
-          <n-input-number v-model:value="scheduleForm.stale_snapshot_days" :min="0" :max="30"/>
-        </n-form-item>
-        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createSchedule">保存计划</n-button>
-      </n-form>
-    </n-modal>
-    <n-modal v-model:show="notificationOpen" preset="card" title="新增通知渠道" style="width: min(560px, 94vw)">
-      <n-form label-placement="top">
-        <n-form-item label="类型">
-          <n-select v-model:value="notificationForm.type"
-                    :options="[{ label: '钉钉机器人', value: 'dingtalk' }, { label: '企业微信机器人', value: 'wecom' }]"/>
-        </n-form-item>
-        <n-form-item label="渠道名称">
-          <n-input v-model:value="notificationForm.name" placeholder="例如：交易提醒群"/>
-        </n-form-item>
-        <n-form-item label="Webhook">
-          <n-input v-model:value="notificationForm.webhook" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }"/>
-        </n-form-item>
-        <n-form-item label="加签 Secret（可选）">
-          <n-input v-model:value="notificationForm.secret" type="password" show-password-on="mousedown"/>
-        </n-form-item>
-        <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createNotification">保存渠道</n-button>
+        <n-button type="primary" block :loading="creating" :disabled="!newPortfolioName.trim()" @click="createPortfolio">创建组合</n-button>
       </n-form>
     </n-modal>
   </section>
 </template>
 
 <style scoped>
-.page-stack, .settings-stack {
-  display: grid;
-  gap: 18px;
-}
-
-.eyebrow {
-  margin: 0 0 5px;
-  color: var(--app-primary);
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: .13em;
-}
-
-h1 {
-  margin: 0;
-  font-size: clamp(28px, 4vw, 42px);
-  letter-spacing: -.035em;
-}
-
-.page-heading p:not(.eyebrow), .section-title p {
-  margin: 6px 0 0;
-  color: var(--app-text-muted);
-}
-
-.panel-card {
-  padding: 20px;
-}
-
-.section-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 17px;
-}
-
-.section-title h2 {
-  margin: 0;
-  font-size: 17px;
-}
-
-.section-title p {
-  font-size: 12px;
-}
-
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.setting-card {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid var(--app-border-soft);
-  border-radius: 12px;
-  padding: 14px;
-}
-
-.setting-icon {
-  display: grid;
-  width: 40px;
-  height: 40px;
-  place-items: center;
-  border-radius: 10px;
-  background: var(--app-primary-soft);
-  color: var(--app-primary);
-}
-
-.setting-card p, .profile-row p, .schedule-row p {
-  margin: 4px 0 0;
-  color: var(--app-text-muted);
-  font-size: 11px;
-}
-
-.secret-state {
-  grid-column: 2 / 3;
-  color: var(--app-text-muted);
-  font-size: 11px;
-}
-
-.setting-actions {
-  grid-column: 3;
-  grid-row: 2;
-  display: flex;
-  gap: 4px;
-}
-
-.setting-card > .n-button:last-child {
-  grid-column: 3;
-  grid-row: 2;
-}
-
-.profile-list, .schedule-list {
-  display: grid;
-  gap: 8px;
-}
-
-.profile-row {
-  display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) auto auto auto auto auto;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid var(--app-border-soft);
-  border-radius: 11px;
-  padding: 12px;
-}
-
-.health {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--app-text-muted);
-  font-size: 11px;
-}
-
-.health.ok {
-  color: #22c55e;
-}
-
-.health.failed {
-  color: #ef4444;
-}
-
-.schedule-row {
-  display: grid;
-  grid-template-columns: auto minmax(170px, 1fr) auto minmax(220px, 1fr) auto auto auto;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid var(--app-border-soft);
-  border-radius: 11px;
-  padding: 13px;
-}
-
-.schedule-time {
-  display: grid;
-  font-size: 20px;
-  font-weight: 900;
-}
-
-.schedule-time span, .schedule-meta span {
-  color: var(--app-text-muted);
-  font-size: 10px;
-  font-weight: 400;
-}
-
-.schedule-meta {
-  display: grid;
-  gap: 3px;
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-
-/* 模型参数有 4 项，用两列排更均匀，避免第 4 项单独占一行。 */
-.model-param-grid {
-  grid-template-columns: repeat(2, 1fr);
-}
-
-.stream-field {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.stream-field .hint {
-  font-size: 12px;
-  line-height: 1.5;
-  opacity: 0.7;
-}
-
-@media (max-width: 1000px) {
-  .card-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .profile-row, .schedule-row {
-    grid-template-columns: auto 1fr auto;
-  }
-
-  .profile-row > *, .schedule-row > * {
-    min-width: 0;
-  }
-
-  .schedule-meta, .secret-state {
-    grid-column: 2 / 4;
-  }
-}
-
-@media (max-width: 620px) {
-  .section-title {
-    align-items: start;
-    flex-direction: column;
-  }
-
-  .form-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .profile-row, .schedule-row {
-    grid-template-columns: 1fr;
-  }
-
-  .setting-icon {
-    display: none;
-  }
-
-  .schedule-meta, .secret-state {
-    grid-column: auto;
-  }
-}
+.settings-workbench { display: grid; gap: 18px; }
+.settings-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); align-items: start; gap: 22px; }
+.settings-sidebar { position: sticky; top: 82px; display: grid; gap: 4px; }
+.settings-nav-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 9px; width: 100%; border: 1px solid transparent; border-radius: 7px; background: transparent; padding: 11px 10px; color: var(--text-muted); text-align: left; cursor: pointer; }
+.settings-nav-item:hover, .settings-nav-item.active { border-color: var(--border); background: var(--surface); color: var(--primary); }
+.settings-nav-item > span { display: grid; gap: 2px; min-width: 0; }
+.settings-nav-item strong { color: inherit; font-size: 13px; }
+.settings-nav-item small { color: var(--text-muted); font-size: 11px; }
+.settings-main { display: grid; gap: 18px; min-width: 0; }
+.metric-grid { display: grid; gap: 14px; }
+.metric-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.portfolio-list { display: grid; gap: 8px; }
+.portfolio-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid var(--border); padding: 12px 0; }
+.portfolio-row:first-child { border-top: 0; padding-top: 0; }
+.portfolio-row > div { display: grid; gap: 3px; min-width: 0; }
+.portfolio-row small { color: var(--text-muted); font-size: 11px; }
+.flow-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.flow-summary > div { display: grid; gap: 5px; border-left: 2px solid var(--primary); padding: 6px 10px; }
+.flow-summary strong { color: var(--primary); font-size: 22px; }
+.flow-summary span { color: var(--text-muted); font-size: 12px; }
+.section-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.appearance-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.theme-choice { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 13px; color: var(--text); text-align: left; cursor: pointer; }
+.theme-choice.selected { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
+.theme-choice > span:nth-child(2) { display: grid; gap: 3px; }
+.theme-choice small { color: var(--text-muted); font-size: 11px; }
+.theme-swatch { display: block; width: 42px; height: 32px; border: 1px solid var(--border-strong); border-radius: 5px; }
+.light-swatch { background: linear-gradient(135deg, #ffffff 0 68%, #e9f1fb 68%); }
+.dark-swatch { background: linear-gradient(135deg, #182028 0 68%, #1c3855 68%); }
+.preference-note { display: flex; align-items: flex-start; gap: 10px; color: var(--primary); }
+.preference-note strong { color: var(--text); }
+.preference-note p { margin: 4px 0 0; color: var(--text-muted); }
+@media (max-width: 900px) { .settings-layout { grid-template-columns: 1fr; }.settings-sidebar { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); }.metric-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .settings-sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }.appearance-choice, .flow-summary { grid-template-columns: 1fr; }.portfolio-row { grid-template-columns: 1fr auto; }.portfolio-row > .n-button { grid-column: 1 / -1; width: 100%; }.metric-grid.four { grid-template-columns: 1fr; } }
 </style>
