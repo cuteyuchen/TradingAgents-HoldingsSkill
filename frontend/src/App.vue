@@ -16,6 +16,7 @@ import {
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
 
 import { api, clearSession, hasSession } from './api'
+import type { LiveValidationReadiness, SystemHealth } from './api/types'
 import { clearPortfolioContext, usePortfolioContext } from './composables/portfolio'
 
 const route = useRoute()
@@ -25,6 +26,11 @@ type ThemePref = 'light' | 'dark'
 
 const themePref = ref<ThemePref>(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light')
 const loadingUser = ref(false)
+const loadingSystemStatus = ref(false)
+const systemStatusError = ref(false)
+const systemHealth = ref<SystemHealth | null>(null)
+const liveReadiness = ref<LiveValidationReadiness | null>(null)
+let systemStatusRequest: Promise<void> | null = null
 const isLogin = computed(() => route.name === 'login')
 const {
   portfolios,
@@ -54,19 +60,54 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => ({
   },
 }))
 
-const systemStatus = computed<'ok' | 'setup' | 'degraded'>(() => {
-  if (portfolioError.value) return 'degraded'
-  if (!loadingPortfolios.value && !portfolios.value.length) return 'setup'
-  return 'ok'
+const systemStatus = computed<'ok' | 'setup' | 'degraded' | 'loading'>(() => {
+  if (portfolioError.value || systemStatusError.value) return 'degraded'
+  if (loadingPortfolios.value || loadingSystemStatus.value) return 'loading'
+  if (!systemHealth.value || !liveReadiness.value) return 'degraded'
+  if (systemHealth.value.status !== 'OK') return 'degraded'
+  if (!portfolios.value.length) return 'setup'
+  return liveReadiness.value.status === 'READY' ? 'ok' : 'setup'
 })
-const systemStatusLabel = computed(() => ({ ok: '正常', setup: '需要配置', degraded: '数据不完整' }[systemStatus.value]))
-const systemStatusHint = computed(() => ({ ok: '数据状态正常', setup: '先配置行情与模型', degraded: '部分数据暂时不可用' }[systemStatus.value]))
+const systemStatusLabel = computed(() => ({ ok: '正常', setup: '需要配置', degraded: '异常', loading: '检查中' }[systemStatus.value]))
+const systemStatusHint = computed(() => ({ ok: '系统健康且已具备当前验证条件', setup: '系统尚未满足当前验证条件', degraded: '系统健康检查失败或存在异常', loading: '正在检查系统状态' }[systemStatus.value]))
+
+async function loadSystemStatus(): Promise<void> {
+  if (systemStatusRequest) return systemStatusRequest
+  if (systemHealth.value && liveReadiness.value) return
+
+  loadingSystemStatus.value = true
+  systemStatusError.value = false
+  const request = Promise.all([api.getSystemHealth(), api.getLiveValidationReadiness()])
+    .then(([health, readiness]) => {
+      systemHealth.value = health
+      liveReadiness.value = readiness
+    })
+    .catch(() => {
+      systemHealth.value = null
+      liveReadiness.value = null
+      systemStatusError.value = true
+    })
+  systemStatusRequest = request
+
+  try {
+    await request
+  } finally {
+    loadingSystemStatus.value = false
+    if (systemStatusRequest === request) systemStatusRequest = null
+  }
+}
+
+function resetSystemStatus() {
+  systemHealth.value = null
+  liveReadiness.value = null
+  systemStatusError.value = false
+}
 
 async function loadUser() {
   if (!hasSession() || isLogin.value || loadingUser.value) return
   loadingUser.value = true
   try {
-    await Promise.all([api.me(), loadPortfolios()])
+    await Promise.all([api.me(), loadPortfolios(), loadSystemStatus()])
   } catch {
     // The request layer owns session expiry; the shell stays quiet here.
   } finally {
@@ -96,6 +137,7 @@ function openSystemStatus() {
 
 const onSessionChanged = () => {
   clearPortfolioContext()
+  resetSystemStatus()
   void loadUser()
 }
 const onSessionExpired = () => {
@@ -222,6 +264,7 @@ watch(() => route.name, () => void loadUser())
 .system-status-button.system-status-ok { color: var(--positive); }
 .system-status-button.system-status-setup { color: var(--warning); }
 .system-status-button.system-status-degraded { color: var(--danger); }
+.system-status-button.system-status-loading { color: var(--text-muted); }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent); }
 .icon-link { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 7px; color: var(--text-muted); text-decoration: none; }
 .icon-link:hover, .icon-link.router-link-active { background: var(--primary-soft); color: var(--primary); }

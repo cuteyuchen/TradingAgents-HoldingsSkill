@@ -42,6 +42,35 @@ test('Shell keeps email private and hides the portfolio selector for one portfol
   await expect(page.locator('nav.top-nav')).toBeVisible()
 })
 
+test('Shell system status follows authoritative readiness instead of portfolio existence', async ({ acceptancePage: page, facts }) => {
+  let readinessRequests = 0
+  await page.route('**/api/v3/system/health', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ status: 'OK', components: {}, as_of: '2026-08-21T06:00:00Z' }),
+  }))
+  await page.route('**/api/v3/system/live-validation-readiness', (route) => {
+    readinessRequests += 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        status: 'NOT_READY',
+        ready: false,
+        blockers: [{ key: 'market_provider', reason: 'quote_provider_not_observed' }],
+        warnings: [],
+        checks: { market_provider: { status: 'BLOCKED', reason: 'quote_provider_not_observed' } },
+        evaluated_at: '2026-08-21T06:00:00Z',
+      }),
+    })
+  })
+
+  await login(page, facts.users.a)
+  await expect(page.locator('.system-status-button')).toContainText('需要配置')
+  await expect(page.locator('.system-status-button')).not.toContainText('正常')
+  expect(readinessRequests).toBeGreaterThan(0)
+})
+
 test('First run shows one actionable checklist instead of empty dashboard cards', async ({ acceptancePage: page }) => {
   await page.goto('/login')
   await page.getByRole('button', { name: '首次使用？创建账户', exact: true }).click()
