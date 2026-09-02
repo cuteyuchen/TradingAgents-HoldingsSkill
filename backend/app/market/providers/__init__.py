@@ -16,6 +16,7 @@ from .factory import (
     ProviderRegistry,
     QuoteProviderFactory,
     build_all_a_quote_provider,
+    build_kline_provider,
     build_critical_quote_provider,
     build_provider_chain,
     build_quote_chain,
@@ -34,6 +35,21 @@ from .health import (
 from .inmemory import FixtureQuoteProvider, InMemoryQuoteProvider, MemoryQuoteProvider
 from .acceptance import AcceptanceQuoteProvider
 from .tencent import TencentQuoteProvider
+from .fuyao import (
+    FallbackKLineProvider,
+    FuyaoCalendarProvider,
+    FuyaoDataProvider,
+    FuyaoKLineProvider,
+    FuyaoQuoteProvider,
+    FuyaoSecurityProvider,
+    parse_fuyao_quote,
+)
+from .fuyao_client import (
+    FuyaoAPIError,
+    FuyaoClient,
+    FuyaoNotConfigured,
+    FuyaoResponse,
+)
 from .identity import (
     EastmoneyCalendarProvider,
     EastmoneySecurityProvider,
@@ -64,6 +80,16 @@ __all__ = [
     "QuoteProvider",
     "SecurityProvider",
     "TencentQuoteProvider",
+    "FuyaoAPIError",
+    "FuyaoCalendarProvider",
+    "FuyaoClient",
+    "FuyaoDataProvider",
+    "FuyaoKLineProvider",
+    "FuyaoNotConfigured",
+    "FuyaoQuoteProvider",
+    "FuyaoResponse",
+    "FuyaoSecurityProvider",
+    "FallbackKLineProvider",
     "EastmoneyCalendarProvider",
     "EastmoneySecurityProvider",
     "OfficialCNCalendarProvider",
@@ -71,6 +97,7 @@ __all__ = [
     "build_security_provider",
     "DEFAULT_PROVIDER_REGISTRY",
     "build_all_a_quote_provider",
+    "build_kline_provider",
     "build_critical_quote_provider",
     "build_provider_chain",
     "build_quote_chain",
@@ -82,4 +109,5 @@ __all__ = [
     "MemoryQuoteProvider",
     "AcceptanceQuoteProvider",
     "parse_eastmoney_row",
+    "parse_fuyao_quote",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from ...config import settings
 from .base import QuoteProvider
 from .eastmoney import EastmoneyBatchQuoteProvider
 from .fallback import FallbackQuoteProvider, HealthTrackedQuoteProvider
@@ -14,6 +15,7 @@ from .health import (
 from .inmemory import InMemoryQuoteProvider
 from .acceptance import AcceptanceQuoteProvider
 from .tencent import TencentQuoteProvider
+from .fuyao import FallbackKLineProvider, FuyaoKLineProvider, FuyaoQuoteProvider
 
 
 ProviderBuilder = Callable[..., QuoteProvider]
@@ -24,6 +26,8 @@ _PROVIDER_ALIASES = {
     "em": "eastmoney_batch",
     "qq": "tencent",
     "qt_gtimg_cn": "tencent",
+    "ths": "fuyao",
+    "tonghuashun": "fuyao",
 }
 
 
@@ -65,6 +69,7 @@ DEFAULT_PROVIDER_REGISTRY = ProviderRegistry(
         "tencent": TencentQuoteProvider,
         "eastmoney": EastmoneyBatchQuoteProvider,
         "eastmoney_batch": EastmoneyBatchQuoteProvider,
+        "fuyao": FuyaoQuoteProvider,
         "inmemory": InMemoryQuoteProvider,
         "memory": InMemoryQuoteProvider,
         "fixture": InMemoryQuoteProvider,
@@ -90,7 +95,17 @@ class QuoteProviderFactory:
             self.provider_options.setdefault(_canonical_name(name), {}).update(options)
 
     def _create_adapter(self, name: str, **kwargs: Any) -> QuoteProvider:
-        options = dict(self.provider_options.get(_canonical_name(name), {}))
+        canonical = _canonical_name(name)
+        if settings.ACCEPTANCE_MODE and canonical not in {
+            "acceptance",
+            "inmemory",
+            "memory",
+            "fixture",
+        }:
+            # Acceptance runs are hermetic even when a developer happens to
+            # have a production API key in the host environment.
+            return self.registry.create("acceptance")
+        options = dict(self.provider_options.get(canonical, {}))
         options.update(kwargs)
         return self.registry.create(name, **options)
 
@@ -122,23 +137,31 @@ class QuoteProviderFactory:
     def build_critical_quote_chain(
         self,
         *,
-        primary: str = "tencent",
-        fallbacks: Iterable[str] = ("eastmoney_batch",),
+        primary: str | None = None,
+        fallbacks: Iterable[str] | None = None,
         health: ProviderHealthRegistry | None = None,
     ) -> QuoteProvider:
         if settings.ACCEPTANCE_MODE:
             return self.build_chain(("acceptance",), health=health)
+        primary = primary or settings.MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER
+        fallbacks = tuple(
+            fallbacks if fallbacks is not None else settings.MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS
+        )
         return self.build_chain((primary, *tuple(fallbacks)), health=health)
 
     def build_all_a_quote_chain(
         self,
         *,
-        primary: str = "eastmoney_batch",
-        fallbacks: Iterable[str] = ("tencent",),
+        primary: str | None = None,
+        fallbacks: Iterable[str] | None = None,
         health: ProviderHealthRegistry | None = None,
     ) -> QuoteProvider:
         if settings.ACCEPTANCE_MODE:
             return self.build_chain(("acceptance",), health=health)
+        primary = primary or settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER
+        fallbacks = tuple(
+            fallbacks if fallbacks is not None else settings.MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS
+        )
         return self.build_chain((primary, *tuple(fallbacks)), health=health)
 
 
@@ -164,6 +187,14 @@ def _configured_provider_options() -> dict[str, dict[str, Any]]:
         return {
             "eastmoney_batch": {
                 "min_interval_seconds": settings.EASTMONEY_MIN_INTERVAL_SECONDS,
+            },
+            "fuyao": {
+                "base_url": settings.FUYAO_BASE_URL,
+                "api_key": settings.FUYAO_API_KEY,
+                "connect_timeout": settings.FUYAO_CONNECT_TIMEOUT_SECONDS,
+                "read_timeout": settings.FUYAO_READ_TIMEOUT_SECONDS,
+                "max_retries": settings.FUYAO_MAX_RETRIES,
+                "min_interval_seconds": settings.FUYAO_MIN_INTERVAL_SECONDS,
             },
         }
     except (ImportError, AttributeError):
@@ -197,6 +228,8 @@ def make_provider(
         options["request"] = transport
     elif canonical in {"eastmoney", "eastmoney_batch", "em"} and transport is not None:
         options["transport"] = transport
+    elif canonical == "fuyao" and transport is not None:
+        options["transport"] = transport
     provider = QuoteProviderFactory(health=health).create(
         canonical,
         **options,
@@ -229,9 +262,17 @@ def build_quote_provider(
 
     route_name = _canonical_name(route)
     if primary is None:
-        primary = "tencent" if route_name in {"critical", "holding", "quote_critical"} else "eastmoney_batch"
+        primary = (
+            settings.MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER
+            if route_name in {"critical", "holding", "quote_critical"}
+            else settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER
+        )
     if fallbacks is None:
-        fallbacks = ("eastmoney_batch",) if route_name in {"critical", "holding", "quote_critical"} else ("tencent",)
+        fallbacks = (
+            settings.MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS
+            if route_name in {"critical", "holding", "quote_critical"}
+            else settings.MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS
+        )
     names = list(dict.fromkeys([primary, *fallbacks]))
     instances = [
         make_provider(name, transport=transport, request=request, timeout=timeout, health=health)
@@ -244,8 +285,8 @@ def build_quote_provider(
 
 def build_critical_quote_provider(
     *,
-    primary: str = "tencent",
-    fallbacks: Iterable[str] = ("eastmoney_batch",),
+    primary: str | None = None,
+    fallbacks: Iterable[str] | None = None,
     health: ProviderHealthRegistry | None = None,
     provider_options: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> QuoteProvider:
@@ -256,14 +297,37 @@ def build_critical_quote_provider(
 
 def build_all_a_quote_provider(
     *,
-    primary: str = "eastmoney_batch",
-    fallbacks: Iterable[str] = ("tencent",),
+    primary: str | None = None,
+    fallbacks: Iterable[str] | None = None,
     health: ProviderHealthRegistry | None = None,
     provider_options: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> QuoteProvider:
     return QuoteProviderFactory(health=health, provider_options=provider_options).build_all_a_quote_chain(
         primary=primary, fallbacks=fallbacks, health=health
     )
+
+
+def build_kline_provider(
+    *,
+    name: str | None = None,
+    fallback: bool = True,
+    fuyao_options: Mapping[str, Any] | None = None,
+) -> Any:
+    """Build the explicit historical provider chain used by sync jobs."""
+
+    selected = _canonical_name(name or settings.HISTORICAL_KLINE_PROVIDER)
+    if selected in {"fuyao", "fuyao_historical"}:
+        primary = FuyaoKLineProvider(**dict(fuyao_options or {}))
+        if not fallback:
+            return primary
+        from ..engine.history import LegacyMarketDataHistoryProvider
+
+        return FallbackKLineProvider([primary, LegacyMarketDataHistoryProvider()])
+    if selected in {"eastmoney", "eastmoney_daily_qfq", "legacy", "legacy_eastmoney"}:
+        from ..engine.history import LegacyMarketDataHistoryProvider
+
+        return LegacyMarketDataHistoryProvider()
+    raise ValueError(f"unknown kline provider: {name}")
 
 
 # Naming variants used by early Phase B callers.
@@ -276,6 +340,7 @@ __all__ = [
     "ProviderRegistry",
     "QuoteProviderFactory",
     "build_all_a_quote_provider",
+    "build_kline_provider",
     "build_provider_chain",
     "build_quote_provider",
     "build_quote_chain",

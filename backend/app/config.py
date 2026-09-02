@@ -138,19 +138,23 @@ class Settings:
     # Phase B market-data foundation. Provider order is centralized here so
     # adapters and business services never each invent their own fallback chain.
     MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER: str = os.getenv(
-        "MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER", "eastmoney_batch"
+        "MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER", "fuyao"
     ).strip().lower()
     MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS: tuple[str, ...] = tuple(
         value.strip().lower()
-        for value in os.getenv("MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS", "tencent").split(",")
+        for value in os.getenv(
+            "MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS", "eastmoney_batch,tencent"
+        ).split(",")
         if value.strip()
     )
     MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER: str = os.getenv(
-        "MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER", "tencent"
+        "MARKET_QUOTE_CRITICAL_PRIMARY_PROVIDER", "fuyao"
     ).strip().lower()
     MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS: tuple[str, ...] = tuple(
         value.strip().lower()
-        for value in os.getenv("MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS", "eastmoney_batch").split(",")
+        for value in os.getenv(
+            "MARKET_QUOTE_CRITICAL_FALLBACK_PROVIDERS", "tencent,eastmoney_batch"
+        ).split(",")
         if value.strip()
     )
     PROVIDER_FAILURE_THRESHOLD: int = int(os.getenv("PROVIDER_FAILURE_THRESHOLD", "3"))
@@ -167,15 +171,36 @@ class Settings:
     EASTMONEY_MIN_INTERVAL_SECONDS: float = float(
         os.getenv("EASTMONEY_MIN_INTERVAL_SECONDS", "0.8")
     )
+    # Fuyao is the production financial-data primary.  An empty key is valid
+    # for local bootstrap and acceptance mode: the adapter reports
+    # ``not_configured`` and the existing fallback chain remains available.
+    FUYAO_BASE_URL: str = os.getenv("FUYAO_BASE_URL", "https://fuyao.aicubes.cn").rstrip("/")
+    FUYAO_API_KEY: str = os.getenv("FUYAO_API_KEY", "").strip()
+    FUYAO_CONNECT_TIMEOUT_SECONDS: float = float(
+        os.getenv("FUYAO_CONNECT_TIMEOUT_SECONDS", "5")
+    )
+    FUYAO_READ_TIMEOUT_SECONDS: float = float(
+        os.getenv("FUYAO_READ_TIMEOUT_SECONDS", "20")
+    )
+    FUYAO_MAX_RETRIES: int = max(0, int(os.getenv("FUYAO_MAX_RETRIES", "2")))
+    FUYAO_MIN_INTERVAL_SECONDS: float = max(
+        0.0, float(os.getenv("FUYAO_MIN_INTERVAL_SECONDS", "0.2"))
+    )
+    FUYAO_CAPABILITY_PROBE_ENABLED: bool = _bool_env(
+        "FUYAO_CAPABILITY_PROBE_ENABLED", "false"
+    )
     SECURITY_MASTER_SYNC_ENABLED: bool = _bool_env("SECURITY_MASTER_SYNC_ENABLED", "false")
     CALENDAR_SYNC_ENABLED: bool = _bool_env("CALENDAR_SYNC_ENABLED", "false")
     # Identity data lifecycle.  The offline calendar bootstrap is safe to run
     # on every startup; remote providers are always asynchronous and opt-in.
     CALENDAR_BOOTSTRAP_ENABLED: bool = _bool_env("CALENDAR_BOOTSTRAP_ENABLED", "true")
-    CALENDAR_SYNC_PROVIDER: str = os.getenv("CALENDAR_SYNC_PROVIDER", "eastmoney_sse_calendar").strip().lower()
+    CALENDAR_SYNC_PROVIDER: str = os.getenv("CALENDAR_SYNC_PROVIDER", "fuyao").strip().lower()
     CALENDAR_SYNC_LOOKBACK_DAYS: int = int(os.getenv("CALENDAR_SYNC_LOOKBACK_DAYS", "370"))
     SECURITY_MASTER_SYNC_PROVIDER: str = os.getenv(
-        "SECURITY_MASTER_SYNC_PROVIDER", "eastmoney_security"
+        "SECURITY_MASTER_SYNC_PROVIDER", "fuyao"
+    ).strip().lower()
+    HISTORICAL_KLINE_PROVIDER: str = os.getenv(
+        "HISTORICAL_KLINE_PROVIDER", "fuyao"
     ).strip().lower()
     # Sync routes are global-data mutation endpoints, so they require both an
     # explicit feature flag and a separate operator token.  JWT login alone is

@@ -80,6 +80,7 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         self.last_errors: list[dict[str, object]] = []
         self.last_provider_counts: dict[str, int] = {}
         self.last_provider_endpoints: dict[str, str] = {}
+        self.last_provider_request_ids: dict[str, list[str]] = {}
         self.last_fallback_level = 0
         self.last_latency_ms: dict[str, float] = {}
         self.last_provider_attempts: list[dict[str, object]] = []
@@ -88,10 +89,19 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         return getattr(self.provider, name)
 
     def get_quotes(self, codes: Iterable[str]) -> dict[str, NormalizedQuote]:
+        return self._get_quotes(codes, all_market=False)
+
+    def _get_quotes(
+        self,
+        codes: Iterable[str],
+        *,
+        all_market: bool,
+    ) -> dict[str, NormalizedQuote]:
         requested = list(dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)))
         self.last_errors = []
         self.last_provider_counts = {}
         self.last_provider_endpoints = {self.name: self.endpoint} if self.endpoint else {}
+        self.last_provider_request_ids = {}
         self.last_latency_ms = {}
         self.last_provider_attempts = []
         if not requested:
@@ -110,7 +120,11 @@ class HealthTrackedQuoteProvider(QuoteProvider):
             raise ProviderCircuitOpen("provider circuit is open")
         started = monotonic()
         try:
-            raw_result = self.provider.get_quotes(requested) or {}
+            raw_result = (
+                self.provider.get_all_a_share_quotes(requested)
+                if all_market
+                else self.provider.get_quotes(requested)
+            ) or {}
             if not isinstance(raw_result, Mapping):
                 raise TypeError("provider returned a non-mapping quote batch")
             result = _normalized_batch(raw_result, provider_name=self.name, now=utc_now())
@@ -169,13 +183,20 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         return result
 
     def get_all_a_share_quotes(self, universe: Iterable[str]) -> dict[str, NormalizedQuote]:
-        return self.get_quotes(universe)
+        return self._get_quotes(universe, all_market=True)
 
     def get_run_metadata(self) -> dict[str, object]:
         return {
             "provider": self.name,
             "provider_counts": dict(self.last_provider_counts),
             "provider_endpoints": dict(self.last_provider_endpoints),
+            "provider_request_ids": {
+                self.name: list(dict.fromkeys(
+                    str(item.get("request_id"))
+                    for item in (getattr(self.provider, "last_responses", []) or [])
+                    if isinstance(item, Mapping) and item.get("request_id")
+                ))
+            },
             "provider_attempts": list(self.last_provider_attempts),
             "fallback_level": 0,
             "fallback_errors": list(self.last_errors),
@@ -203,22 +224,33 @@ class FallbackQuoteProvider(QuoteProvider):
         self.last_errors: list[dict[str, object]] = []
         self.last_provider_counts: dict[str, int] = {}
         self.last_provider_endpoints: dict[str, str] = {}
+        self.last_provider_request_ids: dict[str, list[str]] = {}
         self.last_fallback_level: int = 0
         self.last_latency_ms: dict[str, float] = {}
         self.last_provider_attempts: list[dict[str, object]] = []
 
     def get_quotes(self, codes: Iterable[str]) -> dict[str, NormalizedQuote]:
+        return self._get_quotes(codes, all_market=False)
+
+    def _get_quotes(
+        self,
+        codes: Iterable[str],
+        *,
+        all_market: bool,
+    ) -> dict[str, NormalizedQuote]:
         requested = list(dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)))
         remaining = requested[:]
         results: dict[str, NormalizedQuote] = {}
         errors: list[dict[str, object]] = []
         provider_counts: dict[str, int] = {}
         provider_endpoints: dict[str, str] = {}
+        provider_request_ids: dict[str, list[str]] = {}
         provider_latencies: dict[str, float] = {}
         provider_attempts: list[dict[str, object]] = []
         self.last_errors = []
         self.last_provider_counts = {}
         self.last_provider_endpoints = {}
+        self.last_provider_request_ids = {}
         self.last_fallback_level = 0
         self.last_latency_ms = {}
         self.last_provider_attempts = []
@@ -242,7 +274,11 @@ class FallbackQuoteProvider(QuoteProvider):
             started = monotonic()
             provider_endpoints[provider_name] = str(getattr(provider, "endpoint", "") or "")
             try:
-                batch = provider.get_quotes(remaining) or {}
+                batch = (
+                    provider.get_all_a_share_quotes(remaining)
+                    if all_market
+                    else provider.get_quotes(remaining)
+                ) or {}
                 if not isinstance(batch, Mapping):
                     raise TypeError("provider returned a non-mapping quote batch")
                 # Normalize inside the guarded provider boundary so malformed
@@ -270,6 +306,13 @@ class FallbackQuoteProvider(QuoteProvider):
                 continue
             latency_ms = (monotonic() - started) * 1000
             provider_latencies[provider_name] = latency_ms
+            request_ids = [
+                str(item.get("request_id"))
+                for item in (getattr(provider, "last_responses", []) or [])
+                if isinstance(item, Mapping) and item.get("request_id")
+            ]
+            if request_ids:
+                provider_request_ids[provider_name] = list(dict.fromkeys(request_ids))
             # Some adapters return symbols such as ``sh600519`` while others
             # use the internal six-digit code; ``by_code`` is canonical here.
             next_remaining: list[str] = []
@@ -353,6 +396,7 @@ class FallbackQuoteProvider(QuoteProvider):
         self.last_errors = errors
         self.last_provider_counts = provider_counts
         self.last_provider_endpoints = {key: value for key, value in provider_endpoints.items() if value}
+        self.last_provider_request_ids = provider_request_ids
         self.last_fallback_level = max(
             [int(item.fallback_level or 0) for item in results.values()],
             default=0,
@@ -362,7 +406,7 @@ class FallbackQuoteProvider(QuoteProvider):
         return results
 
     def get_all_a_share_quotes(self, universe: Iterable[str]) -> dict[str, NormalizedQuote]:
-        return self.get_quotes(universe)
+        return self._get_quotes(universe, all_market=True)
 
     def get_run_metadata(self) -> dict[str, object]:
         providers = list(self.last_provider_counts)
@@ -371,6 +415,7 @@ class FallbackQuoteProvider(QuoteProvider):
             "provider": actual_provider,
             "provider_counts": dict(self.last_provider_counts),
             "provider_endpoints": dict(self.last_provider_endpoints),
+            "provider_request_ids": dict(self.last_provider_request_ids),
             "provider_attempts": list(self.last_provider_attempts),
             "fallback_level": self.last_fallback_level,
             "fallback_errors": list(self.last_errors),

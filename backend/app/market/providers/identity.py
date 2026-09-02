@@ -20,6 +20,7 @@ import requests
 
 from ..codes import exchange_for_code, normalize_security_code
 from .base import CalendarProvider, SecurityProvider
+from .fuyao import FuyaoCalendarProvider, FuyaoSecurityProvider
 
 
 EASTMONEY_SECURITY_URL = "https://push2.eastmoney.com/api/qt/clist/get"
@@ -325,6 +326,8 @@ class EastmoneyCalendarProvider(CalendarProvider):
 
 def build_security_provider(name: str, **kwargs: Any) -> SecurityProvider:
     canonical = str(name or "").strip().lower().replace("-", "_")
+    if canonical in {"fuyao", "ths", "tonghuashun", "fuyao_security"}:
+        return FuyaoSecurityProvider(**kwargs)
     if canonical in {"eastmoney", "eastmoney_security"}:
         return EastmoneySecurityProvider(**kwargs)
     raise ValueError(f"unknown security provider: {name}")
@@ -332,6 +335,8 @@ def build_security_provider(name: str, **kwargs: Any) -> SecurityProvider:
 
 def build_calendar_provider(name: str, **kwargs: Any) -> CalendarProvider:
     canonical = str(name or "").strip().lower().replace("-", "_")
+    if canonical in {"fuyao", "ths", "tonghuashun", "fuyao_calendar"}:
+        return FuyaoCalendarProvider(**kwargs)
     if canonical in {"official", "official_cn", OFFICIAL_CALENDAR_SOURCE}:
         return OfficialCNCalendarProvider()
     if canonical in {"eastmoney", "eastmoney_calendar", "eastmoney_sse_calendar"}:
@@ -344,6 +349,8 @@ __all__ = [
     "EASTMONEY_SECURITY_URL",
     "EastmoneyCalendarProvider",
     "EastmoneySecurityProvider",
+    "FuyaoCalendarProvider",
+    "FuyaoSecurityProvider",
     "OFFICIAL_CALENDAR_SOURCE",
     "OfficialCNCalendarProvider",
     "build_calendar_provider",

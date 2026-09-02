@@ -208,6 +208,7 @@ def build_quote_snapshot(
 
     provider_counts: dict[str, int] = {}
     provider_endpoints: dict[str, list[str]] = {}
+    provider_request_ids: dict[str, list[str]] = {}
     provider_fallback_levels: dict[str, int] = {}
     provider_source_timestamps: dict[str, datetime] = {}
     provider_quality_statuses: dict[str, str] = {}
@@ -237,6 +238,11 @@ def build_quote_snapshot(
             endpoints = provider_endpoints.setdefault(provider_name, [])
             if quote.raw_reference not in endpoints:
                 endpoints.append(quote.raw_reference)
+        request_id = quote.metadata.get("request_id") if isinstance(quote.metadata, Mapping) else None
+        if request_id:
+            request_ids = provider_request_ids.setdefault(provider_name, [])
+            if str(request_id) not in request_ids:
+                request_ids.append(str(request_id))
     actual_provider = (
         next(iter(provider_counts))
         if len(provider_counts) == 1
@@ -249,6 +255,12 @@ def build_quote_snapshot(
         default=0,
     )
     snapshot_metadata = dict(metadata or {})
+    for name, raw_ids in (snapshot_metadata.get("provider_request_ids") or {}).items():
+        values = [raw_ids] if isinstance(raw_ids, str) else list(raw_ids or [])
+        request_ids = provider_request_ids.setdefault(str(name).strip().lower(), [])
+        for value in values:
+            if str(value).strip() and str(value) not in request_ids:
+                request_ids.append(str(value))
     attempted_endpoints: dict[str, list[str]] = {}
     for name, raw_endpoints in (snapshot_metadata.get("provider_endpoints") or {}).items():
         values = [raw_endpoints] if isinstance(raw_endpoints, str) else list(raw_endpoints or [])
@@ -273,6 +285,7 @@ def build_quote_snapshot(
             "requested_route": requested_route,
             "provider_counts": provider_counts,
             "provider_endpoints": attempted_endpoints,
+            "provider_request_ids": provider_request_ids,
             "provider_fallback_levels": provider_fallback_levels,
             "provider_source_timestamps": {
                 name: timestamp.isoformat()
