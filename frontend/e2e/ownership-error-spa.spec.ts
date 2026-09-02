@@ -28,23 +28,34 @@ test('Ownership returns a non-leaking not-found response for another user', asyn
   expect(resources.reports.body).toEqual([])
 
   await page.goto('/reports')
-  await expect(page.getByRole('heading', { name: '分析报告' })).toBeVisible()
+  await expect(page).toHaveURL(/\/analysis/)
+  await expect(page.getByRole('heading', { name: '今日分析' })).toBeVisible()
   await expect(page.locator('body')).not.toContainText('User B private fixture')
+
+  await page.goto('/shadow')
+  await expect(page).toHaveURL(/\/simulation/)
+  await expect(page.locator('.metric-grid.six .metric-tile').filter({ hasText: '样本天数' }).locator('strong')).toHaveText('—')
+
+  await page.goto('/history')
+  await expect(page).toHaveURL(/\/history/)
+  await expect(page.getByRole('heading', { name: '历史表现', exact: true })).toBeVisible()
+  await expect(page.locator('.metric-grid.six .metric-tile').filter({ hasText: '样本天数' }).locator('strong')).toHaveText('—')
 })
 
 test('Backend error renders ErrorState and retry recovers without clearing the session', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   allowExpectedHttpError(page, 500)
-  let failOnce = true
+  let shouldFail = true
   await page.route('**/api/v3/portfolios/*/dashboard/today', async (route) => {
-    if (!failOnce) return route.continue()
-    failOnce = false
+    if (!shouldFail) return route.continue()
     await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'forced acceptance failure' }) })
   })
+  await page.goto('/holdings')
   await page.goto('/dashboard')
-  await expect(page.getByRole('alert').filter({ hasText: '读取失败' })).toBeVisible()
+  await expect(page.getByRole('alert').filter({ hasText: '数据暂时加载失败' })).toBeVisible()
+  shouldFail = false
   await page.getByRole('button', { name: '重试', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '今日操作台' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /今天/ })).toBeVisible()
   await expect(page.evaluate(() => Boolean(localStorage.getItem('advisor_v2_refresh_token')))).resolves.toBe(true)
   await page.unroute('**/api/v3/portfolios/*/dashboard/today')
 })
@@ -52,17 +63,21 @@ test('Backend error renders ErrorState and retry recovers without clearing the s
 test('SPA deep links load and survive refresh', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   const routes = [
-    ['/dashboard', '今日操作台'],
-    ['/reports', '分析报告'],
-    ['/shadow', 'Shadow 验证'],
-    ['/research', '历史回放与参数校准'],
-    ['/system', '系统运维'],
-    ['/settings', '系统设置'],
+    ['/dashboard', /今天/],
+    ['/reports', '今日分析'],
+    ['/shadow', '模拟跟随'],
+    ['/research', '历史'],
+    ['/system', '设置'],
+    ['/settings', '设置'],
   ] as const
   for (const [route, heading] of routes) {
     await openPage(page, route, heading)
     await page.reload()
-    await expect(page).toHaveURL(new RegExp(route.replaceAll('/', '\\/')))
-    await expect(page.getByRole('heading', { name: heading })).toBeVisible()
+    const aliases: Record<string, string> = { '/reports': '/analysis', '/shadow': '/simulation', '/research': '/history', '/system': '/settings' }
+    await expect(page).toHaveURL(new RegExp((aliases[route] || route).replaceAll('/', '\\/')))
+    const headingLocator = typeof heading === 'string'
+      ? page.getByRole('heading', { name: heading, exact: true })
+      : page.getByRole('heading', { name: heading })
+    await expect(headingLocator).toBeVisible()
   }
 })

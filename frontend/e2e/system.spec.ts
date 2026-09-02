@@ -2,7 +2,7 @@ import { test, expect, login, openPage } from './fixtures'
 
 test('System renders the real NOT_READY readiness result and blockers', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
-  await openPage(page, '/system', '系统运维')
+  await openPage(page, '/system', '设置')
 
   const card = page.locator('.live-readiness-card')
   await expect(card.getByText('NOT_READY', { exact: true }).first()).toBeVisible()

@@ -88,10 +88,10 @@ def main() -> int:
     npm = "npm.cmd" if os.name == "nt" else "npm"
     node_binary = os.environ.get("PLAYWRIGHT_NODE_BIN", "").strip()
     if node_binary:
-        vite_command = [node_binary, str(FRONTEND / "node_modules" / "vite" / "bin" / "vite.js")]
+        vite_command = [node_binary, str(FRONTEND / "node_modules" / "vite" / "bin" / "vite.js"), "preview"]
         playwright_command = [node_binary, str(FRONTEND / "node_modules" / "playwright" / "cli.js")]
     else:
-        vite_command = [npm, "run", "dev", "--"]
+        vite_command = [npm, "run", "preview", "--"]
         playwright_command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "playwright"]
 
     with tempfile.TemporaryDirectory(prefix="phase-o1-acceptance-") as runtime:
@@ -140,6 +140,7 @@ def main() -> int:
             "alembic": ARTIFACTS / "alembic.log",
             "seed": ARTIFACTS / "seed.log",
             "backend": ARTIFACTS / "backend.log",
+            "frontend-build": ARTIFACTS / "frontend-build.log",
             "frontend": ARTIFACTS / "frontend.log",
             "playwright": ARTIFACTS / "playwright.log",
         }
@@ -151,6 +152,7 @@ def main() -> int:
         try:
             _run_checked([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=BACKEND, env=env, log_path=logs["alembic"])
             _run_checked([sys.executable, str(ROOT / "scripts" / "acceptance_seed.py"), "--output", str(facts_path)], cwd=ROOT, env=env, log_path=logs["seed"])
+            _run_checked([npm, "run", "build"], cwd=FRONTEND, env=env, log_path=logs["frontend-build"])
 
             backend_log = logs["backend"].open("w", encoding="utf-8")
             backend_process = subprocess.Popen(
@@ -186,9 +188,9 @@ def main() -> int:
                 shutil.copy2(facts_path, ARTIFACTS / "facts.json")
 
         if exit_code:
-            print(f"Phase O.1 acceptance failed; artifacts: {ARTIFACTS}", file=sys.stderr)
+            print(f"Phase O.2 acceptance failed; artifacts: {ARTIFACTS}", file=sys.stderr)
         else:
-            print(f"Phase O.1 acceptance passed; artifacts: {ARTIFACTS}")
+            print(f"Phase O.2 acceptance passed; artifacts: {ARTIFACTS}")
         return exit_code
 
 

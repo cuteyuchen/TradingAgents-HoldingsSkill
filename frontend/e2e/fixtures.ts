@@ -56,6 +56,11 @@ export const test = base.extend<{
       if (status !== null && allowedStatuses.has(status) && message.text().startsWith('Failed to load resource')) return
       errors.push(`console.error: ${message.text()}`)
     })
+    page.on('response', (response) => {
+      if (response.status() === 401 && !allowedStatuses.has(401)) {
+        errors.push(`http response 401: ${response.url()}`)
+      }
+    })
     page.on('pageerror', (error) => {
       errors.push(`pageerror: ${error.message}`)
     })
@@ -74,13 +79,14 @@ export { expect }
 
 export async function login(page: Page, user: AcceptanceFacts['users']['a']): Promise<void> {
   await page.goto('/login')
-  await expect(page.getByRole('heading', { name: '登录持仓投研系统' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '进入投资驾驶舱' })).toBeVisible()
   await page.locator('input[type="email"]').fill(user.email)
   await page.locator('input[type="password"]').fill(user.password)
   await page.getByRole('button', { name: '登录', exact: true }).click()
   await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/)
-  await expect(page.getByRole('heading', { name: '今日操作台' })).toBeVisible()
-  await expect(page.locator('.global-portfolio-select .n-base-selection')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByRole('heading', { name: /今天/ })).toBeVisible({ timeout: 20_000 })
+  await expect(page.locator('header.topbar')).toBeVisible()
+  await expect(page.locator('.shared-loading')).toHaveCount(0, { timeout: 20_000 })
 }
 
 export function allowExpectedHttpError(page: Page, status: number): void {
@@ -89,17 +95,31 @@ export function allowExpectedHttpError(page: Page, status: number): void {
 
 export async function selectPortfolio(page: Page, label: string): Promise<void> {
   const control = page.locator('.global-portfolio-select .n-base-selection')
+  await expect(control).toBeVisible({ timeout: 20_000 })
   await control.click()
   const option = page.locator('.n-base-select-option').filter({ hasText: label }).last()
   await expect(option).toBeVisible()
   await option.click()
-  await expect(page.locator('.portfolio-context-bar')).toContainText(label)
+  await expect(control).toContainText(label)
 }
 
-export async function openPage(page: Page, route: string, heading: string): Promise<void> {
+export async function openPage(page: Page, route: string, heading: string | RegExp): Promise<void> {
+  const aliases: Record<string, string> = {
+    '/upload': '/holdings',
+    '/reports': '/analysis',
+    '/shadow': '/simulation',
+    '/research': '/history',
+    '/governance': '/settings',
+    '/system': '/settings',
+  }
+  const path = route.split('?')[0]
+  const expectedPath = aliases[path] || path
   await page.goto(route)
-  await expect(page).toHaveURL(new RegExp(`${route.split('?')[0].replaceAll('/', '\\/')}`))
-  await expect(page.getByRole('heading', { name: heading })).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`${expectedPath.replaceAll('/', '\\/')}`))
+  const headingLocator = typeof heading === 'string'
+    ? page.getByRole('heading', { name: heading, exact: true })
+    : page.getByRole('heading', { name: heading })
+  await expect(headingLocator).toBeVisible()
 }
 
 export async function captureScreenshot(page: Page, name: string): Promise<string> {

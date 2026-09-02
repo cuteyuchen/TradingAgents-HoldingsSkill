@@ -3,10 +3,12 @@ import { test, expect, login, openPage } from './fixtures'
 test('Reports exposes final decision, checkpoint, mode, quality, market context, and lineage', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   await page.goto(`/reports?portfolio=${facts.portfolios.action}&run=${facts.runs.action}`)
-  await expect(page.getByRole('heading', { name: '分析报告' })).toBeVisible()
+  await expect(page).toHaveURL(/\/analysis/)
+  await expect(page.getByRole('heading', { name: '今日分析' })).toBeVisible()
   await expect(page.locator('.decision-hero')).toContainText('ACTION')
-  await expect(page.locator('.action-table-panel')).toContainText('今日持仓操作')
+  await expect(page.locator('.action-table-panel')).toContainText('持仓动作')
   await expect(page.locator('.n-tabs-tab').filter({ hasText: '完整分析流程' })).toBeVisible()
+  await page.locator('.n-tabs-tab').filter({ hasText: '完整分析流程' }).click()
   await expect(page.locator('.workflow-heading')).toContainText('分析与辩论记录')
   await expect(page.locator('.flow-rail')).toContainText('风控')
   await expect(page.locator('.workflow-stage').filter({ hasText: '组合经理最终决策' })).toContainText('ACTION')
@@ -16,7 +18,7 @@ test('Reports exposes final decision, checkpoint, mode, quality, market context,
 
 test('Research creates a deterministic run, recovers the durable result, and shows PARTIAL PIT capability', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
-  await openPage(page, '/research', '历史回放与参数校准')
+  await openPage(page, '/research', '历史')
   await expect(page.getByText('PARTIAL_PIT_RECOMPUTE', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('部分历史输入缺失，仅供研究', { exact: false })).toBeVisible()
 
@@ -38,7 +40,7 @@ test('Research creates a deterministic run, recovers the durable result, and sho
 
 test('Governance keeps proposal evidence and requires explicit activation confirmation', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
-  await openPage(page, '/governance', '参数治理')
+  await openPage(page, '/governance', '设置')
   await expect(page.getByText('不会自动应用参数', { exact: false })).toBeVisible()
   await expect(page.locator('.proposal-row').filter({ hasText: `#${facts.governance.proposal_id}` })).toBeVisible()
   await expect(page.getByText('Config Hash', { exact: true }).first()).toBeVisible()
