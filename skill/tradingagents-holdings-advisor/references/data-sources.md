@@ -2,6 +2,27 @@
 
 Use this file when collecting data for intraday portfolio advice. The data architecture is inspired by `TradingAgents-astock`'s direct HTTP A-share model, `TradingAgents-AShare`'s centralized DataCollector pattern, and `TauricResearch/TradingAgents`' verified data-access contract.
 
+## V3 O.2 Fuyao Routing Addendum
+
+For the backend V3 workbench, Fuyao is the primary production financial-data
+provider. The authoritative core routes are:
+
+- all-A quotes: `fuyao -> eastmoney_batch -> tencent`;
+- critical holding/candidate quotes: `fuyao -> tencent -> eastmoney_batch`;
+- security master: Fuyao ticker list/search, then the existing local master;
+- trading calendar: Fuyao syncs the persisted local calendar; runtime scheduler
+  reads the local table rather than making an ad hoc remote request;
+- historical daily bars: Fuyao REST or the official market dump, with the
+  existing `available_at <= cutoff` gate and provider lineage;
+- valuation, financials, index/industry and special data are context/evidence
+  layers. They do not add points to Market Score or Candidate Score.
+
+The older source tables below describe the Skill's standalone/public-data
+fallback guidance. They do not override the V3 backend provider configuration.
+All Fuyao requests use the official `X-api-key` header and envelope contract;
+missing, stale, invalid, conflicting, or unauthorized data stays missing or
+degraded and is never replaced with a fabricated zero.
+
 ## Upstream Update Notes
 
 - `TradingAgents` v0.3.0 emphasizes deterministic instrument identity, explicit provider chains, stale data rejection, and structured report output. Mirror this by keeping `source_chain`, `quote_time`, `market_session`, `missing_fields`, and `quality_gate` in every snapshot.

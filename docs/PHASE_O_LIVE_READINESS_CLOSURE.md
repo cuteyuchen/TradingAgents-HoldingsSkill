@@ -19,6 +19,21 @@ Acceptance mode：`OFF`
 本文件记录 O.2-A 的 readiness 基线，不把 smoke 结果写成 Live Evidence，也不提前进入
 Phase P。只有用户明确确认 `MANUAL_UAT = PASS` 后，才可以按实时 endpoint 重新开始 O.2-B。
 
+## O.2 Fuyao Integration Addendum
+
+2026-09-02：本分支已加入 Fuyao REST client、canonical quote/security/calendar/
+historical adapters、官方 market-dump bootstrap、corporate-action lineage、
+valuation/financial/index/special-data context，以及 Fuyao 状态与市场简报接口。
+默认核心路由已更新为 Fuyao primary，并保留 Eastmoney batch/Tencent fallback；无
+`FUYAO_API_KEY` 时仍可启动，但系统必须显示配置缺失或数据受限。
+
+本 addendum 不把 provider adapter 的 mock/fixture 测试算作真实 provider
+observation。真实 Fuyao smoke 仅在本机已经配置密钥时运行；否则记录
+`REAL_FUYAO_SMOKE = NOT_RUN / API_KEY_NOT_CONFIGURED`。财务、估值、当前指数成分与
+特色数据的历史 PIT 仍按 `docs/FUYAO_PIT_CAPABILITY_AUDIT.md` 标记为未证明或未知。
+因此本阶段仍保持 `MANUAL_UAT = REQUIRED`，且 `LIVE_READINESS` 必须以真实 readiness
+endpoint 的实际 blocker 为准。
+
 ## O.2 UX 自动化记录
 
 2026-09-02 的本地工程验证已完成：前端 typecheck/build 通过，后端全量 `428 passed`，

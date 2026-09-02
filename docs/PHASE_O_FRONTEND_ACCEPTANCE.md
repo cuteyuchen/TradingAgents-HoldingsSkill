@@ -5,6 +5,17 @@ Baseline SHA：`1e000b086e45cf550ae7740199cd9b4a3111afc7`
 Branch：`codex/phase-o-frontend-productization`
 当前记录：Phase O.2 Single-User Investment Workbench UX Rework。
 
+## O.2 Fuyao Addendum
+
+本分支后续补入 Fuyao 作为主要 production financial-data provider。首页只增加紧凑的
+主要指数、行业与情绪上下文；持仓页增加实时标记/今日贡献与按需基本面估值；分析页增加
+市场简报和候选 evidence；设置页增加 Fuyao 连接与 capability 状态。上述内容均为
+deterministic context，不改 Market Score、Candidate Score、Portfolio Gate 或 Shadow。
+
+无 `FUYAO_API_KEY` 时应用仍应启动并显示 `未配置`/`数据受限`，不显示密钥、不把可选数据
+缺失当作零。Fuyao 的真实 smoke 与 live readiness 仍须单独验证，不能由 acceptance
+fixture 或本地 mock 代替；`MANUAL_UAT` 继续为 `REQUIRED`。
+
 ## Gate 结论
 
 | Gate | 结论 | 依据 |
