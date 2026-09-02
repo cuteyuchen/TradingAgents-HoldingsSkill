@@ -8,7 +8,7 @@ const props = withDefaults(defineProps<{
   title?: string
   retryLabel?: string
 }>(), {
-  title: '读取失败',
+  title: '数据暂时加载失败',
   retryLabel: '重试',
 })
 const emit = defineEmits<{ retry: [] }>()
@@ -25,6 +25,11 @@ const kind = computed(() => props.error instanceof ApiError ? props.error.kind :
       <p>{{ message }}</p>
       <small v-if="kind === 'network'">请确认后端服务已启动，恢复后可以直接重试。</small>
       <small v-if="requestId">请求 ID：{{ requestId }}</small>
+      <n-collapse v-if="kind !== 'network' && (props.error instanceof ApiError)" class="error-details">
+        <n-collapse-item title="技术详情" name="error">
+          <dl><div><dt>Code</dt><dd>{{ (props.error as ApiError).code || '—' }}</dd></div><div><dt>Status</dt><dd>{{ (props.error as ApiError).status || '—' }}</dd></div><div><dt>Request ID</dt><dd>{{ requestId || '—' }}</dd></div></dl>
+        </n-collapse-item>
+      </n-collapse>
     </div>
     <n-button secondary size="small" @click="emit('retry')">
       <template #icon><RefreshCw :size="14" /></template>
@@ -39,4 +44,5 @@ const kind = computed(() => props.error instanceof ApiError ? props.error.kind :
 .shared-error strong { display: block; color: var(--app-text); }
 .shared-error p { margin: 3px 0; color: var(--app-text); overflow-wrap: anywhere; }
 .shared-error small { display: block; margin-top: 3px; color: var(--app-text-muted); overflow-wrap: anywhere; }
+.error-details { margin-top: 8px; color: var(--app-text-muted); }.error-details :deep(.n-collapse-item__header) { padding: 3px 0; font-size: 11px; }.error-details dl { margin: 0; }.error-details dl div { display: flex; gap: 10px; padding: 3px 0; }.error-details dt { width: 70px; }.error-details dd { margin: 0; color: var(--app-text); word-break: break-word; }
 </style>

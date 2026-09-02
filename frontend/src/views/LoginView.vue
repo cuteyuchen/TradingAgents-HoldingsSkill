@@ -17,7 +17,7 @@ const confirmPassword = ref('')
 const loading = ref(false)
 const error = ref('')
 
-const title = computed(() => (mode.value === 'login' ? '登录持仓投研系统' : '创建账户'))
+const title = computed(() => (mode.value === 'login' ? '进入投资驾驶舱' : '建立本地安全入口'))
 
 async function submit() {
   error.value = ''
@@ -56,14 +56,14 @@ function switchMode() {
   <div class="login-page">
     <section class="intro-panel">
       <div class="intro-content">
-        <div class="intro-badge"><Activity :size="18" /> TradingAgents Holdings</div>
-        <h1>把每日持仓，变成<br><span>可追踪的决策记录</span></h1>
-        <p>上传券商截图，确认真实持仓，结合最新行情、技术数据和历史分析，生成结构化的组合建议。</p>
+        <div class="intro-badge"><Activity :size="18" /> 投资驾驶舱</div>
+        <h1>每天打开，先看清楚<br><span>今天该不该动</span></h1>
+        <p>从最近确认的持仓快照出发，查看市场、组合、最终建议和模拟跟随记录。技术证据会在需要时展开。</p>
         <div class="feature-grid">
-          <div><strong>独立模型</strong><span>识图与分析模型分别配置</span></div>
-          <div><strong>历史记忆</strong><span>识别持仓变化和建议反转</span></div>
-          <div><strong>自动执行</strong><span>开盘后按计划分析并通知</span></div>
-          <div><strong>完整留痕</strong><span>截图、数据和报告可回溯</span></div>
+          <div><strong>今日市场</strong><span>先看状态、质量与数据新鲜度</span></div>
+          <div><strong>我的组合</strong><span>只围绕已确认持仓做判断</span></div>
+          <div><strong>最终建议</strong><span>候选之前，先看组合决策</span></div>
+          <div><strong>模拟跟随</strong><span>记录结果，但不会发送真实订单</span></div>
         </div>
       </div>
     </section>
@@ -73,7 +73,7 @@ function switchMode() {
         <div class="login-icon"><LockKeyhole :size="25" /></div>
         <div>
           <h2>{{ title }}</h2>
-          <p>{{ mode === 'login' ? '使用你的账户进入系统。' : '首次部署可创建管理员账户。' }}</p>
+          <p>{{ mode === 'login' ? '登录后进入你的个人投资工作区。' : '首次使用时创建本地登录账户。' }}</p>
         </div>
         <n-alert v-if="route.query.expired" type="warning" :show-icon="false">登录状态已过期，请重新登录。</n-alert>
         <n-form label-placement="top" @submit.prevent="submit">
@@ -104,22 +104,28 @@ function switchMode() {
 
 <style scoped>
 .login-page { display: grid; min-height: 100dvh; grid-template-columns: minmax(0, 1.15fr) minmax(420px, .85fr); }
-.intro-panel { position: relative; display: grid; place-items: center; overflow: hidden; padding: 60px; background: radial-gradient(circle at 20% 20%, rgba(59,130,246,.3), transparent 35%), linear-gradient(145deg, #07111f, #0d2440 55%, #111827); color: white; }
-.intro-panel::after { position: absolute; right: -18%; bottom: -38%; width: 680px; height: 680px; border: 1px solid rgba(147,197,253,.12); border-radius: 50%; content: ''; box-shadow: 0 0 0 80px rgba(147,197,253,.03), 0 0 0 160px rgba(147,197,253,.02); }
+.intro-panel { display: grid; place-items: center; overflow: hidden; padding: 60px; background: #e8f0f8; color: #1b2530; }
 .intro-content { position: relative; z-index: 1; width: min(680px, 100%); }
-.intro-badge { display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(147,197,253,.25); border-radius: 999px; background: rgba(15,23,42,.45); padding: 8px 13px; color: #bfdbfe; font-size: 12px; font-weight: 800; }
-h1 { margin: 28px 0 18px; font-size: clamp(38px, 5vw, 68px); line-height: 1.08; letter-spacing: -.045em; }
-h1 span { color: #93c5fd; }
-.intro-content > p { max-width: 590px; color: #cbd5e1; font-size: 17px; line-height: 1.8; }
+.intro-badge { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #b9cfe5; border-radius: 999px; background: rgba(255,255,255,.72); padding: 8px 13px; color: #245ea8; font-size: 12px; font-weight: 800; }
+h1 { margin: 28px 0 18px; font-size: 54px; line-height: 1.08; letter-spacing: 0; }
+h1 span { color: #245ea8; }
+.intro-content > p { max-width: 590px; color: #536170; font-size: 17px; line-height: 1.8; }
 .feature-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 40px; }
-.feature-grid div { display: grid; gap: 4px; border: 1px solid rgba(148,163,184,.16); border-radius: 14px; background: rgba(15,23,42,.38); padding: 16px; backdrop-filter: blur(10px); }
-.feature-grid strong { color: #eff6ff; }
-.feature-grid span { color: #94a3b8; font-size: 12px; }
+.feature-grid div { display: grid; gap: 4px; border: 1px solid #cbd9e7; border-radius: 8px; background: rgba(255,255,255,.7); padding: 16px; }
+.feature-grid strong { color: #1b2530; }
+.feature-grid span { color: #66727f; font-size: 12px; }
 .form-panel { display: grid; place-items: center; background: var(--app-bg); padding: 32px; }
 .login-card { display: grid; width: min(430px, 100%); gap: 18px; padding: 30px; }
 .login-icon { display: grid; width: 52px; height: 52px; place-items: center; border-radius: 14px; background: var(--app-primary-soft); color: var(--app-primary); }
 h2 { margin: 0; font-size: 25px; }
 .login-card p { margin: 5px 0 0; color: var(--app-text-muted); }
 .mode-switch { border: 0; background: transparent; color: var(--app-primary); cursor: pointer; font: inherit; font-weight: 700; }
+:global(.theme-dark) .intro-panel { background: #182028; color: #eef3f7; }
+:global(.theme-dark) .intro-badge { border-color: #465562; background: rgba(29,39,49,.88); color: #8fc0ff; }
+:global(.theme-dark) h1 span { color: #8fc0ff; }
+:global(.theme-dark) .intro-content > p { color: #a8b4bf; }
+:global(.theme-dark) .feature-grid div { border-color: #2f3b46; background: #1d2731; }
+:global(.theme-dark) .feature-grid strong { color: #eef3f7; }
+:global(.theme-dark) .feature-grid span { color: #a8b4bf; }
 @media (max-width: 900px) { .login-page { grid-template-columns: 1fr; } .intro-panel { display: none; } .form-panel { min-height: 100dvh; } }
 </style>

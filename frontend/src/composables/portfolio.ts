@@ -8,6 +8,7 @@ const selectedPortfolioId = ref<number | null>(readStoredId())
 const loading = ref(false)
 const error = ref<ApiError | null>(null)
 let inFlight: Promise<Portfolio[]> | null = null
+let cacheGeneration = 0
 
 function readStoredId(): number | null {
   if (typeof window === 'undefined') return null
@@ -28,6 +29,16 @@ export function setSelectedPortfolio(id: number | null): void {
   persistSelection(next)
 }
 
+export function clearPortfolioContext(): void {
+  cacheGeneration += 1
+  portfolios.value = []
+  selectedPortfolioId.value = null
+  error.value = null
+  loading.value = false
+  inFlight = null
+  persistSelection(null)
+}
+
 export async function loadPortfolios(force = false): Promise<Portfolio[]> {
   if (!force && portfolios.value.length) return portfolios.value
   if (inFlight) {
@@ -38,8 +49,10 @@ export async function loadPortfolios(force = false): Promise<Portfolio[]> {
   }
   loading.value = true
   error.value = null
-  inFlight = api.listPortfolios()
+  const generation = cacheGeneration
+  const request = api.listPortfolios()
     .then((rows) => {
+      if (generation !== cacheGeneration) return []
       portfolios.value = rows
       const valid = rows.some((item) => item.id === selectedPortfolioId.value)
       if (!valid) {
@@ -53,11 +66,15 @@ export async function loadPortfolios(force = false): Promise<Portfolio[]> {
       error.value = reason as ApiError
       throw reason
     })
-    .finally(() => {
+  inFlight = request
+  try {
+    return await request
+  } finally {
+    if (inFlight === request) {
       loading.value = false
       inFlight = null
-    })
-  return inFlight
+    }
+  }
 }
 
 export function usePortfolioContext() {

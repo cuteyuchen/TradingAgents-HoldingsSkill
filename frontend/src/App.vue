@@ -2,76 +2,73 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  Activity,
   BarChart3,
   BellRing,
   BriefcaseBusiness,
-  Camera,
-  FlaskConical,
-  Activity,
-  ExternalLink,
+  History,
   LayoutDashboard,
   LogOut,
   Moon,
   Settings,
-  ShieldCheck,
   Sun,
-  Upload,
 } from 'lucide-vue-next'
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
 
 import { api, clearSession, hasSession } from './api'
-import type { User } from './api/types'
-import { usePortfolioContext } from './composables/portfolio'
-import { fmtDateTime } from './utils/ui'
+import { clearPortfolioContext, usePortfolioContext } from './composables/portfolio'
 
 const route = useRoute()
 const router = useRouter()
 const THEME_KEY = 'advisor_theme'
 type ThemePref = 'light' | 'dark'
 
-const themePref = ref<ThemePref>((localStorage.getItem(THEME_KEY) as ThemePref) || 'dark')
-const user = ref<User | null>(null)
+const themePref = ref<ThemePref>(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light')
 const loadingUser = ref(false)
 const isLogin = computed(() => route.name === 'login')
 const {
   portfolios,
   selectedPortfolioId,
-  selectedPortfolio,
   loading: loadingPortfolios,
   error: portfolioError,
   loadPortfolios,
   setSelectedPortfolio,
 } = usePortfolioContext()
+
+const navigation = [
+  { name: 'dashboard', label: '首页', icon: LayoutDashboard },
+  { name: 'holdings', label: '持仓', icon: BriefcaseBusiness },
+  { name: 'analysis', label: '分析', icon: BarChart3 },
+  { name: 'simulation', label: '模拟', icon: Activity },
+  { name: 'history', label: '历史', icon: History },
+]
+
 const theme = computed<GlobalTheme>(() => (themePref.value === 'dark' ? darkTheme : lightTheme))
 const themeOverrides = computed<GlobalThemeOverrides>(() => ({
   common: {
-    primaryColor: themePref.value === 'dark' ? '#60A5FA' : '#1769aa',
-    primaryColorHover: themePref.value === 'dark' ? '#93C5FD' : '#2683cf',
-    primaryColorPressed: themePref.value === 'dark' ? '#3B82F6' : '#0f568f',
-    borderRadius: '10px',
+    primaryColor: themePref.value === 'dark' ? '#7db6ff' : '#245ea8',
+    primaryColorHover: themePref.value === 'dark' ? '#a7d0ff' : '#3477c2',
+    primaryColorPressed: themePref.value === 'dark' ? '#4b91ed' : '#174984',
+    borderRadius: '8px',
     fontFamily: 'Inter, "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   },
 }))
 
-const navigation = [
-  { name: 'dashboard', label: '总览', icon: LayoutDashboard },
-  { name: 'upload', label: '今日持仓', icon: Upload },
-  { name: 'reports', label: '分析报告', icon: BarChart3 },
-  { name: 'shadow', label: 'Shadow', icon: ShieldCheck },
-  { name: 'research', label: '历史研究', icon: FlaskConical },
-  { name: 'governance', label: '参数治理', icon: ShieldCheck },
-  { name: 'system', label: '系统运维', icon: Activity },
-  { name: 'settings', label: '系统设置', icon: Settings },
-]
+const systemStatus = computed<'ok' | 'setup' | 'degraded'>(() => {
+  if (portfolioError.value) return 'degraded'
+  if (!loadingPortfolios.value && !portfolios.value.length) return 'setup'
+  return 'ok'
+})
+const systemStatusLabel = computed(() => ({ ok: '正常', setup: '需要配置', degraded: '数据不完整' }[systemStatus.value]))
+const systemStatusHint = computed(() => ({ ok: '数据状态正常', setup: '先配置行情与模型', degraded: '部分数据暂时不可用' }[systemStatus.value]))
 
 async function loadUser() {
   if (!hasSession() || isLogin.value || loadingUser.value) return
   loadingUser.value = true
   try {
-    const [userResult] = await Promise.all([api.me(), loadPortfolios()])
-    user.value = userResult
+    await Promise.all([api.me(), loadPortfolios()])
   } catch {
-    user.value = null
+    // The request layer owns session expiry; the shell stays quiet here.
   } finally {
     loadingUser.value = false
   }
@@ -86,20 +83,42 @@ async function logout() {
   try {
     await api.logout()
   } catch {
-    // A local logout must still work when the server is unavailable.
+    // Local logout remains available when the backend is unavailable.
   }
   clearSession()
-  user.value = null
   await router.replace({ name: 'login' })
+  clearPortfolioContext()
 }
 
-const onSessionChanged = () => void loadUser()
+function openSystemStatus() {
+  void router.push({ name: 'settings', query: { section: 'system' } })
+}
+
+const onSessionChanged = () => {
+  clearPortfolioContext()
+  void loadUser()
+}
+const onSessionExpired = () => {
+  void router.replace({ name: 'login', query: { expired: '1' } }).finally(() => clearPortfolioContext())
+}
+const onThemeChanged = (event: Event) => {
+  const value = (event as CustomEvent<{ theme?: string }>).detail?.theme
+  if (value !== 'light' && value !== 'dark') return
+  themePref.value = value
+  localStorage.setItem(THEME_KEY, value)
+}
 
 onMounted(() => {
   void loadUser()
   window.addEventListener('advisor-session-changed', onSessionChanged)
+  window.addEventListener('advisor-auth-expired', onSessionExpired)
+  window.addEventListener('advisor-theme-changed', onThemeChanged)
 })
-onUnmounted(() => window.removeEventListener('advisor-session-changed', onSessionChanged))
+onUnmounted(() => {
+  window.removeEventListener('advisor-session-changed', onSessionChanged)
+  window.removeEventListener('advisor-auth-expired', onSessionExpired)
+  window.removeEventListener('advisor-theme-changed', onThemeChanged)
+})
 watch(() => route.name, () => void loadUser())
 </script>
 
@@ -114,64 +133,57 @@ watch(() => route.name, () => void loadUser())
             <a class="skip-link" href="#main-content">跳到主要内容</a>
             <header class="topbar">
               <div class="brand">
-                <div class="brand-mark"><BellRing :size="22" /></div>
-                <div>
-                  <strong>持仓投研决策系统</strong>
-                  <span>TradingAgents Holdings</span>
-                </div>
+                <div class="brand-mark"><BellRing :size="20" /></div>
+                <strong>投资驾驶舱</strong>
               </div>
-              <nav class="top-nav" aria-label="主导航">
-                <router-link v-for="item in navigation" :key="item.name" :to="{ name: item.name }" class="nav-link">
-                  <component :is="item.icon" :size="17" />
-                  <span>{{ item.label }}</span>
+
+              <div class="shell-nav-wrap">
+                <n-select
+                  v-if="portfolios.length > 1"
+                  :value="selectedPortfolioId"
+                  class="global-portfolio-select"
+                  :options="portfolios.map((item) => ({ label: item.name, value: item.id }))"
+                  :loading="loadingPortfolios"
+                  aria-label="选择组合"
+                  @update:value="setSelectedPortfolio"
+                />
+                <nav class="top-nav" aria-label="主导航">
+                  <router-link v-for="item in navigation" :key="item.name" :to="{ name: item.name }" class="nav-link">
+                    <component :is="item.icon" :size="16" aria-hidden="true" />
+                    <span>{{ item.label }}</span>
+                  </router-link>
+                </nav>
+              </div>
+
+              <div class="shell-actions">
+                <n-button
+                  class="system-status-button"
+                  quaternary
+                  :class="`system-status-${systemStatus}`"
+                  :aria-label="`${systemStatusHint}，查看系统状态`"
+                  @click="openSystemStatus"
+                >
+                  <span class="status-dot" aria-hidden="true" />
+                  <span>{{ systemStatusLabel }}</span>
+                </n-button>
+                <n-button
+                  v-if="!portfolios.length"
+                  class="header-setup-button"
+                  secondary
+                  size="small"
+                  @click="router.push({ name: 'settings' })"
+                >去配置</n-button>
+                <router-link class="icon-link" :to="{ name: 'settings' }" aria-label="设置" title="设置">
+                  <Settings :size="18" aria-hidden="true" />
                 </router-link>
-              </nav>
-              <div class="user-actions">
-                <div class="user-copy">
-                  <strong>{{ user?.username || user?.email || '用户' }}</strong>
-                  <span>{{ user?.email }}</span>
-                </div>
                 <n-button quaternary circle :aria-label="themePref === 'dark' ? '切换亮色' : '切换暗色'" @click="toggleTheme">
                   <template #icon><Sun v-if="themePref === 'dark'" :size="18" /><Moon v-else :size="18" /></template>
                 </n-button>
-                <n-button quaternary circle aria-label="退出登录" @click="logout">
-                  <template #icon><LogOut :size="18" /></template>
+                <n-button quaternary circle aria-label="退出登录" title="退出登录" @click="logout">
+                  <template #icon><LogOut :size="17" /></template>
                 </n-button>
               </div>
             </header>
-            <div class="portfolio-context-bar" aria-label="当前组合上下文">
-              <div class="context-copy">
-                <BriefcaseBusiness :size="17" aria-hidden="true" />
-                <div>
-                  <span>当前 Portfolio</span>
-                  <strong>{{ selectedPortfolio?.name || '尚未选择组合' }}</strong>
-                </div>
-                <small v-if="selectedPortfolio?.latest_snapshot_time">最近确认：{{ fmtDateTime(selectedPortfolio.latest_snapshot_time) }}</small>
-              </div>
-              <n-select
-                v-if="portfolios.length"
-                :value="selectedPortfolioId"
-                class="global-portfolio-select"
-                :options="portfolios.map((item) => ({ label: item.name, value: item.id }))"
-                :loading="loadingPortfolios"
-                aria-label="选择当前 Portfolio"
-                @update:value="setSelectedPortfolio"
-              />
-              <n-button v-if="!portfolios.length" secondary @click="router.push({ name: 'upload' })">
-                <template #icon><Camera :size="15" /></template>
-                导入第一份持仓
-              </n-button>
-              <n-button v-else secondary @click="router.push({ name: 'upload', query: { portfolio: selectedPortfolioId } })">
-                <template #icon><Camera :size="15" /></template>
-                更新持仓
-              </n-button>
-              <n-button text type="primary" @click="router.push({ name: 'system' })">
-                系统状态 <ExternalLink :size="14" />
-              </n-button>
-            </div>
-            <n-alert v-if="portfolioError" class="context-error" type="warning" :show-icon="false">
-              Portfolio 列表暂时无法读取，请打开系统状态页重试。
-            </n-alert>
             <main id="main-content" class="app-content">
               <router-view />
             </main>
@@ -183,50 +195,61 @@ watch(() => route.name, () => void loadUser())
 </template>
 
 <style scoped>
-.app-root { min-height: 100dvh; background: var(--app-bg); color: var(--app-text); }
+.app-root { min-height: 100dvh; background: var(--page-bg); color: var(--text); }
 .topbar {
-  position: sticky; top: 0; z-index: 50; display: grid; grid-template-columns: minmax(230px, 1fr) auto minmax(230px, 1fr);
-  align-items: center; min-height: 68px; padding: 0 max(20px, calc((100vw - 1500px) / 2));
-  border-bottom: 1px solid var(--app-border); background: color-mix(in srgb, var(--app-surface-strong) 88%, transparent);
-  backdrop-filter: blur(18px);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) auto minmax(260px, 1fr);
+  align-items: center;
+  min-height: 60px;
+  padding: 0 max(18px, calc((100vw - 1360px) / 2));
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  backdrop-filter: blur(14px);
 }
-.brand { display: flex; align-items: center; gap: 11px; }
-.brand-mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 11px; background: var(--app-primary-soft); color: var(--app-primary); }
-.brand div:last-child { display: grid; }
-.brand strong { font-size: 15px; }
-.brand span, .user-copy span { color: var(--app-text-muted); font-size: 11px; }
-.top-nav { display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid var(--app-border-soft); border-radius: 12px; background: var(--app-surface); }
-.top-nav { max-width: min(760px, 52vw); overflow-x: auto; scrollbar-width: thin; }
-.nav-link { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 13px; border-radius: 9px; color: var(--app-text-muted); text-decoration: none; font-size: 13px; font-weight: 700; }
-.nav-link:hover, .nav-link.router-link-active { background: var(--app-primary-soft); color: var(--app-primary); }
-.user-actions { display: flex; justify-content: flex-end; align-items: center; gap: 5px; }
-.user-copy { display: grid; margin-right: 5px; text-align: right; }
-.user-copy strong { max-width: 170px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
-.app-content { width: min(1480px, 100%); margin: 0 auto; padding: 24px; }
-.skip-link { position: fixed; z-index: 100; top: -50px; left: 14px; border-radius: 6px; background: var(--app-primary); padding: 8px 12px; color: white; text-decoration: none; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--primary-soft); color: var(--primary); }
+.brand strong { font-size: 16px; letter-spacing: 0; white-space: nowrap; }
+.shell-nav-wrap { display: flex; align-items: center; justify-content: center; gap: 12px; min-width: 0; }
+.top-nav { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.nav-link { display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 11px; border-radius: 7px; color: var(--text-muted); text-decoration: none; font-size: 13px; font-weight: 700; white-space: nowrap; transition: background .18s ease, color .18s ease; }
+.nav-link:hover, .nav-link.router-link-active { background: var(--primary-soft); color: var(--primary); }
+.global-portfolio-select { width: 132px; }
+.shell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 3px; min-width: 0; }
+.system-status-button { min-height: 36px; color: var(--text-muted); font-size: 12px; }
+.system-status-button.system-status-ok { color: var(--positive); }
+.system-status-button.system-status-setup { color: var(--warning); }
+.system-status-button.system-status-degraded { color: var(--danger); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent); }
+.icon-link { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 7px; color: var(--text-muted); text-decoration: none; }
+.icon-link:hover, .icon-link.router-link-active { background: var(--primary-soft); color: var(--primary); }
+.header-setup-button { white-space: nowrap; }
+.app-content { width: min(1360px, calc(100% - 40px)); margin: 0 auto; padding: 22px 0 48px; }
+.skip-link { position: fixed; z-index: 100; top: -50px; left: 14px; border-radius: 6px; background: var(--primary); padding: 8px 12px; color: white; text-decoration: none; }
 .skip-link:focus { top: 10px; }
-.portfolio-context-bar { display: flex; width: min(1480px, calc(100% - 48px)); align-items: center; gap: 12px; margin: 14px auto 0; border: 1px solid var(--app-border); border-radius: 8px; background: var(--app-surface); padding: 10px 14px; box-shadow: var(--app-shadow); }
-.context-copy { display: flex; min-width: 0; align-items: center; gap: 9px; color: var(--app-primary); }
-.context-copy > div { display: grid; min-width: 0; }
-.context-copy span { color: var(--app-text-muted); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
-.context-copy strong { max-width: 220px; overflow: hidden; color: var(--app-text); text-overflow: ellipsis; white-space: nowrap; }
-.context-copy small { margin-left: 8px; color: var(--app-text-muted); font-size: 11px; }
-.global-portfolio-select { width: min(240px, 28vw); margin-left: auto; }
-.context-error { width: min(1480px, calc(100% - 48px)); margin: 10px auto 0; }
-@media (max-width: 980px) {
-  .topbar { grid-template-columns: 1fr auto; padding: 0 12px; }
-  .top-nav { position: fixed; z-index: 60; right: 12px; bottom: 12px; left: 12px; justify-content: space-around; box-shadow: var(--app-shadow-strong); }
-  .nav-link { flex: 1; justify-content: center; padding: 0 6px; }
-  .user-copy { display: none; }
-  .app-content { padding: 16px 12px 88px; }
-  .portfolio-context-bar { width: calc(100% - 24px); align-items: flex-start; flex-wrap: wrap; margin-top: 10px; }
-  .global-portfolio-select { width: min(280px, 100%); margin-left: 0; }
-  .context-copy { flex: 1 1 100%; }
-  .context-copy small { margin-left: 0; }
-  .context-error { width: calc(100% - 24px); }
+@media (max-width: 1100px) {
+  .topbar { grid-template-columns: auto minmax(0, 1fr) auto; padding-inline: 12px; }
+  .shell-nav-wrap { justify-content: flex-start; overflow-x: auto; }
+  .global-portfolio-select { flex: 0 0 120px; }
+  .nav-link { padding-inline: 9px; }
+  .app-content { width: min(100% - 24px, 1360px); }
 }
-@media (max-width: 560px) {
-  .brand span { display: none; }
+@media (max-width: 760px) {
+  .topbar { grid-template-columns: auto 1fr; row-gap: 4px; min-height: 60px; padding-block: 6px; }
+  .brand { grid-column: 1; }
+  .shell-actions { grid-column: 2; grid-row: 1; }
+  .shell-nav-wrap { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; width: 100%; }
+  .top-nav { width: 100%; justify-content: space-between; }
+  .nav-link { flex: 1; justify-content: center; min-height: 34px; padding-inline: 5px; font-size: 12px; }
+  .global-portfolio-select { flex-basis: 110px; }
+  .system-status-button span:last-child, .header-setup-button, .icon-link { display: none; }
+  .app-content { padding-top: 16px; }
+}
+@media (max-width: 430px) {
+  .brand strong { font-size: 14px; }
   .nav-link span { font-size: 11px; }
+  .shell-actions { gap: 0; }
 }
 </style>

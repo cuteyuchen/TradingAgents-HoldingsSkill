@@ -137,15 +137,19 @@ export function ratingLabel(value?: string | null): string {
 
 export function actionLabel(value?: string | null): string {
   if (!value) return emptyText
-  return ({
-    Buy: '买入',
-    Add: '加仓',
-    Hold: '持有',
-    Reduce: '减仓',
-    Sell: '卖出',
-    Watch: '观察',
-    Rotate: '轮动',
-  }[value] || value)
+  const labels: Record<string, string> = {
+    buy: '买入',
+    add: '加仓',
+    hold: '持有',
+    reduce: '减仓',
+    sell: '卖出',
+    watch: '观察',
+    rotate: '轮动',
+    conditional_add: '条件加仓',
+    new_position: '新建仓位',
+    add_existing: '加仓',
+  }
+  return labels[value.trim().toLowerCase()] || value
 }
 
 export function qualityCheckLabel(value?: string | null): string {
