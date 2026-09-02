@@ -20,11 +20,11 @@ Branch：`codex/phase-o-frontend-productization`
 | Backend full regression | PASS | `backend`: `python -m pytest tests -q`；`428 passed` |
 | Real browser Playwright acceptance | PASS | `npm run e2e:acceptance`；隔离 SQLite；`20 passed`；包含 UX acceptance |
 | Docker production-like build/runtime | PASS | build、health、注册登录、鉴权 API、六个新路由和六个旧 alias；HTTP 与无头 Chromium smoke |
-| GitHub exact-head CI | 待 push 后验证 | backend、frontend、frontend-acceptance、docker |
-| Frontend Acceptance overall | PASS（本地自动化） | 自动化通过后仍保持 `MANUAL_UAT = REQUIRED`；远端 exact-head CI 待 push |
+| GitHub exact-head CI | PASS | push/PR 两组 exact head 均通过：backend、frontend、frontend-acceptance、docker；run `33600976956`、`33600980668` |
+| Frontend Acceptance overall | PASS（本地与远端自动化） | exact-head CI 已通过；仍保持 `MANUAL_UAT = REQUIRED` |
 
-远端精确 SHA 的 GitHub Actions 结果以 PR/Actions 为准；本地自动化验证不替代远端
-CI，也不替代用户人工 UAT。
+远端 exact-head CI 已在 PR #7 的 `a4077b5393ef62e8dd23e2819b000aac2c833148` 上通过；
+本地与远端自动化验证都不替代用户人工 UAT。
 
 ## 已验证的功能面
 

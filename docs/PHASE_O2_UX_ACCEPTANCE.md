@@ -21,7 +21,7 @@ Contract `2.4.0`、Shadow Contract `shadow-execution-v1`、数据库和 Alembic 
 | UX-3 | 分析、ACTION/NO_ACTION/BLOCKED/DATA_GAP、Candidate Veto、模拟跟随 | PASS |
 | UX-4 | 历史表现、Research Tab、治理和系统状态进入 Settings | PASS |
 | UX-5 | Empty/Loading/Error/Offline、Light/Dark、1366/1440/1920 视觉与响应式 | PASS |
-| UX-Final | Backend、Frontend、Playwright、Docker、exact-head CI | 待最终 CI |
+| UX-Final | Backend、Frontend、Playwright、Docker、exact-head CI | PASS |
 
 ## 路由与导航验收
 

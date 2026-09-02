@@ -26,6 +26,9 @@ Playwright acceptance `20 passed`，Alembic `heads/current` 均为 `20260829_002
 migration；独立 Docker smoke 完成 health、注册登录、鉴权 API、六个新路由和六个旧 alias
 的 HTML 及无头 Chromium 渲染检查后已清理。
 
+PR #7 的 exact-head GitHub CI 已通过（push run `33600976956`、pull-request run
+`33600980668`；backend、frontend、frontend-acceptance、docker 全部成功）。
+
 这些结果只证明实现和自动化验证，不产生真实行情、真实组合快照、真实分析或 Live Evidence。
 新版界面的 `MANUAL_UAT` 仍为 `REQUIRED`，由用户本人实际使用确认；`LIVE_READINESS` 仍为
 `NOT_READY`，`PHASE_O_FINAL` 仍为 `HOLD_FOR_REDESIGNED_MANUAL_UAT`。
