@@ -33,6 +33,7 @@ let mounted = false
 const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
 const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
 const holdings = computed(() => snapshot.value?.holdings || [])
+const snapshotIdentityIncomplete = computed(() => Boolean(snapshot.value && snapshot.value.identity_status && snapshot.value.identity_status !== 'RESOLVED'))
 const marketValue = computed(() => snapshot.value?.total_market_value ?? (holdings.value.reduce((sum, item) => sum + Number(item.market_value || 0), 0) || null))
 const totalAssets = computed(() => snapshot.value?.total_assets ?? null)
 const cash = computed(() => snapshot.value?.broker_available_cash ?? null)
@@ -55,7 +56,7 @@ function codeKey(value: unknown): string {
 }
 
 function liveQuoteFor(holding: Holding | null): FuyaoContributionItem | null {
-  if (!holding || !contribution.value) return null
+  if (!holding || holding.resolution_status !== 'RESOLVED' || !contribution.value) return null
   const key = codeKey(holding.code)
   return contribution.value.items.find((item) => codeKey(item.code) === key) || null
 }
@@ -115,13 +116,14 @@ async function openHolding(holding: Holding) {
   securityContext.value = null
   securityContextLoading.value = true
   detailOpen.value = true
-  if (holding.code) {
+  if (holding.resolution_status === 'RESOLVED' && holding.canonical_code) {
     securityContext.value = await api.getFuyaoSecurityContext(holding.code).catch(() => null)
   }
   securityContextLoading.value = false
 }
 
 function openAnalysis() {
+  if (snapshotIdentityIncomplete.value) return
   void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined } })
 }
 
@@ -147,13 +149,14 @@ onMounted(async () => { await load(); mounted = true })
     </EmptyState>
     <template v-else>
       <div class="as-of-strip"><span>截至最近确认快照</span><strong>{{ snapshot?.snapshot_time ? new Date(snapshot.snapshot_time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '尚未确认' }}</strong><FreshnessLabel :freshness="freshness" :at="snapshot?.snapshot_time" /><span class="muted">{{ selectedPortfolio?.name }}</span></div>
+      <n-alert v-if="snapshotIdentityIncomplete" type="warning" :show-icon="false">证券身份不完整。该快照保留审计历史，但不会作为新的 Analysis 默认输入，请重新导入并修正。</n-alert>
 
       <SectionCard title="资产摘要" description="只显示已确认快照中的权威数据。">
         <div class="metric-grid four"><MetricTile label="总资产" :value="formatCurrency(totalAssets, 2)" /><MetricTile label="持仓市值" :value="formatCurrency(marketValue, 2)" /><MetricTile label="可用现金" :value="formatCurrency(cash, 2)" /><MetricTile label="仓位" :value="formatPercent(exposure)" tone="risk" /></div>
       </SectionCard>
 
       <SectionCard title="持仓列表" :description="`${holdings.length} 个标的 · 点击一行查看详情`">
-        <div v-if="holdings.length" class="table-wrap"><table class="holdings-table"><thead><tr><th>标的</th><th>数量</th><th>成本</th><th>实时价格</th><th>今日涨跌</th><th>今日贡献</th><th>快照收益</th><th>仓位</th><th>行业</th><th>最新建议</th><th aria-label="查看详情" /></tr></thead><tbody><tr v-for="(holding, index) in holdings" :key="holding.code || holding.name || index" class="holding-row clickable" tabindex="0" @click="openHolding(holding)" @keydown.enter="openHolding(holding)"><td><div class="instrument"><strong>{{ holding.name || holding.code || '未命名标的' }}</strong><small>{{ holding.code || '代码待匹配' }}</small></div></td><td class="mono-number">{{ formatNumber(holding.qty, 0) }}</td><td class="mono-number">{{ formatNumber(holding.cost, 3) }}</td><td class="mono-number">{{ formatNumber(liveQuoteFor(holding)?.current_price, 3) }}</td><td :class="sourcePercentClass(liveQuoteFor(holding)?.today_change_pct)">{{ sourcePercent(liveQuoteFor(holding)?.today_change_pct) }}</td><td :class="sourcePercentClass(liveQuoteFor(holding)?.contribution_pct)">{{ sourcePercent(liveQuoteFor(holding)?.contribution_pct) }}</td><td :class="pctClass(holding.pnl)">{{ formatPercent(holding.pnl) }}</td><td class="mono-number">{{ formatPercent(holding.weight) }}</td><td>{{ holdingIndustry(holding) }}</td><td><n-tag size="small" :bordered="false" type="info">{{ holdingAction(holding) }}</n-tag></td><td><ChevronRight :size="16" class="row-arrow" /></td></tr></tbody></table></div>
+        <div v-if="holdings.length" class="table-wrap"><table class="holdings-table"><thead><tr><th>标的</th><th>数量</th><th>成本</th><th>实时价格</th><th>今日涨跌</th><th>今日贡献</th><th>快照收益</th><th>仓位</th><th>行业</th><th>身份</th><th>最新建议</th><th aria-label="查看详情" /></tr></thead><tbody><tr v-for="(holding, index) in holdings" :key="holding.code || holding.name || index" class="holding-row clickable" tabindex="0" @click="openHolding(holding)" @keydown.enter="openHolding(holding)"><td><div class="instrument"><strong>{{ holding.name || holding.code || '未命名标的' }}</strong><small>{{ holding.canonical_code || holding.code || '代码待匹配' }}</small></div></td><td class="mono-number">{{ formatNumber(holding.qty, 0) }}</td><td class="mono-number">{{ formatNumber(holding.cost, 3) }}</td><td class="mono-number">{{ formatNumber(liveQuoteFor(holding)?.current_price, 3) }}</td><td :class="sourcePercentClass(liveQuoteFor(holding)?.today_change_pct)">{{ sourcePercent(liveQuoteFor(holding)?.today_change_pct) }}</td><td :class="sourcePercentClass(liveQuoteFor(holding)?.contribution_pct)">{{ sourcePercent(liveQuoteFor(holding)?.contribution_pct) }}</td><td :class="pctClass(holding.pnl)">{{ formatPercent(holding.pnl) }}</td><td class="mono-number">{{ formatPercent(holding.weight) }}</td><td>{{ holdingIndustry(holding) }}</td><td><n-tag size="small" :bordered="false" :type="holding.resolution_status === 'RESOLVED' ? 'success' : 'warning'">{{ holding.resolution_status === 'RESOLVED' ? '已匹配' : '身份不完整' }}</n-tag></td><td><n-tag size="small" :bordered="false" type="info">{{ holdingAction(holding) }}</n-tag></td><td><ChevronRight :size="16" class="row-arrow" /></td></tr></tbody></table></div>
         <EmptyState v-else title="最近确认快照里还没有持仓" description="上传一张新的券商持仓截图，确认后这里会出现持仓明细。">
           <template #action><n-button type="primary" @click="openUpdate">导入第一份持仓</n-button></template>
         </EmptyState>
@@ -172,7 +175,7 @@ onMounted(async () => { await load(); mounted = true })
           <section><h3>最新建议</h3><div class="advice-box"><strong>{{ holdingAction(selectedHolding) }}</strong><p>{{ holdingRisk(selectedHolding) }}</p></div></section>
           <section><h3>实时标记</h3><div v-if="securityContextLoading" class="muted">正在读取 Fuyao 当前行情与证据…</div><template v-else><dl class="detail-grid"><div><dt>现价</dt><dd>{{ formatNumber(liveQuoteFor(selectedHolding)?.current_price, 3) }}</dd></div><div><dt>今日涨跌</dt><dd :class="sourcePercentClass(liveQuoteFor(selectedHolding)?.today_change_pct)">{{ sourcePercent(liveQuoteFor(selectedHolding)?.today_change_pct) }}</dd></div><div><dt>今日贡献</dt><dd :class="sourcePercentClass(liveQuoteFor(selectedHolding)?.contribution_pct)">{{ sourcePercent(liveQuoteFor(selectedHolding)?.contribution_pct) }}</dd></div><div><dt>报价质量</dt><dd>{{ quoteQualityLabel(liveQuoteFor(selectedHolding)?.quote_quality) }}</dd></div></dl></template></section>
           <section v-if="securityContext?.fundamental_summary?.status === 'AVAILABLE'"><h3>基本面与估值</h3><dl class="detail-grid"><div><dt>成长</dt><dd>{{ securityContext.fundamental_summary.growth || unavailableText }}</dd></div><div><dt>盈利</dt><dd>{{ securityContext.fundamental_summary.profitability || unavailableText }}</dd></div><div><dt>现金流</dt><dd>{{ securityContext.fundamental_summary.cash_flow || unavailableText }}</dd></div><div><dt>估值</dt><dd>{{ securityContext.fundamental_summary.valuation || unavailableText }}</dd></div></dl><p class="muted">当前分析允许；历史 PIT：{{ securityContext.historical_pit_status || '未证明' }}。</p></section>
-          <section><h3>最近分析</h3><p class="muted">分析结论会根据当前组合和市场时点更新。</p><n-button secondary @click="openAnalysis">查看今日分析</n-button></section>
+          <section><h3>最近分析</h3><p class="muted">分析结论会根据当前组合和市场时点更新。</p><n-button secondary :disabled="snapshotIdentityIncomplete" @click="openAnalysis">查看今日分析</n-button></section>
           <TechnicalDetails title="高级持仓数据"><pre>{{ JSON.stringify(selectedHolding, null, 2) }}</pre></TechnicalDetails>
         </div>
       </n-drawer-content>

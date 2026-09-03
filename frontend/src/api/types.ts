@@ -184,8 +184,16 @@ export interface Portfolio {
 
 export interface Holding {
   code: string
+  canonical_code?: string | null
   name?: string | null
+  display_name?: string | null
   market?: string | null
+  asset_type?: string | null
+  exchange?: string | null
+  security_id?: number | null
+  resolution_status?: 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED' | 'INVALID' | string | null
+  resolution_source?: string | null
+  resolution_confidence?: number | null
   qty?: number | null
   available_qty?: number | null
   cost?: number | null
@@ -208,6 +216,16 @@ export interface ParsedHoldings {
   notes: string[]
 }
 
+export interface HoldingIdentityIssue {
+  index: number
+  status: 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED' | 'INVALID' | string
+  label: string
+  code?: string | null
+  name?: string | null
+  message?: string | null
+  candidates?: Array<Record<string, any>>
+}
+
 export interface HoldingUpload {
   id: number
   portfolio_id: number
@@ -215,6 +233,7 @@ export interface HoldingUpload {
   mime_type: string
   parsing_status: string
   parsed?: ParsedHoldings | null
+  identity_issues: HoldingIdentityIssue[]
   validation_errors: string[]
   error_message?: string | null
   screenshot_url: string
@@ -229,6 +248,8 @@ export interface PortfolioSnapshot extends ParsedHoldings {
   source: string
   snapshot_time: string
   status: string
+  identity_status?: 'RESOLVED' | 'INCOMPLETE' | 'UNKNOWN' | string
+  identity_issues?: HoldingIdentityIssue[]
 }
 
 export interface AnalysisJob {

@@ -23,6 +23,7 @@ import type {
   GovernanceRegistryResponse,
   HistoryCoverage,
   HistorySyncRun,
+  Holding,
   ParameterChangeProposal,
   ParameterSetListResponse,
   ParameterSetVersion,
@@ -265,6 +266,7 @@ export const api = {
     return request<HoldingUpload>(`/api/v2/portfolios/${portfolioId}/uploads`, { method: 'POST', body: form })
   },
   getUpload: (id: number) => request<HoldingUpload>(`/api/v2/uploads/${id}`),
+  resolveHolding: (holding: Holding) => request<Holding>('/api/v2/holdings/resolve', { method: 'POST', body: holding }),
   retryUploadParse: (id: number) => request<HoldingUpload>(`/api/v2/uploads/${id}/parse`, { method: 'POST' }),
   updateParsedHoldings: (id: number, parsed: ParsedHoldings) => request<HoldingUpload>(`/api/v2/uploads/${id}/parsed-holdings`, { method: 'PATCH', body: { parsed } }),
   confirmUpload: (id: number) => request<PortfolioSnapshot>(`/api/v2/uploads/${id}/confirm`, { method: 'POST' }),
