@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from ..database import SessionLocal
 from ..v2_models import HoldingUpload, ModelProfile
 from ..v2_schemas import HoldingInput, ParsedHoldingsPayload
+from .holding_identity import resolve_payload_identities
 from .model_client import ModelCallError, call_model, parse_json_result
 from .storage import resolve_storage_path
 
@@ -76,9 +77,6 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
             excluded.append({"name": name, "reason": "standard_bond_or_repo", "market_value": holding.market_value})
             continue
         code = holding.code.strip().upper()
-        digits = "".join(ch for ch in code if ch.isdigit())
-        if len(digits) >= 6:
-            code = digits[-6:]
         if code and code in seen:
             errors.append(f"证券代码 {code} 重复")
             continue
@@ -101,8 +99,16 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
         normalized.append(
             HoldingInput(
                 code=code,
+                canonical_code=holding.canonical_code,
                 name=name or None,
+                display_name=holding.display_name,
                 market=holding.market,
+                asset_type=holding.asset_type,
+                exchange=holding.exchange,
+                security_id=holding.security_id,
+                resolution_status=holding.resolution_status,
+                resolution_source=holding.resolution_source,
+                resolution_confidence=holding.resolution_confidence,
                 qty=qty,
                 available_qty=available,
                 cost=_number(holding.cost),
@@ -180,6 +186,9 @@ def parse_upload(upload_id: int) -> None:
             json_mode=True,
         )
         parsed, errors = parse_payload_dict(parse_json_result(result))
+        upload.parsing_status = "identity_resolving"
+        db.commit()
+        parsed, _identity_issues = resolve_payload_identities(db, parsed)
         upload.parsed_json = parsed.model_dump(mode="json")
         upload.validation_errors = errors
         upload.parsing_status = "waiting_confirmation"

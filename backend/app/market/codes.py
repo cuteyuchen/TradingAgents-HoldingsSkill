@@ -5,8 +5,17 @@ import re
 
 
 _CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
-_EXCHANGE_PREFIX_RE = re.compile(r"^(SH|SZ|BJ)[.\-_/ ]*(\d{6})$")
-_EXCHANGE_SUFFIX_RE = re.compile(r"^(\d{6})[.\-_/ ]*(SH|SZ|BJ)$")
+_EXCHANGE_PREFIX_RE = re.compile(r"^(SH|SSE|SZ|SZSE|BJ|BSE)[.\-_/ ]*(\d{6})$")
+_EXCHANGE_SUFFIX_RE = re.compile(r"^(\d{6})[.\-_/ ]*(SH|SSE|SZ|SZSE|BJ|BSE)$")
+
+_EXCHANGE_ALIASES = {
+    "SH": "SSE",
+    "SSE": "SSE",
+    "SZ": "SZSE",
+    "SZSE": "SZSE",
+    "BJ": "BSE",
+    "BSE": "BSE",
+}
 
 
 def normalize_security_code(value: object) -> str:
@@ -32,13 +41,50 @@ def normalize_security_code(value: object) -> str:
     # A six-digit code embedded in a longer run (for example an account id)
     # is not a safe security identifier.
     digits = match.group(1)
-    if text.replace(" ", "") not in {digits, f"SH{digits}", f"SZ{digits}", f"BJ{digits}", f"{digits}.SH", f"{digits}.SZ", f"{digits}.BJ"}:
+    compact = re.sub(r"[.\-_/ ]", "", text)
+    if compact not in {
+        digits,
+        *(f"{prefix}{digits}" for prefix in _EXCHANGE_ALIASES),
+    }:
         # Keep support for common prefixes/suffixes with punctuation while
         # rejecting arbitrary strings containing a code.
-        compact = re.sub(r"[.\-_/ ]", "", text)
-        if compact not in {digits, f"SH{digits}", f"SZ{digits}", f"BJ{digits}"}:
-            return ""
+        return ""
     return digits
+
+
+def exchange_hint(value: object) -> str | None:
+    """Return an explicit exchange token from a qualified security code."""
+
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    match = _EXCHANGE_PREFIX_RE.fullmatch(text)
+    if match:
+        return _EXCHANGE_ALIASES[match.group(1)]
+    match = _EXCHANGE_SUFFIX_RE.fullmatch(text)
+    if match:
+        return _EXCHANGE_ALIASES[match.group(2)]
+    return None
+
+
+def normalize_exchange(value: object) -> str | None:
+    """Normalize exchange aliases without consulting locale or a provider."""
+
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return _EXCHANGE_ALIASES.get(text, text or None)
+
+
+def canonical_security_code(value: object, exchange: object = None) -> str:
+    """Return one exchange-qualified identity such as ``600519.SH``."""
+
+    code = normalize_security_code(value)
+    if not code:
+        return ""
+    resolved_exchange = exchange_hint(value) or normalize_exchange(exchange) or exchange_for_code(code)
+    suffix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(resolved_exchange or "")
+    return f"{code}.{suffix}" if suffix else ""
 
 
 def exchange_for_code(code: object) -> str | None:

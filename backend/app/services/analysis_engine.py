@@ -24,6 +24,7 @@ from ..memory.service import current_memory_features, memory_context_for_analysi
 from ..portfolio.decision_gate import apply_portfolio_decision_gate
 from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
+from .holding_identity import UnresolvedSecurityIdentityError, snapshot_identity_issues
 from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
 from .model_client import call_model, parse_json_result
 from .analysis_lease import AnalysisLeaseHeartbeat
@@ -153,23 +154,34 @@ def _profile(db: Session, user_id: int, purpose: str) -> ModelProfile | None:
 
 
 def _holdings(snapshot: PortfolioSnapshot) -> list[dict[str, Any]]:
-    return [
-        {
-            "code": row.code,
-            "name": row.name,
-            "market": row.market,
-            "qty": row.qty,
-            "available_qty": row.available_qty,
-            "unavailable_qty": row.unavailable_qty,
-            "cost": row.cost,
-            "screenshot_price": row.screenshot_price,
-            "market_value": row.market_value,
-            "pnl": row.pnl_ratio,
-            "pnl_amount": row.pnl_amount,
-            "weight": row.weight,
-        }
-        for row in snapshot.holdings
-    ]
+    result: list[dict[str, Any]] = []
+    for row in snapshot.holdings:
+        identity = row.extra_json or {}
+        result.append(
+            {
+                "code": row.code,
+                "canonical_code": identity.get("canonical_code"),
+                "name": identity.get("display_name") or row.name,
+                "display_name": identity.get("display_name") or row.name,
+                "asset_type": identity.get("asset_type") or identity.get("security_type"),
+                "exchange": identity.get("exchange"),
+                "security_id": identity.get("security_id"),
+                "resolution_status": identity.get("resolution_status"),
+                "resolution_source": identity.get("resolution_source"),
+                "resolution_confidence": identity.get("resolution_confidence"),
+                "market": row.market,
+                "qty": row.qty,
+                "available_qty": row.available_qty,
+                "unavailable_qty": row.unavailable_qty,
+                "cost": row.cost,
+                "screenshot_price": row.screenshot_price,
+                "market_value": row.market_value,
+                "pnl": row.pnl_ratio,
+                "pnl_amount": row.pnl_amount,
+                "weight": row.weight,
+            }
+        )
+    return result
 
 
 def _history(db: Session, job: AnalysisJob) -> list[dict[str, Any]]:
@@ -402,46 +414,6 @@ def _normalise_risk_debate(debate: dict[str, Any], holdings: list[dict[str, Any]
         "judge_decision": state.get("judge_decision") or debate.get("judge_decision") or "以中立方案为默认。",
         "claim_schema": CLAIM_SCHEMA,
     }
-
-
-def _resolve_missing_codes(profile: ModelProfile, holdings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    missing = [
-        {"index": index, "name": item.get("name"), "market": item.get("market")}
-        for index, item in enumerate(holdings)
-        if not normalize_code(item.get("code") or "")
-    ]
-    if not missing:
-        return holdings
-
-    result = _call_json(
-        profile,
-        "你负责根据证券名称匹配 A 股、场内 ETF 或基金的证券代码。无法唯一确定时必须返回 null，不得猜测。",
-        {"holdings": missing},
-        "为每个输入项匹配六位证券代码。名称可能是券商显示的简称。"
-        "输出 JSON：{\"matches\":[{\"index\":0,\"code\":\"六位代码或null\","
-        "\"confidence\":\"high/medium/low\",\"reason\":\"匹配依据\"}]}。"
-        "只有能够唯一确定时才返回代码。",
-    )
-    matches = result.get("matches") if isinstance(result, dict) else None
-    if not isinstance(matches, list):
-        return holdings
-
-    for match in matches:
-        if not isinstance(match, dict):
-            continue
-        try:
-            index = int(match.get("index"))
-        except (TypeError, ValueError):
-            continue
-        if index < 0 or index >= len(holdings) or holdings[index].get("code"):
-            continue
-        code = normalize_code(str(match.get("code") or ""))
-        if len(code) != 6 or not code.isdigit():
-            continue
-        holdings[index]["code"] = code
-        holdings[index]["code_source"] = "model_match"
-        holdings[index]["code_match_confidence"] = match.get("confidence")
-    return holdings
 
 
 def _blocked_result(snapshot: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
@@ -1305,6 +1277,13 @@ def run_analysis_job(job_id: int) -> None:
         if heartbeat is not None:
             heartbeat.start()
 
+        snapshot_row = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == job.snapshot_id).first()
+        if snapshot_row is None or snapshot_row.status != "confirmed":
+            raise RuntimeError("confirmed_snapshot_not_found")
+        identity_issues = snapshot_identity_issues(db, snapshot_row)
+        if identity_issues:
+            raise UnresolvedSecurityIdentityError(identity_issues)
+
         from ..governance.service import lineage_fields, resolve_production_parameters
 
         parameter_context = resolve_production_parameters(db)
@@ -1314,9 +1293,6 @@ def run_analysis_job(job_id: int) -> None:
             parameter_set_version=parameter_lineage.get("parameter_set_version"),
         )
 
-        snapshot_row = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.id == job.snapshot_id).first()
-        if snapshot_row is None or snapshot_row.status != "confirmed":
-            raise RuntimeError("confirmed_snapshot_not_found")
         snapshot = {
             "id": snapshot_row.id,
             "snapshot_time": snapshot_row.snapshot_time.isoformat(),
@@ -1332,12 +1308,6 @@ def run_analysis_job(job_id: int) -> None:
         history = _history(db, job)
         quick_profile = _profile(db, job.user_id, "analysis")
         deep_profile = _profile(db, job.user_id, "deep_analysis") or quick_profile
-        if any(not normalize_code(item.get("code") or "") for item in snapshot["holdings"]):
-            resolution_profile = quick_profile or deep_profile
-            if resolution_profile is None:
-                raise RuntimeError("default_analysis_model_not_configured")
-            _job_stage(db, job, "symbol_resolving", 14)
-            snapshot["holdings"] = _resolve_missing_codes(resolution_profile, snapshot["holdings"])
         codes = [item["code"] for item in snapshot["holdings"] if item.get("code")]
         _job_stage(db, job, "market_collecting", 20)
         market = collect_market_snapshot(codes)
@@ -1911,8 +1881,8 @@ def run_analysis_job(job_id: int) -> None:
                     job.current_stage = "cancelled"
                 else:
                     job.status = "failed"
-                    job.current_stage = "failed"
-                    job.error_code = type(exc).__name__
+                    job.current_stage = "blocked" if getattr(exc, "code", "") == "unresolved_security_identity" else "failed"
+                    job.error_code = getattr(exc, "code", None) or type(exc).__name__
                     job.error_message = str(exc)[:3000]
                 job.finished_at = utc_now()
                 db.commit()

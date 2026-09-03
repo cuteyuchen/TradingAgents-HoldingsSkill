@@ -1,11 +1,12 @@
 """Pydantic schemas for the V2 product API."""
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from .decision_contract import canonicalize_analysis_mode
-from .market.codes import normalize_security_code
+from .market.codes import canonical_security_code, exchange_hint, normalize_exchange, normalize_security_code
 
 ModelPurpose = Literal["vision", "analysis", "deep_analysis"]
 
@@ -154,8 +155,16 @@ class PortfolioResponse(BaseModel):
 
 class HoldingInput(BaseModel):
     code: str = Field(default="", max_length=16)
+    canonical_code: str | None = Field(default=None, max_length=24)
     name: str | None = Field(default=None, max_length=64)
+    display_name: str | None = Field(default=None, max_length=128)
     market: str | None = Field(default=None, max_length=16)
+    asset_type: str | None = Field(default=None, max_length=24)
+    exchange: str | None = Field(default=None, max_length=8)
+    security_id: int | None = None
+    resolution_status: str = Field(default="UNRESOLVED", max_length=16)
+    resolution_source: str | None = Field(default=None, max_length=64)
+    resolution_confidence: float | None = None
     qty: float | None = None
     available_qty: float | None = None
     cost: float | None = None
@@ -166,10 +175,57 @@ class HoldingInput(BaseModel):
     weight: float | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_raw_identity(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        data = dict(value)
+        raw_code = data.get("canonical_code") or data.get("code")
+        if not data.get("exchange"):
+            hinted_exchange = exchange_hint(raw_code)
+            if hinted_exchange:
+                data["exchange"] = hinted_exchange
+        if raw_code and not data.get("canonical_code"):
+            qualified = canonical_security_code(raw_code, data.get("exchange"))
+            if qualified:
+                data["canonical_code"] = qualified
+        if raw_code not in (None, ""):
+            extra = dict(data.get("extra") or {})
+            extra.setdefault("submitted_code", str(raw_code))
+            data["extra"] = extra
+        return data
+
     @field_validator("code", mode="before")
     @classmethod
     def normalize_code(cls, value: Any) -> str:
         return normalize_security_code(value)
+
+    @field_validator("canonical_code", mode="before")
+    @classmethod
+    def normalize_canonical_code(cls, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        qualified = canonical_security_code(value)
+        return qualified or str(value).strip().upper()
+
+    @field_validator("exchange", mode="before")
+    @classmethod
+    def normalize_holding_exchange(cls, value: Any) -> str | None:
+        return normalize_exchange(value)
+
+    @field_validator("asset_type", mode="before")
+    @classmethod
+    def normalize_asset_type(cls, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value).strip().upper()
+
+    @field_validator("resolution_status", mode="before")
+    @classmethod
+    def normalize_resolution_status(cls, value: Any) -> str:
+        normalized = str(value or "UNRESOLVED").strip().upper()
+        return normalized if normalized in {"RESOLVED", "AMBIGUOUS", "UNRESOLVED", "INVALID"} else "UNRESOLVED"
 
 
 class ParsedHoldingsPayload(BaseModel):
@@ -190,6 +246,7 @@ class UploadResponse(BaseModel):
     mime_type: str
     parsing_status: str
     parsed: ParsedHoldingsPayload | None = None
+    identity_issues: list[dict[str, Any]] = Field(default_factory=list)
     validation_errors: list[str] = Field(default_factory=list)
     error_message: str | None = None
     screenshot_url: str
@@ -213,6 +270,8 @@ class SnapshotResponse(BaseModel):
     broker_available_cash: float | None
     corrected_unused_funds: float | None
     repo_or_standard_bond_value: float | None
+    identity_status: str = "UNKNOWN"
+    identity_issues: list[dict[str, Any]] = Field(default_factory=list)
     holdings: list[HoldingInput]
 
 
