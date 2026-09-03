@@ -76,18 +76,19 @@ def _as_float(value: Any) -> float | None:
 def _response_payload(response: Any) -> Mapping[str, Any]:
     if isinstance(response, Mapping):
         return response
+    raw = getattr(response, "content", None)
+    if isinstance(raw, (bytes, bytearray)):
+        payload = json.loads(bytes(raw).decode("utf-8"))
+        if isinstance(payload, Mapping):
+            return payload
     json_method = getattr(response, "json", None)
     if callable(json_method):
         payload = json_method()
         if isinstance(payload, Mapping):
             return payload
-    raw = getattr(response, "content", None)
-    if raw is None:
-        raw = getattr(response, "text", None)
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    if isinstance(raw, str):
-        payload = json.loads(raw)
+    raw_text = getattr(response, "text", None)
+    if isinstance(raw_text, str):
+        payload = json.loads(raw_text)
         if isinstance(payload, Mapping):
             return payload
     raise ValueError("malformed_json")

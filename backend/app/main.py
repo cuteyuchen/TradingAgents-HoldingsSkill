@@ -123,6 +123,17 @@ app.add_middleware(
 )
 app.add_middleware(RequestIDMiddleware)
 
+
+@app.middleware("http")
+async def ensure_json_utf8(request: Request, call_next):
+    """Make the API encoding explicit instead of inheriting host locale."""
+
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if content_type.lower().startswith("application/json") and "charset=" not in content_type.lower():
+        response.headers["content-type"] = "application/json; charset=utf-8"
+    return response
+
 from .routers import archives  # noqa: E402
 
 app.include_router(archives.router)

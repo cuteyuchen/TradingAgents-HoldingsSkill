@@ -163,6 +163,42 @@ def parse_json_result(result: ModelResult) -> dict[str, Any]:
     return _json_from_text(result.text)
 
 
+def _response_text_utf8(response: requests.Response) -> str:
+    """Decode upstream response bytes explicitly as UTF-8."""
+
+    raw = getattr(response, "content", None)
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ModelCallError("模型接口返回内容不是有效 UTF-8") from exc
+    text = getattr(response, "text", None)
+    if isinstance(text, str):
+        return text
+    return ""
+
+
+def _response_json_utf8(response: requests.Response) -> dict[str, Any]:
+    """Parse JSON from UTF-8 bytes before falling back to test doubles."""
+
+    raw = getattr(response, "content", None)
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            payload = json.loads(bytes(raw).decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ModelCallError("模型接口返回内容不是有效 UTF-8") from exc
+        except json.JSONDecodeError as exc:
+            raise ModelCallError("模型接口返回了无效 JSON") from exc
+    else:
+        json_method = getattr(response, "json", None)
+        if not callable(json_method):
+            raise ModelCallError("模型接口没有返回 JSON")
+        payload = json_method()
+    if not isinstance(payload, dict):
+        raise ModelCallError("模型接口 JSON 顶层必须是对象")
+    return payload
+
+
 def _looks_like_sse(response: requests.Response) -> bool:
     """判断响应是否真的是 SSE。
 
@@ -179,10 +215,17 @@ def _sse_payloads(response: requests.Response) -> Any:
     只要还在产生数据块，requests 的读超时计时器就会被刷新，
     因此模型思考再久也不会被误判为超时。
     """
-    for raw_line in response.iter_lines(decode_unicode=True):
+    for raw_line in response.iter_lines(decode_unicode=False):
         if not raw_line:
             # SSE 的心跳空行同样能刷新读超时，直接跳过。
             continue
+        if isinstance(raw_line, bytes):
+            try:
+                raw_line = raw_line.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ModelCallError("模型 SSE 内容不是有效 UTF-8") from exc
+        elif not isinstance(raw_line, str):
+            raw_line = str(raw_line)
         line = raw_line.strip()
         if line.startswith(":"):
             # 部分网关用注释行做 keep-alive。
@@ -253,14 +296,14 @@ def _openai_compatible(
     )
     if response.status_code >= 400:
         # 流式下错误体也要先读出来再关闭连接。
-        detail = response.text[:500]
+        detail = _response_text_utf8(response)[:500]
         response.close()
         raise ModelCallError(f"模型接口 {response.status_code}: {detail}")
 
     if not stream or not _looks_like_sse(response):
         # 网关忽略了 stream 参数时也走这里，按普通 JSON 解析。
         latency = int((time.monotonic() - started) * 1000)
-        raw = response.json()
+        raw = _response_json_utf8(response)
         try:
             message = raw["choices"][0]["message"]
             text = message.get("content")
@@ -391,14 +434,14 @@ def _anthropic(
         stream=stream,
     )
     if response.status_code >= 400:
-        detail = response.text[:500]
+        detail = _response_text_utf8(response)[:500]
         response.close()
         raise ModelCallError(f"Anthropic {response.status_code}: {detail}")
 
     if not stream or not _looks_like_sse(response):
         # 网关忽略了 stream 参数时也走这里，按普通 JSON 解析。
         latency = int((time.monotonic() - started) * 1000)
-        raw = response.json()
+        raw = _response_json_utf8(response)
         text = "".join(item.get("text", "") for item in raw.get("content", []) if item.get("type") == "text")
         thinking = "".join(
             item.get("thinking", "") for item in raw.get("content", []) if item.get("type") == "thinking"
@@ -503,14 +546,14 @@ def _gemini(
         stream=stream,
     )
     if response.status_code >= 400:
-        detail = response.text[:500]
+        detail = _response_text_utf8(response)[:500]
         response.close()
         raise ModelCallError(f"Gemini {response.status_code}: {detail}")
 
     if not stream or not _looks_like_sse(response):
         # 网关忽略了 stream 参数时也走这里，按普通 JSON 解析。
         latency = int((time.monotonic() - started) * 1000)
-        raw = response.json()
+        raw = _response_json_utf8(response)
         try:
             text = raw["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -572,6 +615,71 @@ def _acceptance_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _identity_fixture_holdings(
+    image_bytes: bytes,
+) -> dict[str, Any] | None:
+    """Return fictional O.2 holding fixtures used by the browser acceptance."""
+
+    def holding(code: str | None, name: str) -> dict[str, Any]:
+        return {
+            "code": code,
+            "name": name,
+            "market": "A_SHARE",
+            "qty": 10000,
+            "available_qty": 10000,
+            "cost": 1.0,
+            "price": 1.1,
+            "market_value": 11000,
+            "pnl": 0.1,
+            "pnl_amount": 1000,
+            "weight": 0.1,
+        }
+
+    if b"identity-7cn" in image_bytes:
+        holdings = [
+            holding(None, "创业板ETF"),
+            holding(None, "通信ETF"),
+            holding(None, "有色ETF"),
+            holding(None, "半导体ETF"),
+            holding(None, "科创50ETF"),
+            holding(None, "中证1000ETF"),
+            holding(None, "沪深300ETF"),
+        ]
+        return {
+            "holdings": holdings,
+            "total_assets": 1000000,
+            "total_market_value": 77000,
+            "broker_available_cash": 923000,
+            "corrected_unused_funds": 923000,
+            "repo_or_standard_bond_value": 0,
+            "excluded_items": [],
+            "notes": ["phase-o.2 identity fixture"],
+        }
+    if b"identity-ambiguous" in image_bytes:
+        return {
+            "holdings": [holding(None, "同名验收ETF")],
+            "total_assets": 100000,
+            "total_market_value": 11000,
+            "broker_available_cash": 89000,
+            "corrected_unused_funds": 89000,
+            "repo_or_standard_bond_value": 0,
+            "excluded_items": [],
+            "notes": ["phase-o.2 ambiguous fixture"],
+        }
+    if b"identity-unresolved" in image_bytes:
+        return {
+            "holdings": [holding(None, "不存在的验收标的")],
+            "total_assets": 100000,
+            "total_market_value": 11000,
+            "broker_available_cash": 89000,
+            "corrected_unused_funds": 89000,
+            "repo_or_standard_bond_value": 0,
+            "excluded_items": [],
+            "notes": ["phase-o.2 unresolved fixture"],
+        }
+    return None
+
+
 def _acceptance_result(
     messages: list[dict[str, Any]],
     *,
@@ -582,7 +690,10 @@ def _acceptance_result(
 
     content = str(messages[-1].get("content") or "") if messages else ""
     if image_bytes is not None:
-        if b"acceptance-invalid" in image_bytes:
+        identity_value = _identity_fixture_holdings(image_bytes)
+        if identity_value is not None:
+            value = identity_value
+        elif b"acceptance-invalid" in image_bytes:
             value: dict[str, Any] = {
                 "holdings": [],
                 "excluded_items": [],
