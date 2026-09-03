@@ -70,8 +70,23 @@ const systemStatus = computed<'ok' | 'setup' | 'degraded' | 'loading'>(() => {
   if (fuyaoStatus.value && !fuyaoStatus.value.configured) return 'setup'
   return liveReadiness.value.status === 'READY' ? 'ok' : 'setup'
 })
-const systemStatusLabel = computed(() => ({ ok: '正常', setup: '需要配置', degraded: '数据受限', loading: '检查中' }[systemStatus.value]))
-const systemStatusHint = computed(() => ({ ok: '系统健康且已具备当前验证条件', setup: '系统尚未满足当前验证条件或 Fuyao 尚未配置', degraded: '系统健康检查失败或核心数据受限', loading: '正在检查系统状态' }[systemStatus.value]))
+const systemStatusLabel = computed(() => {
+  if (systemStatus.value === 'ok') return '正常'
+  if (systemStatus.value === 'loading') return '检查中'
+  if (systemStatus.value === 'degraded') return '数据受限'
+  if (fuyaoStatus.value && !fuyaoStatus.value.configured) return '需要配置'
+  if (!portfolios.value.length) return '需要配置'
+  // Fuyao 已配置、系统健康，但 Live Readiness 尚未完成：不是系统异常，也不是数据受限
+  return '需要完成验证'
+})
+const systemStatusHint = computed(() => {
+  if (systemStatus.value === 'ok') return '系统健康且已具备当前验证条件'
+  if (systemStatus.value === 'loading') return '正在检查系统状态'
+  if (systemStatus.value === 'degraded') return '系统健康检查失败或核心数据受限'
+  if (fuyaoStatus.value && !fuyaoStatus.value.configured) return 'Fuyao 尚未配置'
+  if (!portfolios.value.length) return '尚未创建可用于验证的组合'
+  return '系统健康，仍需完成真实持仓与分析验证'
+})
 
 async function loadSystemStatus(): Promise<void> {
   if (systemStatusRequest) return systemStatusRequest

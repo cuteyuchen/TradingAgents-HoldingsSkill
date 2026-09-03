@@ -34,7 +34,12 @@ from ..market.engine.score import calculate_confidence
 from ..market.codes import normalize_security_code
 from ..market_models import SecurityMaster, TradingCalendar
 from .trading_calendar import CHINA_TZ
-from .market_snapshot_service import get_all_a_share_quote_snapshot, persist_snapshot
+from .market_snapshot_service import (
+    get_all_a_share_quote_snapshot,
+    is_usable_quote_snapshot,
+    persist_quote_snapshot_evidence,
+    persist_snapshot,
+)
 from .daily_bar_cache import load_daily_bars
 from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 
@@ -563,6 +568,9 @@ class MarketEngine:
                 quote_rows = []
         if raw_snapshot is not None:
             quote_rows = _normalize_rows(raw_snapshot)
+        # 真实行情快照先独立落库，Score 算法缺历史或抛错不得伪装成从未观察到 Provider/Snapshot。
+        if persist and server_owned_snapshot and is_usable_quote_snapshot(raw_snapshot):
+            persist_quote_snapshot_evidence(self.db, raw_snapshot)
         source_snapshot_id = (
             str(raw_snapshot.get("snapshot_id"))
             if server_owned_snapshot and raw_snapshot and raw_snapshot.get("snapshot_id")

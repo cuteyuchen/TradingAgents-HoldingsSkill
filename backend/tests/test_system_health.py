@@ -328,6 +328,283 @@ def test_live_validation_readiness_allows_stale_market_snapshot_on_closed_day(mo
         db.close()
 
 
+def test_configured_key_alone_does_not_pass_provider_observation(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        monkeypatch.setattr(settings, "FUYAO_API_KEY", "configured-but-not-observed")
+        monkeypatch.setattr(settings, "REALTIME_MONITOR_ENABLED", True)
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["market_provider"]["status"] == "BLOCKED"
+        assert result["checks"]["market_provider"]["reason"] == "quote_provider_not_observed"
+        assert result["checks"]["quote_pipeline"]["reason"] == "market_snapshot_not_observed"
+        assert result["checks"]["market_refresh"]["reason"] == "market_refresh_not_observed"
+    finally:
+        db.close()
+
+
+def test_provider_success_passes_provider_observation(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        db.add(ProviderHealth(
+            provider_name="fuyao",
+            data_type="quote",
+            status="HEALTHY",
+            last_success_at=datetime.now(UTC).replace(tzinfo=None),
+        ))
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["market_provider"]["status"] == "OK"
+        assert result["checks"]["market_provider"]["provider"] == "fuyao"
+        assert result["checks"]["quote_pipeline"]["status"] == "BLOCKED"
+        assert result["checks"]["portfolio_snapshot"]["reason"] == "confirmed_portfolio_snapshot_missing"
+    finally:
+        db.close()
+
+
+def test_persisted_production_snapshot_passes_snapshot_observation(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        captured = datetime.now(UTC).replace(tzinfo=None)
+        db.add_all([
+            ProviderHealth(
+                provider_name="fuyao",
+                data_type="quote",
+                status="HEALTHY",
+                last_success_at=captured,
+            ),
+            MarketSnapshot(
+                snapshot_id="prod-market-snapshot",
+                market="CN",
+                started_at=captured,
+                completed_at=captured,
+                trade_date=datetime.now(UTC).astimezone(CHINA_TZ).date(),
+                provider="fuyao",
+                expected_count=10,
+                received_count=10,
+                coverage_ratio=1.0,
+                quality_status="VALID",
+            ),
+        ])
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["quote_pipeline"]["status"] == "OK"
+        assert result["checks"]["quote_pipeline"]["provider"] == "fuyao"
+        assert result["checks"]["analysis_smoke"]["reason"] == "successful_analysis_run_not_observed"
+        assert result["checks"]["candidate_smoke"]["reason"] == "successful_candidate_run_not_observed"
+        assert result["checks"]["future_quote_observation"]["reason"] == "future_quote_observation_not_observed"
+    finally:
+        db.close()
+
+
+def test_monitor_enabled_without_cycle_does_not_pass_refresh(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        monkeypatch.setattr(settings, "REALTIME_MONITOR_ENABLED", True)
+        monkeypatch.setattr(health_module, "_recent_monitor_cycle", lambda _now: {
+            "observed": False,
+            "last_success_at": None,
+        })
+        current_day = datetime.now(UTC).astimezone(CHINA_TZ).date()
+        stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+        db.add_all([
+            TradingCalendar(market="CN", trade_date=current_day, is_open=True),
+            ProviderHealth(
+                provider_name="fuyao",
+                data_type="quote",
+                status="HEALTHY",
+                last_success_at=stale,
+            ),
+            MarketSnapshot(
+                snapshot_id="stale-prod-snapshot",
+                market="CN",
+                started_at=stale,
+                completed_at=stale,
+                trade_date=current_day,
+                provider="fuyao",
+                expected_count=10,
+                received_count=10,
+                coverage_ratio=1.0,
+                quality_status="VALID",
+            ),
+        ])
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["quote_pipeline"]["status"] == "OK"
+        assert result["checks"]["market_refresh"]["status"] == "BLOCKED"
+        assert result["checks"]["market_refresh"]["monitor_cycle_observed"] is False
+    finally:
+        db.close()
+
+
+def test_successful_monitor_cycle_passes_refresh_with_usable_snapshot(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        monkeypatch.setattr(settings, "REALTIME_MONITOR_ENABLED", True)
+        monkeypatch.setattr(health_module, "_recent_monitor_cycle", lambda _now: {
+            "observed": True,
+            "last_success_at": datetime.now(UTC).isoformat(),
+        })
+        current_day = datetime.now(UTC).astimezone(CHINA_TZ).date()
+        stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+        db.add_all([
+            TradingCalendar(market="CN", trade_date=current_day, is_open=True),
+            ProviderHealth(
+                provider_name="fuyao",
+                data_type="quote",
+                status="HEALTHY",
+                last_success_at=stale,
+            ),
+            MarketSnapshot(
+                snapshot_id="stale-but-monitored-snapshot",
+                market="CN",
+                started_at=stale,
+                completed_at=stale,
+                trade_date=current_day,
+                provider="fuyao",
+                expected_count=10,
+                received_count=10,
+                coverage_ratio=1.0,
+                quality_status="VALID",
+            ),
+        ])
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["market_refresh"]["status"] == "OK"
+        assert result["checks"]["market_refresh"]["monitor_cycle_observed"] is True
+        assert result["checks"]["portfolio_snapshot"]["status"] == "BLOCKED"
+        assert result["checks"]["analysis_smoke"]["status"] == "BLOCKED"
+        assert result["checks"]["candidate_smoke"]["status"] == "BLOCKED"
+        assert result["checks"]["future_quote_observation"]["status"] == "BLOCKED"
+        assert result["status"] == "NOT_READY"
+    finally:
+        db.close()
+
+
+def test_acceptance_fixture_never_counts_as_live_observation(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        captured = datetime.now(UTC).replace(tzinfo=None)
+        db.add_all([
+            ProviderHealth(
+                provider_name="acceptance",
+                data_type="quote",
+                status="HEALTHY",
+                last_success_at=captured,
+            ),
+            MarketSnapshot(
+                snapshot_id="acceptance-market-snapshot",
+                market="CN",
+                started_at=captured,
+                completed_at=captured,
+                trade_date=datetime.now(UTC).astimezone(CHINA_TZ).date(),
+                provider="acceptance",
+                expected_count=1,
+                received_count=1,
+                coverage_ratio=1.0,
+                quality_status="VALID",
+            ),
+        ])
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["market_provider"]["reason"] == "quote_provider_not_observed"
+        assert result["checks"]["quote_pipeline"]["reason"] == "market_snapshot_not_observed"
+        assert result["checks"]["market_refresh"]["reason"] == "market_refresh_not_observed"
+    finally:
+        db.close()
+
+
+def test_fallback_success_does_not_report_fuyao_healthy(monkeypatch):
+    from app.system import health as health_module
+
+    db = _full_db(include_shadow=True)
+    try:
+        monkeypatch.setattr(health_module, "readiness", lambda _db, detailed=False: _ready_base_payload())
+        monkeypatch.setattr(settings, "SCHEDULER_ENABLED", True)
+        monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+        captured = datetime.now(UTC).replace(tzinfo=None)
+        db.add_all([
+            ProviderHealth(
+                provider_name="fuyao",
+                data_type="quote",
+                status="CIRCUIT_OPEN",
+                last_success_at=None,
+                last_failure_at=captured,
+                last_error="unauthorized",
+            ),
+            ProviderHealth(
+                provider_name="tencent",
+                data_type="quote",
+                status="HEALTHY",
+                last_success_at=captured,
+            ),
+            MarketSnapshot(
+                snapshot_id="fallback-market-snapshot",
+                market="CN",
+                started_at=captured,
+                completed_at=captured,
+                trade_date=datetime.now(UTC).astimezone(CHINA_TZ).date(),
+                provider="tencent",
+                fallback_level=1,
+                expected_count=10,
+                received_count=10,
+                coverage_ratio=1.0,
+                quality_status="VALID",
+            ),
+        ])
+        db.commit()
+
+        result = live_validation_readiness(db, user_id=101)
+
+        assert result["checks"]["market_provider"]["status"] == "OK"
+        assert result["checks"]["market_provider"]["provider"] == "tencent"
+        assert result["checks"]["quote_pipeline"]["status"] == "OK"
+        assert result["checks"]["quote_pipeline"]["provider"] == "tencent"
+    finally:
+        db.close()
+
+
 def test_shadow_status_is_optional_and_aggregate_only(monkeypatch):
     db = _full_db()
     try:

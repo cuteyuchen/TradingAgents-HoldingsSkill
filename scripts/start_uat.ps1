@@ -27,6 +27,38 @@ $env:ACCEPTANCE_MODE = "false"
 $env:APP_GIT_SHA = $GitSha
 $env:APP_BUILD_TIME = (Get-Date).ToUniversalTime().ToString("o")
 
+# Load repo .env into empty process vars for compose interpolation. Never print values.
+$DotEnvPath = Join-Path $Root ".env"
+if (Test-Path $DotEnvPath) {
+  foreach ($line in Get-Content $DotEnvPath) {
+    if ($line -match '^\s*#' -or $line -notmatch '=') { continue }
+    $parts = $line -split '=', 2
+    if ($parts.Count -lt 2) { continue }
+    $name = $parts[0].Trim()
+    $value = $parts[1]
+    if (-not $name) { continue }
+    $existing = [Environment]::GetEnvironmentVariable($name, "Process")
+    if ([string]::IsNullOrWhiteSpace($existing)) {
+      Set-Item -Path "Env:$name" -Value ($value.Trim().Trim('"').Trim("'"))
+    }
+  }
+}
+
+# UAT defaults for the existing RealtimeMonitor. Do not override explicit user values.
+if ([string]::IsNullOrWhiteSpace($env:REALTIME_MONITOR_ENABLED)) {
+  $env:REALTIME_MONITOR_ENABLED = "true"
+}
+if ([string]::IsNullOrWhiteSpace($env:MONITOR_INTERVAL_SECONDS)) {
+  $env:MONITOR_INTERVAL_SECONDS = "60"
+}
+if ([string]::IsNullOrWhiteSpace($env:MARKET_SCORE_INTERVAL_MINUTES)) {
+  $env:MARKET_SCORE_INTERVAL_MINUTES = "5"
+}
+# All-A needs SecurityMaster. UAT opt-in only; production compose default stays false.
+if ([string]::IsNullOrWhiteSpace($env:SECURITY_MASTER_SYNC_ENABLED)) {
+  $env:SECURITY_MASTER_SYNC_ENABLED = "true"
+}
+
 $composeArgs = @(
   "--project-name", $ProjectName,
   "--file", $ComposeFile,

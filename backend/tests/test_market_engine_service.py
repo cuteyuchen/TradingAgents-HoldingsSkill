@@ -16,7 +16,7 @@ if BACKEND_DIR not in sys.path:
 from app.market.engine import ComponentScore
 from app.market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from app.market_models import SecurityMaster, TradingCalendar
-from app.market_runtime_models import MarketSnapshot, SourceLineage
+from app.market_runtime_models import MarketSnapshot, ProviderHealth, SourceLineage
 from app.routers.market_engine_v3 import MarketCalculateRequest
 from app.services.daily_bar_cache import sync_daily_bar_cache
 from app.services.market_engine import MarketEngine, _component_confidence, _preview_median_index
@@ -83,6 +83,57 @@ def test_quote_trade_date_must_match_calculation_date() -> None:
                 ],
                 persist=False,
             )
+    finally:
+        db.close()
+
+
+def test_server_owned_quote_snapshot_survives_later_calculation_failure(monkeypatch) -> None:
+    """真实行情 snapshot 在 Score 校验失败后仍应作为 production evidence 保留。"""
+
+    db = _session()
+    ProviderHealth.__table__.create(db.get_bind(), checkfirst=True)
+    try:
+        snapshot = build_quote_snapshot(
+            [
+                {
+                    "code": "600519",
+                    "price": 102,
+                    "prev_close": 100,
+                    "provider": "fuyao",
+                    "trade_date": date(2026, 8, 22),
+                    "quality_status": "VALID",
+                }
+            ],
+            expected_count=1,
+            provider="fuyao",
+            trade_date=date(2026, 8, 22),
+        )
+        monkeypatch.setattr(
+            "app.services.market_engine.get_all_a_share_quote_snapshot",
+            lambda *_args, **_kwargs: snapshot,
+        )
+        with pytest.raises(ValueError, match="quote_trade_date_mismatch"):
+            MarketEngine(db).calculate(
+                trade_date=date(2026, 8, 23),
+                captured_at=datetime(2026, 8, 23, 1, 35, tzinfo=UTC),
+                securities=[
+                    {
+                        "code": "600519",
+                        "exchange": "SSE",
+                        "security_type": "STOCK",
+                        "listing_date": date(2026, 8, 23) - timedelta(days=400),
+                    }
+                ],
+                trading_calendar=[
+                    {"trade_date": date(2026, 8, 23) - timedelta(days=offset), "is_open": True}
+                    for offset in range(400, -1, -1)
+                ],
+                persist=True,
+            )
+        assert db.scalar(select(func.count()).select_from(MarketSnapshot)) == 1
+        row = db.execute(select(MarketSnapshot)).scalar_one()
+        assert row.provider == "fuyao"
+        assert row.quality_status == "VALID"
     finally:
         db.close()
 

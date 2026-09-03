@@ -71,6 +71,50 @@ test('Shell system status follows authoritative readiness instead of portfolio e
   expect(readinessRequests).toBeGreaterThan(0)
 })
 
+test('Shell shows verification pending instead of data-limited when Fuyao is configured', async ({ acceptancePage: page, facts }) => {
+  await page.route('**/api/v3/system/health', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ status: 'OK', components: {}, as_of: '2026-08-21T06:00:00Z' }),
+  }))
+  await page.route('**/api/v3/system/live-validation-readiness', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      status: 'NOT_READY',
+      ready: false,
+      blockers: [
+        { key: 'portfolio_snapshot', reason: 'confirmed_portfolio_snapshot_missing' },
+        { key: 'analysis_smoke', reason: 'successful_analysis_run_not_observed' },
+      ],
+      warnings: [],
+      checks: {
+        market_provider: { status: 'OK' },
+        quote_pipeline: { status: 'OK' },
+        market_refresh: { status: 'OK' },
+        portfolio_snapshot: { status: 'BLOCKED', reason: 'confirmed_portfolio_snapshot_missing' },
+      },
+      evaluated_at: '2026-08-21T06:00:00Z',
+    }),
+  }))
+  await page.route('**/api/v3/fuyao/status*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      provider: 'fuyao',
+      configured: true,
+      connection_status: '已连接',
+      capabilities: { quotes: { status: '已连接' } },
+    }),
+  }))
+
+  await login(page, facts.users.a)
+  await expect(page.locator('.system-status-button')).toContainText('需要完成验证')
+  await expect(page.locator('.system-status-button')).not.toContainText('数据受限')
+  await expect(page.locator('.system-status-button')).not.toContainText('正常')
+  await expect(page.locator('.system-status-button')).not.toContainText('系统异常')
+})
+
 test('First run shows one actionable checklist instead of empty dashboard cards', async ({ acceptancePage: page }) => {
   await page.goto('/login')
   await page.getByRole('button', { name: '首次使用？创建账户', exact: true }).click()

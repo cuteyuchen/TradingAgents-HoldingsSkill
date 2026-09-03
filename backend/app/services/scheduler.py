@@ -360,22 +360,20 @@ def _run_shadow_maintenance(*, now_utc: datetime) -> None:
 
 
 def _sync_monitor_lifecycle(now_utc: datetime, *, calendar: TradingCalendarService) -> None:
-    """Restart-safe monitor lifecycle driven by the same scheduler clock."""
+    """Restart-safe monitor lifecycle driven by the same scheduler clock.
+
+    收盘/午休由 Monitor 自身 session pause 处理，不再把 market closed 当成失败而停线程。
+    """
 
     from .realtime_monitor import get_realtime_monitor
 
-    local = now_utc.astimezone(CHINA_TZ)
     monitor = get_realtime_monitor()
-    if not calendar.is_trading_day(local.date()):
+    if not settings.REALTIME_MONITOR_ENABLED:
         if monitor.is_running():
             monitor.stop()
         return
-    if time(9, 30) <= local.time() < time(11, 30) or time(13, 0) <= local.time() < time(15, 0):
-        if settings.REALTIME_MONITOR_ENABLED:
-            monitor.start()
-    elif time(11, 30) <= local.time() < time(13, 0) or local.time() >= time(15, 0) or local.time() < time(9, 30):
-        if monitor.is_running():
-            monitor.stop()
+    if not monitor.is_running():
+        monitor.start()
 
 
 def _fixed_checkpoint_is_missed(schedule: Schedule, *, local: datetime) -> bool:

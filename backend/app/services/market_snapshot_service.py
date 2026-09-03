@@ -6,6 +6,7 @@ the server-owned route/universe, invokes Providers, and persists provenance.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from typing import Any, Callable
@@ -30,7 +31,10 @@ from ..market.providers.health import (
 from ..market_runtime_models import MarketSnapshot, ProviderHealth, SourceLineage
 from .security_master import get_market_universe
 
+logger = logging.getLogger(__name__)
 QUALITY_STATUSES = frozenset({"VALID", "DEGRADED", "STALE", "CONFLICT", "MISSING", "INVALID"})
+# 验收夹具不得计入 live provider / snapshot 观察。
+ACCEPTANCE_PROVIDER_NAMES = frozenset({"acceptance", "fixture"})
 HEALTH_STATUSES = frozenset({"HEALTHY", "DEGRADED", "CIRCUIT_OPEN", "RECOVERING"})
 DEFAULT_FAILURE_THRESHOLD = 3
 SnapshotProvider = Callable[[dict[str, Any]], Any]
@@ -481,6 +485,46 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
             },
         ))
     db.flush()
+    return row
+
+
+def is_acceptance_provider(name: Any) -> bool:
+    """验收夹具 provider 不能当作 production observation。"""
+
+    return str(name or "").strip().lower() in ACCEPTANCE_PROVIDER_NAMES
+
+
+def is_usable_quote_snapshot(snapshot: Mapping[str, Any] | None) -> bool:
+    """可独立持久化的真实行情快照：有 snapshot_id、有成交记录、质量可用。"""
+
+    if not isinstance(snapshot, Mapping) or not snapshot.get("snapshot_id"):
+        return False
+    if is_acceptance_provider(snapshot.get("provider")):
+        return False
+    quality = str(
+        getattr(snapshot.get("quality_status"), "value", snapshot.get("quality_status") or "")
+    ).upper()
+    try:
+        received = int(snapshot.get("received_count") or 0)
+    except (TypeError, ValueError):
+        received = 0
+    return received > 0 and quality in {"VALID", "DEGRADED"}
+
+
+def persist_quote_snapshot_evidence(db: Session, snapshot: Mapping[str, Any]) -> MarketSnapshot:
+    """把已验证的 canonical MarketSnapshot 作为独立 production evidence 提交。
+
+    后续 Market Score 失败不得把 Provider/Snapshot 观察回滚成“从未发生”。
+    """
+
+    row = persist_snapshot(db, snapshot)
+    db.commit()
+    try:
+        sync_runtime_provider_health(db, data_type="quote")
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("provider health projection failed after quote snapshot evidence")
     return row
 
 

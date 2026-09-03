@@ -84,8 +84,13 @@ class RealtimeMonitor:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                logger.exception("Realtime monitor loop tick failed")
+                self._set_state(status="degraded", last_error="loop_tick_failed")
             self._stop.wait(settings.MONITOR_INTERVAL_SECONDS)
+        logger.info("Realtime monitor loop exited")
 
     def tick(self, *, portfolio_id: int | None = None, user_id: int | None = None, dry_run: bool = False) -> dict[str, Any]:
         if not self._tick_lock.acquire(blocking=False):

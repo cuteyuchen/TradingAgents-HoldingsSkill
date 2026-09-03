@@ -336,18 +336,23 @@ def test_tick_schedules_preserves_completed_run_before_missed_check(monkeypatch)
         assert row.last_run_at == datetime(2026, 8, 20, 1, 35)
 
 
-def test_tick_schedules_stops_monitor_on_non_trading_day(monkeypatch):
+def test_tick_schedules_keeps_enabled_monitor_outside_session(monkeypatch):
     factory = _scheduler_db()
     with factory() as db:
         upsert_calendar(db, [{"trade_date": "2026-08-22", "is_open": False}])
         db.commit()
 
     class Monitor:
-        running = True
+        running = False
+        starts = 0
         stops = 0
 
         def is_running(self):
             return self.running
+
+        def start(self):
+            self.running = True
+            self.starts += 1
 
         def stop(self):
             self.running = False
@@ -356,9 +361,11 @@ def test_tick_schedules_stops_monitor_on_non_trading_day(monkeypatch):
     monitor = Monitor()
     monkeypatch.setattr(scheduler, "SessionLocal", factory)
     monkeypatch.setattr(scheduler, "datetime", _WeekendFrozenDateTime)
+    monkeypatch.setattr(scheduler.settings, "REALTIME_MONITOR_ENABLED", True)
     monkeypatch.setattr("app.services.realtime_monitor.get_realtime_monitor", lambda: monitor)
 
     scheduler.tick_schedules()
 
-    assert monitor.running is False
-    assert monitor.stops == 1
+    assert monitor.running is True
+    assert monitor.starts == 1
+    assert monitor.stops == 0

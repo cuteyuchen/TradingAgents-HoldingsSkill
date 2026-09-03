@@ -226,14 +226,23 @@ def monitor_status() -> dict[str, Any]:
     try:
         monitor = get_realtime_monitor()
         state = monitor.status()
-        running = bool(state.get("status") == "running")
+        alive = monitor.is_running()
+        state_status = str(state.get("status") or "")
     except Exception:  # noqa: BLE001
         return {"status": "UNKNOWN", "reason": "monitor_unavailable"}
     if not settings.REALTIME_MONITOR_ENABLED:
         return {"status": "OK", "reason": "monitor_disabled_by_config"}
+    # paused 是休市/午休的正常 cycle，不等于 monitor 失败。
+    healthy = alive and state_status in {"running", "paused"}
+    reason = None
+    if state_status == "paused":
+        session = str(state.get("last_session") or "closed").lower()
+        reason = f"session_{session}"
+    elif not healthy:
+        reason = state.get("last_error") or "monitor_not_running"
     return {
-        "status": "OK" if running else "DEGRADED",
-        "reason": None if running else state.get("last_error") or "monitor_not_running",
+        "status": "OK" if healthy else "DEGRADED",
+        "reason": reason,
         "last_tick_at": state.get("last_tick_at"),
         "last_success_at": state.get("last_success_at"),
     }
@@ -474,6 +483,51 @@ def readiness(db: Session | None = None, *, detailed: bool = False) -> dict[str,
             session.close()
 
 
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    """把 Monitor / DB 时间戳规范成 UTC，无法解析则视为缺失。"""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _recent_monitor_cycle(now: datetime) -> dict[str, Any]:
+    """成功 Monitor cycle 的 evidence：last_success_at 在两个 interval 内。
+
+    仅 REALTIME_MONITOR_ENABLED=true 不算通过。
+    """
+
+    if not settings.REALTIME_MONITOR_ENABLED:
+        return {"observed": False, "last_success_at": None}
+    try:
+        from ..services.realtime_monitor import get_realtime_monitor
+
+        state = get_realtime_monitor().status()
+    except Exception:  # noqa: BLE001
+        return {"observed": False, "last_success_at": None}
+    last_success = _parse_utc_timestamp(state.get("last_success_at"))
+    if last_success is None:
+        return {"observed": False, "last_success_at": None}
+    window = max(int(settings.MONITOR_INTERVAL_SECONDS) * 2, int(settings.MARKET_SNAPSHOT_FRESHNESS_SECONDS))
+    age = max(0.0, (now - last_success).total_seconds())
+    return {
+        "observed": age <= window,
+        "last_success_at": last_success.isoformat(),
+        "age_seconds": round(age, 1),
+    }
+
+
 def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
     """Evaluate the evidence chain required before live validation.
 
@@ -540,7 +594,15 @@ def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
             "trade_date": local_now.date(),
         }
 
-    provider_rows = db.query(ProviderHealth).filter(ProviderHealth.data_type == "quote").all()
+    from ..services.market_snapshot_service import is_acceptance_provider
+
+    # 仅配置 API Key 或验收夹具不得解除 blocker；必须看到非 acceptance 的 production evidence。
+    acceptance_runtime = bool(settings.ACCEPTANCE_MODE)
+    provider_rows = [
+        row
+        for row in db.query(ProviderHealth).filter(ProviderHealth.data_type == "quote").all()
+        if not is_acceptance_provider(row.provider_name)
+    ]
     healthy_provider = next(
         (row for row in provider_rows if str(row.status).upper() == "HEALTHY" and row.last_success_at),
         None,
@@ -549,28 +611,37 @@ def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
         (row for row in provider_rows if str(row.status).upper() == "RECOVERING"),
         None,
     )
-    if healthy_provider is not None:
+    if acceptance_runtime or healthy_provider is None:
+        if not acceptance_runtime and recovering_provider is not None:
+            checks["market_provider"] = {
+                "status": "DEGRADED",
+                "reason": "provider_recovering",
+                "provider": recovering_provider.provider_name,
+            }
+        else:
+            checks["market_provider"] = {
+                "status": "BLOCKED",
+                "reason": "quote_provider_not_observed",
+                "configured_primary": settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER,
+            }
+    else:
         checks["market_provider"] = {
             "status": "OK",
             "provider": healthy_provider.provider_name,
             "last_success_at": healthy_provider.last_success_at,
         }
-    elif recovering_provider is not None:
-        checks["market_provider"] = {
-            "status": "DEGRADED",
-            "reason": "provider_recovering",
-            "provider": recovering_provider.provider_name,
-        }
-    else:
-        checks["market_provider"] = {
-            "status": "BLOCKED",
-            "reason": "quote_provider_not_observed",
-            "configured_primary": settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER,
-        }
 
-    latest_market = db.query(MarketSnapshot).filter(MarketSnapshot.market == "CN").order_by(
-        MarketSnapshot.completed_at.desc(), MarketSnapshot.id.desc()
-    ).first()
+    latest_market = None
+    if not acceptance_runtime:
+        for row in (
+            db.query(MarketSnapshot)
+            .filter(MarketSnapshot.market == "CN")
+            .order_by(MarketSnapshot.completed_at.desc(), MarketSnapshot.id.desc())
+            .limit(50)
+        ):
+            if not is_acceptance_provider(row.provider):
+                latest_market = row
+                break
     if latest_market is None:
         checks["quote_pipeline"] = {"status": "BLOCKED", "reason": "market_snapshot_not_observed"}
         checks["market_refresh"] = {"status": "BLOCKED", "reason": "market_refresh_not_observed"}
@@ -583,8 +654,11 @@ def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
         market_closed = checks["trading_calendar"].get("reason") == "non_trading_day"
         is_usable = quality in {"VALID", "DEGRADED"}
         is_fresh = age_seconds <= settings.MARKET_SNAPSHOT_FRESHNESS_SECONDS
+        monitor_cycle = _recent_monitor_cycle(now)
+        # Monitor 打开本身不算 refresh；必须有一次成功 cycle，且已有可用 production snapshot。
+        refresh_ok = is_usable and (is_fresh or market_closed or monitor_cycle["observed"])
         pipeline_status = "OK" if is_usable else "BLOCKED"
-        refresh_status = "OK" if is_usable and (is_fresh or market_closed) else "BLOCKED"
+        refresh_status = "OK" if refresh_ok else "BLOCKED"
         checks["quote_pipeline"] = {
             "status": pipeline_status,
             "reason": None if is_usable else f"market_snapshot_quality:{quality}",
@@ -595,11 +669,16 @@ def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
         }
         checks["market_refresh"] = {
             "status": refresh_status,
-            "reason": None if refresh_status == "OK" else "market_snapshot_stale",
+            "reason": None if refresh_status == "OK" else (
+                "market_refresh_not_observed" if not monitor_cycle["observed"] and not is_fresh and not market_closed
+                else "market_snapshot_stale"
+            ),
             "trade_date": latest_market.trade_date,
             "completed_at": latest_market.completed_at,
             "age_seconds": round(age_seconds, 1),
             "closed_day_grace": market_closed,
+            "monitor_cycle_observed": monitor_cycle["observed"],
+            "monitor_last_success_at": monitor_cycle["last_success_at"],
         }
 
     latest_snapshot = db.query(PortfolioSnapshot).filter(

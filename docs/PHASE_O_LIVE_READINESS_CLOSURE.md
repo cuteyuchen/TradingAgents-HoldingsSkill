@@ -95,3 +95,32 @@ quote observation 已产生，也不绕过 readiness gate。
 
 当前结论：`LIVE_READINESS = NOT_READY`；`MANUAL_UAT = REQUIRED`；
 `PHASE_O_FINAL = HOLD_FOR_REDESIGNED_MANUAL_UAT`。
+
+## O.2 Live Data Activation Fix
+
+记录日期：2026-09-03
+
+本轮只激活真实行情链，不把组合/分析/候选/未来行情 blocker 漂绿。
+
+容器内布尔状态：`FUYAO_CONFIGURED=True`，`ACCEPTANCE_MODE=false`，`REALTIME_MONITOR_ENABLED=true`，`MONITOR_INTERVAL_SECONDS=60`，`MARKET_SCORE_INTERVAL_MINUTES=5`。
+
+真实 smoke（不记录 API Key）：
+
+| 项 | 结果 |
+|---|---|
+| Fuyao capability probe | quotes/calendar/historical/corporate_actions/financials/valuation/index/fund/special_data = 已连接；market_dumps = 上游 404 Route not found |
+| Critical quote | provider=fuyao，fallback_level=0，quality=VALID |
+| All-A snapshot | provider=fuyao，expected=5222，received=5209，coverage=0.997511，quality=DEGRADED，已持久化 |
+| Market Score | FROZEN / data_quality（历史不足，不伪装 PASS） |
+| Monitor | 收盘后保持 paused cycle；tick_count 前进；last_success_at 约 60s 前进 |
+| 行情 Provider | OK（fuyao HEALTHY） |
+| Quote Pipeline | OK |
+| 行情刷新 | OK（monitor_cycle_observed=true） |
+| 组合/分析/候选/未来行情 | 仍 BLOCKED |
+| LIVE_READINESS | NOT_READY |
+
+Manual UAT URL：`http://127.0.0.1:18082`
+
+启动：`powershell -ExecutionPolicy Bypass -File .\scripts\start_uat.ps1`
+
+停止：`powershell -ExecutionPolicy Bypass -File .\scripts\stop_uat.ps1`
