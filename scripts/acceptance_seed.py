@@ -152,6 +152,13 @@ def _ensure_security_master(db) -> None:
         "601318": ("SSE", "中国平安", "STOCK", None),
         "000001": ("SZSE", "平安银行", "STOCK", None),
         "159915": ("SZSE", "创业板ETF", "ETF", "BROAD_MARKET"),
+        "515880": ("SSE", "通信ETF", "ETF", None),
+        "512400": ("SSE", "有色ETF", "ETF", None),
+        "512480": ("SSE", "半导体ETF", "ETF", None),
+        "588000": ("SSE", "科创50ETF", "ETF", None),
+        "512100": ("SSE", "中证1000ETF", "ETF", None),
+        "510001": ("SSE", "同名验收ETF", "ETF", None),
+        "159001": ("SZSE", "同名验收ETF", "ETF", None),
     }
     for code, (exchange, name, security_type, category) in items.items():
         row = db.execute(select(SecurityMaster).where(
