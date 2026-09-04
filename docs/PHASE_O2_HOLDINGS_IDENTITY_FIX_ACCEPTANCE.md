@@ -71,12 +71,14 @@ Review 行显示代码、名称、数量、可用、成本、现价、市值和�
 
 Confirm endpoint 在写入 `PortfolioSnapshot` 前再次 authoritative 验证；任一
 未 resolved 行返回 HTTP `409`、`holding_identity_unresolved`，不持久化 snapshot。
+Fuyao portfolio contribution endpoint 同样先审计 holding identity；未 resolved
+历史行不会进入真实 quote 请求，resolved 行才使用 canonical Security Master 事实。
 历史不完整 snapshot 不删除、不覆盖，响应标记 `INCOMPLETE`，且 Analysis 入口和
 worker 以 `unresolved_security_identity` 阻断。
 
 ## 自动化证据
 
-- Backend：`489 passed`
+- Backend：`490 passed`
 - Frontend typecheck / build：PASS
 - Playwright acceptance：`27 passed`（原 24 + Phase O.2 Case A-D）
 - Docker：build、production-like startup、health、register/login、
