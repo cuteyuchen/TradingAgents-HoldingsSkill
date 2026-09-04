@@ -1,5 +1,5 @@
 """Per-user V2 model provider and model profile settings."""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -165,7 +165,7 @@ def update_provider(
     return _provider_response(provider)
 
 
-@router.delete("/providers/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/providers/{provider_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_provider(
     provider_id: int,
     db: Session = Depends(get_db),
@@ -242,7 +242,7 @@ def update_profile(
     return _profile_response(profile)
 
 
-@router.delete("/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/profiles/{profile_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_profile(
     profile_id: int,
     db: Session = Depends(get_db),

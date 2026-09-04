@@ -20,7 +20,7 @@
 - 最近历史建议、持仓变化与同向/反向建议一致性检查。
 - 任务状态、取消、失败重试、SSE 进度流。
 - 报告历史、结构化证据、原始截图与前后两次结果比较。
-- 按交易日和用户时区自动分析。
+- 按中国交易日和 `Asia/Shanghai` 业务时区调度分析；用户时区仅用于界面与通知展示。
 - 持仓快照过期阻断、任务幂等、连续失败自动停用。
 - 钉钉和企业微信群机器人通知。
 - 保留原 `/api/v1/archives`，兼容现有 Skill 上传归档。
@@ -57,6 +57,18 @@
 ```
 
 当前默认是适合个人自托管的模块化单体：FastAPI 进程内执行分析任务并运行 APScheduler。任务和接口已经抽象为独立模型，后续可迁移到 PostgreSQL、Redis 和独立 Worker。
+
+## 历史研究与参数校准（Phase I）
+
+历史研究位于独立的 Research namespace，使用已持久化事实执行 Point-in-Time Replay、Backtest、Robustness Analysis 和 Calibration Evidence。它不会调用实时行情或 LLM，不写入 DecisionMemory、TradeLedger、PortfolioSnapshot，也不会自动修改任何生产配置。当前 Alembic head 为 20260827_0017，迁移链保持 0014 → 0015 → 0016 → 0017。
+
+支持三种明确分离的模式：
+
+- PRODUCTION_REPLAY：重放历史上已经保存的 Market、Candidate、Portfolio、Memory 事实。
+- DETERMINISTIC_RECOMPUTE：只有完整 PIT 数据集存在时才启用；当前缺少该数据集会 fail-close。
+- BAR_ONLY_DIAGNOSTIC：仅研究价格因子，不宣称完整 Candidate Engine 回测。
+
+研究页面位于 /research，包含 Data Availability、Backtest Evidence 和 Calibration Report。校准结果只生成 KEEP_CURRENT、CONSIDER_CHANGE、INSUFFICIENT_EVIDENCE 或 REJECT_CHANGE，没有 Apply 按钮；NEXT_OPEN_PROXY 只是模拟执行，不是真实成交。详细验收边界见 docs/PHASE_I_ACCEPTANCE.md。
 
 ## 核心数据链路
 
@@ -140,19 +152,27 @@ OpenAI Compatible 可接入 vLLM、LM Studio、llama.cpp、自定义中转服务
 - “新标准券”“标准券”和国债逆回购不作为股票/ETF 持仓。
 - 同时存在总资产和总市值时，修正后未使用资金为 `total_assets - total_market_value`。
 
+## 候选与无需调整
+
+- `result.candidates` 和 `buy_candidates` 只表示当前 Action Gate 通过的、新的非当前持仓机会。
+- 只有 `candidate_type=new_position`、`score >= 7`，且证据、质量门与风险门均通过的标的，才有资格进入候选列表；最多保留 3 个，评分通过也不保证一定输出。
+- `rotation_watch`、评分 5–6 或证据不足的想法只能放在 `candidate_blocked_reason`、观察触发条件或报告文字中，不能进入 `candidates`。
+- `candidates=[]` 是正常成功结果；当质量门通过、现有持仓均为 `HOLD/WATCH` 且没有行动候选时，组合评级应为 `no_action`，结论和最终动作必须保持现状一致。
+
 ## 自动分析
 
-在“系统设置 → 自动分析”配置：组合、时区、执行时间、分析模式、持仓过期天数、是否通知和连续失败阈值。
+在“系统设置 → 自动分析”配置：组合、执行时间、分析模式、持仓过期天数、是否通知和连续失败阈值。A 股业务时间固定为 `Asia/Shanghai`；用户时区不改变交易日判断或计划的业务时间。
 
 执行前系统会：
 
-1. 检查是否为 A 股交易日。
+1. 使用持久化 `TradingCalendar` 检查是否为 A 股交易日；日历缺失或当天休市时闭锁调度，不用行情请求临时猜测交易日。
+   启动时的离线内置日历目前只覆盖 2025–2026 年。进入 2027 年前必须更新内置交易所休市表，或通过受保护的日历同步接口写入有效数据；系统不会把未知年份猜成交易日，并会通过健康检查暴露 `calendar_not_initialized` / `calendar_out_of_range`，避免计划静默失效。
 2. 获取最近一次已确认持仓。
 3. 校验持仓快照是否过期。
 4. 使用幂等键避免相同计划重复创建任务。
 5. 连续失败达到阈值后自动停用计划。
 
-个人部署推荐开盘后首次分析时间为 `09:35`，也可以增加 `10:00`、`12:00`、`14:30` 等计划。
+产品标准检查点为 `09:35`、`10:30`、`13:05`、`14:30`、`15:10`。这些是运行合同标签，不会自动创建五个 Scheduler 任务；需要在设置中按需配置计划。`15:10` 用于深度日终复盘，不代表系统会自动下单。
 
 ## 钉钉与企业微信
 
@@ -192,6 +212,22 @@ POST   /api/v2/schedules/{id}/run-now
 /api/v2/notifications
 POST   /api/v2/notifications/{id}/test
 ```
+
+### Phase I Research
+
+```text
+GET    /api/v3/research/replay-availability
+GET    /api/v3/research/backtests
+POST   /api/v3/research/backtests
+GET    /api/v3/research/backtests/{id}
+POST   /api/v3/research/backtests/{id}/heartbeat
+POST   /api/v3/research/backtests/{id}/cancel
+GET    /api/v3/research/calibrations
+POST   /api/v3/research/calibrations
+GET    /api/v3/research/calibrations/{id}
+```
+
+Research API 只接受研究范围、日期、模式和受限参数网格；Outcome、Return、Score、Source ID 和历史事实等 server-owned 字段不能由客户端提交。Research Run、Calibration Report 与 Portfolio 均按当前用户隔离。
 
 ### V1 兼容
 
@@ -275,7 +311,7 @@ GitHub Actions 会执行 Alembic 空库升级与重复升级、全部后端测�
 1. 使用实际视觉模型解析至少三种不同券商截图，核对代码、总持仓、可用数量、成本、盈亏金额与盈亏率。
 2. 分别验证项目实际准备使用的 OpenAI Compatible、Anthropic 或 Gemini 模型接口。
 3. 在交易时段和收盘后验证腾讯行情、东财 K 线、资金流与公告字段。
-4. 验证行情不可用时是否降级为 `watch_only`，且不产生具体买卖数量。
+4. 验证行情不可用时是否阻断具体交易动作并保留 `watch_only`/缺失证据说明，且不产生具体买卖数量。
 5. 构造 `available_qty=0` 和卖出数量超过可用数量的结果，确认服务端会阻断或修正。
 6. 连续上传不同持仓，检查历史上下文、已执行减仓识别和反向建议说明。
 7. 使用真实钉钉与企业微信机器人验证普通 Webhook、钉钉加签和报告链接。

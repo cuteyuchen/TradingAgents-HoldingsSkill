@@ -1,10 +1,12 @@
 """Pydantic schemas for the V2 product API."""
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from .decision_contract import canonicalize_analysis_mode
+from .market.codes import canonical_security_code, exchange_hint, normalize_exchange, normalize_security_code
 
 ModelPurpose = Literal["vision", "analysis", "deep_analysis"]
 
@@ -153,8 +155,16 @@ class PortfolioResponse(BaseModel):
 
 class HoldingInput(BaseModel):
     code: str = Field(default="", max_length=16)
+    canonical_code: str | None = Field(default=None, max_length=24)
     name: str | None = Field(default=None, max_length=64)
+    display_name: str | None = Field(default=None, max_length=128)
     market: str | None = Field(default=None, max_length=16)
+    asset_type: str | None = Field(default=None, max_length=24)
+    exchange: str | None = Field(default=None, max_length=8)
+    security_id: int | None = None
+    resolution_status: str = Field(default="UNRESOLVED", max_length=16)
+    resolution_source: str | None = Field(default=None, max_length=64)
+    resolution_confidence: float | None = None
     qty: float | None = None
     available_qty: float | None = None
     cost: float | None = None
@@ -165,15 +175,69 @@ class HoldingInput(BaseModel):
     weight: float | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_raw_identity(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        data = dict(value)
+        raw_code = data.get("code")
+        raw_canonical = data.get("canonical_code")
+        raw_identity = raw_canonical or raw_code
+        if not data.get("exchange"):
+            hinted_exchange = exchange_hint(raw_identity)
+            if hinted_exchange:
+                data["exchange"] = hinted_exchange
+        # Keep the user's raw tokens for the identity resolver, but do not
+        # manufacture a canonical code before Security Master verification.
+        # A six-digit code is only a hint until a master row supplies the
+        # exchange-qualified authority.
+        if raw_code not in (None, "") or raw_canonical not in (None, ""):
+            extra = dict(data.get("extra") or {})
+            if raw_code not in (None, ""):
+                extra.setdefault("submitted_code", str(raw_code))
+            if raw_canonical not in (None, ""):
+                extra.setdefault("submitted_canonical_code", str(raw_canonical))
+            data["extra"] = extra
+        return data
+
     @field_validator("code", mode="before")
     @classmethod
     def normalize_code(cls, value: Any) -> str:
-        if value is None:
-            return ""
-        value = str(value)
-        text = value.strip().upper()
-        digits = "".join(ch for ch in text if ch.isdigit())
-        return digits[-6:] if len(digits) >= 6 else text
+        return normalize_security_code(value)
+
+    @field_validator("canonical_code", mode="before")
+    @classmethod
+    def normalize_canonical_code(cls, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        # A bare six-digit value is only a submitted hint.  Do not infer an
+        # exchange suffix until the resolver verifies the code against the
+        # Security Master.  Explicitly qualified input can be normalized here
+        # without becoming authoritative on its own.
+        text = str(value).strip().upper()
+        if not exchange_hint(text):
+            return None
+        qualified = canonical_security_code(text)
+        return qualified or text
+
+    @field_validator("exchange", mode="before")
+    @classmethod
+    def normalize_holding_exchange(cls, value: Any) -> str | None:
+        return normalize_exchange(value)
+
+    @field_validator("asset_type", mode="before")
+    @classmethod
+    def normalize_asset_type(cls, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value).strip().upper()
+
+    @field_validator("resolution_status", mode="before")
+    @classmethod
+    def normalize_resolution_status(cls, value: Any) -> str:
+        normalized = str(value or "UNRESOLVED").strip().upper()
+        return normalized if normalized in {"RESOLVED", "AMBIGUOUS", "UNRESOLVED", "INVALID"} else "UNRESOLVED"
 
 
 class ParsedHoldingsPayload(BaseModel):
@@ -194,6 +258,7 @@ class UploadResponse(BaseModel):
     mime_type: str
     parsing_status: str
     parsed: ParsedHoldingsPayload | None = None
+    identity_issues: list[dict[str, Any]] = Field(default_factory=list)
     validation_errors: list[str] = Field(default_factory=list)
     error_message: str | None = None
     screenshot_url: str
@@ -217,6 +282,8 @@ class SnapshotResponse(BaseModel):
     broker_available_cash: float | None
     corrected_unused_funds: float | None
     repo_or_standard_bond_value: float | None
+    identity_status: str = "UNKNOWN"
+    identity_issues: list[dict[str, Any]] = Field(default_factory=list)
     holdings: list[HoldingInput]
 
 

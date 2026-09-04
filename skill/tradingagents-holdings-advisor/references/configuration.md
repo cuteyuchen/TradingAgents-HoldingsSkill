@@ -19,6 +19,17 @@ input is accepted as an alias for `fast`. These modes may adjust reasoning depth
 or model selection, but they do not imply different pipeline stages or fixed
 agent counts.
 
+## Checkpoint And Business-Time Parameters
+
+The standard checkpoints are fixed contract labels in the A-share business
+timezone. They are available for configured plans; the application does not
+implicitly create five schedules, and missing/closed calendar rows fail closed.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `business_timezone` | `Asia/Shanghai` | Trading-day checks, checkpoint comparison, and scheduler execution use this timezone; user timezone is for UI/notifications only |
+| `standard_checkpoints` | `09:35`, `10:30`, `13:05`, `14:30`, `15:10` | Standard labels: opening, fast morning, fast midday, late-session risk control, deep daily review |
+
 ## Runtime Experience Parameters
 
 Routine portfolio runs should aim to show the final advice within 10 minutes.
@@ -110,6 +121,10 @@ Position and action sizing. See `trading-rules.md`.
 | `candidate_score_buyable` | 7 | Score ≥ 7 = buyable |
 | `candidate_score_watch` | 5 | 5–6 = observation text/blocker only; never enters `result.candidates`; < 5 = do not recommend |
 | `portfolio_exposure_context` | no fixed threshold | Current total exposure is a risk input. Until Dynamic Risk Budget exists, do not automatically raise cash, reduce, or block a new opportunity solely because exposure crosses one universal percentage. |
+
+Phase A.1 deliberately has no global `account_exposure_high`, `cash_min_ratio`,
+85% exposure gate, or 15% cash floor. Market regime, portfolio risk review, and
+available evidence may still justify a contextual cash or sizing decision.
 
 ### Decision Contract Parameters
 

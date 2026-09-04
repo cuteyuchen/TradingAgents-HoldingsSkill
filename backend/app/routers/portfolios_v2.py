@@ -4,13 +4,23 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..database import get_db
+from ..services.holding_identity import (
+    RESOLVED,
+    audit_holding_item,
+    payload_identity_issues,
+    resolve_holding_identity,
+    resolve_payload_identities,
+    snapshot_identity_issues,
+)
 from ..services.holdings_service import normalize_payload, parse_payload_dict, parse_upload
 from ..services.storage import resolve_storage_path, save_holding_image
+from ..portfolio.snapshot_diff import upsert_snapshot_diff
 from ..v2_dependencies import get_current_user
 from ..v2_models import HoldingItem, HoldingUpload, Portfolio, PortfolioSnapshot, User
 from ..v2_schemas import (
@@ -89,6 +99,7 @@ def _upload_response(row: HoldingUpload) -> UploadResponse:
         mime_type=row.mime_type,
         parsing_status=row.parsing_status,
         parsed=parsed,
+        identity_issues=payload_identity_issues(parsed) if parsed else [],
         validation_errors=list(row.validation_errors or []),
         error_message=row.error_message,
         screenshot_url=f"/api/v2/uploads/{row.id}/image",
@@ -97,24 +108,66 @@ def _upload_response(row: HoldingUpload) -> UploadResponse:
     )
 
 
-def _holding_schema(row: HoldingItem) -> HoldingInput:
+def _holding_schema(db: Session, row: HoldingItem) -> HoldingInput:
+    audit = audit_holding_item(db, row)
+    master = audit.get("master")
+    extra = dict(row.extra_json or {})
+    if audit["status"] == RESOLVED:
+        identity = {
+            "canonical_code": audit.get("canonical_code"),
+            "display_name": audit.get("display_name") or (master.name if master else row.name),
+            "asset_type": audit.get("asset_type"),
+            "exchange": audit.get("exchange"),
+            "security_id": audit.get("security_id") or (master.id if master else None),
+            "resolution_status": RESOLVED,
+            "resolution_source": audit.get("source"),
+            "resolution_confidence": audit.get("confidence") or 1.0,
+        }
+        name = identity["display_name"] or row.name
+        price = row.screenshot_price
+        market_value = row.market_value
+    else:
+        identity = {
+            "canonical_code": None,
+            "display_name": row.name,
+            "asset_type": extra.get("asset_type"),
+            "exchange": extra.get("exchange"),
+            "security_id": None,
+            "resolution_status": audit["status"],
+            "resolution_source": audit.get("source"),
+            "resolution_confidence": None,
+        }
+        name = row.name
+        price = None
+        market_value = None
+    extra.update({key: value for key, value in identity.items() if value is not None})
+    extra["resolution_status"] = identity["resolution_status"]
     return HoldingInput(
-        code=row.code or "",
-        name=row.name,
+        code=(audit.get("code") if audit["status"] == RESOLVED else row.code) or "",
+        canonical_code=identity["canonical_code"],
+        name=name,
+        display_name=identity["display_name"],
         market=row.market,
+        asset_type=identity["asset_type"],
+        exchange=identity["exchange"],
+        security_id=identity["security_id"],
+        resolution_status=identity["resolution_status"],
+        resolution_source=identity["resolution_source"],
+        resolution_confidence=identity["resolution_confidence"],
         qty=row.qty,
         available_qty=row.available_qty,
         cost=row.cost,
-        price=row.screenshot_price,
-        market_value=row.market_value,
+        price=price,
+        market_value=market_value,
         pnl=row.pnl_ratio,
         pnl_amount=row.pnl_amount,
         weight=row.weight,
-        extra=row.extra_json or {},
+        extra=extra,
     )
 
 
-def _snapshot_response(row: PortfolioSnapshot) -> SnapshotResponse:
+def _snapshot_response(db: Session, row: PortfolioSnapshot) -> SnapshotResponse:
+    issues = snapshot_identity_issues(db, row)
     return SnapshotResponse(
         id=row.id,
         portfolio_id=row.portfolio_id,
@@ -127,8 +180,31 @@ def _snapshot_response(row: PortfolioSnapshot) -> SnapshotResponse:
         broker_available_cash=row.broker_available_cash,
         corrected_unused_funds=row.corrected_unused_funds,
         repo_or_standard_bond_value=row.repo_or_standard_bond_value,
-        holdings=[_holding_schema(item) for item in row.holdings],
+        identity_status=RESOLVED if not issues else "INCOMPLETE",
+        identity_issues=issues,
+        holdings=[_holding_schema(db, item) for item in row.holdings],
     )
+
+
+@router.post("/holdings/resolve", response_model=HoldingInput)
+def resolve_holding(
+    payload: HoldingInput,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    portfolio_id: int | None = Query(default=None),
+) -> HoldingInput:
+    """Validate a user-entered code/name without creating a snapshot."""
+
+    if portfolio_id is not None:
+        _get_portfolio(db, current_user.id, portfolio_id)
+    resolved = resolve_holding_identity(
+        db,
+        payload,
+        user_id=current_user.id,
+        portfolio_id=portfolio_id,
+    )
+    db.commit()
+    return resolved
 
 
 @router.get("/portfolios", response_model=list[PortfolioResponse])
@@ -197,7 +273,7 @@ def update_portfolio(
     return _portfolio_response(db, row)
 
 
-@router.delete("/portfolios/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/portfolios/{portfolio_id}", response_class=Response, response_model=None, status_code=status.HTTP_204_NO_CONTENT)
 def delete_portfolio(
     portfolio_id: int,
     db: Session = Depends(get_db),
@@ -228,6 +304,12 @@ async def create_upload(
             if isinstance(raw, list):
                 raw = {"holdings": raw}
             parsed, validation_errors = parse_payload_dict(raw)
+            parsed, _identity_issues = resolve_payload_identities(
+                db,
+                parsed,
+                user_id=current_user.id,
+                portfolio_id=portfolio_id,
+            )
             parsed_json = parsed.model_dump(mode="json")
             parsing_status = "waiting_confirmation"
         except (json.JSONDecodeError, ValueError) as exc:
@@ -303,6 +385,12 @@ def update_parsed_holdings(
     if row.confirmed_at:
         raise HTTPException(status_code=409, detail="Confirmed upload is immutable.")
     parsed, errors = normalize_payload(payload.parsed)
+    parsed, _identity_issues = resolve_payload_identities(
+        db,
+        parsed,
+        user_id=row.user_id,
+        portfolio_id=row.portfolio_id,
+    )
     row.parsed_json = parsed.model_dump(mode="json")
     row.validation_errors = errors
     row.parsing_status = "waiting_confirmation"
@@ -321,11 +409,41 @@ def confirm_upload(
     row = _get_upload(db, current_user.id, upload_id)
     existing = db.query(PortfolioSnapshot).filter(PortfolioSnapshot.upload_id == row.id).first()
     if existing:
-        return _snapshot_response(existing)
+        existing_issues = snapshot_identity_issues(db, existing)
+        if existing_issues:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "holding_identity_unresolved",
+                    "message": "还有持仓未确认证券身份。请先补全或确认代码，再保存为正式持仓快照。",
+                    "issues": existing_issues,
+                },
+            )
+        return _snapshot_response(db, existing)
     if not row.parsed_json:
         raise HTTPException(status_code=409, detail="Upload has no parsed holdings.")
     parsed, errors = parse_payload_dict(row.parsed_json)
+    parsed, identity_issues = resolve_payload_identities(
+        db,
+        parsed,
+        user_id=row.user_id,
+        portfolio_id=row.portfolio_id,
+    )
+    row.parsed_json = parsed.model_dump(mode="json")
+    row.validation_errors = errors
+    row.parsing_status = "waiting_confirmation"
+    if identity_issues:
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "holding_identity_unresolved",
+                "message": f"还有 {len(identity_issues)} 个持仓未确认证券身份。请先补全或确认代码，再保存为正式持仓快照。",
+                "issues": identity_issues,
+            },
+        )
     if errors:
+        db.rollback()
         raise HTTPException(status_code=422, detail={"message": "Please correct holdings before confirmation.", "errors": errors})
 
     snapshot = PortfolioSnapshot(
@@ -333,7 +451,7 @@ def confirm_upload(
         portfolio_id=row.portfolio_id,
         upload_id=row.id,
         source="screenshot",
-        snapshot_time=datetime.now(UTC),
+        snapshot_time=utc_now(),
         total_assets=parsed.total_assets,
         total_market_value=parsed.total_market_value,
         broker_available_cash=parsed.broker_available_cash,
@@ -366,11 +484,24 @@ def confirm_upload(
                 extra_json=holding.extra,
             )
         )
-    row.confirmed_at = datetime.now(UTC)
+    db.flush()
+    previous = (
+        db.query(PortfolioSnapshot)
+        .filter(
+            PortfolioSnapshot.portfolio_id == snapshot.portfolio_id,
+            PortfolioSnapshot.status == "confirmed",
+            PortfolioSnapshot.id != snapshot.id,
+        )
+        .order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())
+        .first()
+    )
+    if previous is not None:
+        upsert_snapshot_diff(db, before=previous, after=snapshot)
+    row.confirmed_at = utc_now()
     row.parsing_status = "confirmed"
     db.commit()
     db.refresh(snapshot)
-    return _snapshot_response(snapshot)
+    return _snapshot_response(db, snapshot)
 
 
 @router.get("/portfolios/{portfolio_id}/snapshots", response_model=list[SnapshotResponse])
@@ -386,7 +517,7 @@ def list_snapshots(
         .order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())
         .all()
     )
-    return [_snapshot_response(row) for row in rows]
+    return [_snapshot_response(db, row) for row in rows]
 
 
 @router.get("/snapshots/{snapshot_id}", response_model=SnapshotResponse)
@@ -395,4 +526,4 @@ def get_snapshot(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SnapshotResponse:
-    return _snapshot_response(_get_snapshot(db, current_user.id, snapshot_id))
+    return _snapshot_response(db, _get_snapshot(db, current_user.id, snapshot_id))

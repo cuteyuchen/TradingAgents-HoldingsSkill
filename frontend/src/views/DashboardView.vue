@@ -1,255 +1,290 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { ArrowRight, Bot, CalendarClock, Camera, Play, Plus, RefreshCw, ShieldAlert } from 'lucide-vue-next'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowRight, CircleAlert, Plus, RefreshCw, Sparkles } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { AnalysisMode, AnalysisRunSummary, ModelProfile, Portfolio, Schedule } from '../api/types'
+import type { DailyDashboard, FuyaoMarketBrief, ModelProfile, ModelProvider, Portfolio } from '../api/types'
+import DecisionHero from '../components/DecisionHero.vue'
+import EmptyState from '../components/EmptyState.vue'
+import ErrorState from '../components/ErrorState.vue'
+import FreshnessLabel from '../components/FreshnessLabel.vue'
+import LoadingState from '../components/LoadingState.vue'
+import MetricTile from '../components/MetricTile.vue'
+import PageHeader from '../components/PageHeader.vue'
+import SectionCard from '../components/SectionCard.vue'
+import StatusIndicator from '../components/StatusIndicator.vue'
+import TechnicalDetails from '../components/TechnicalDetails.vue'
+import { usePortfolioContext } from '../composables/portfolio'
+import { formatCurrency, formatNumber, formatPercent } from '../utils/ui'
 
+const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const loading = ref(false)
-const portfolios = ref<Portfolio[]>([])
-const runs = ref<AnalysisRunSummary[]>([])
+const dashboard = ref<DailyDashboard | null>(null)
+const marketBrief = ref<FuyaoMarketBrief | null>(null)
+const providers = ref<ModelProvider[]>([])
 const profiles = ref<ModelProfile[]>([])
-const schedules = ref<Schedule[]>([])
+const loading = ref(false)
+const error = ref<unknown>(null)
+const indicatorsOpen = ref(false)
 const createOpen = ref(false)
-const newPortfolioName = ref('我的持仓')
 const creating = ref(false)
-const analysisOpen = ref(false)
-const analysisPortfolio = ref<Portfolio | null>(null)
-const analysisMode = ref<AnalysisMode>('deep')
-const analysisCheckpoint = ref('10:30')
-const analysisNotify = ref(true)
-const startingAnalysis = ref(false)
-const ratingLabels: Record<string, string> = { no_action: '无需调整', watch_only: '仅观察' }
+const newPortfolioName = ref('我的主账户')
+let refreshTimer: number | null = null
+let mounted = false
 
-const defaultPortfolio = computed(() => portfolios.value.find((item) => item.is_default) || portfolios.value[0])
-const latestRun = computed(() => runs.value[0])
-const modelReady = computed(() => ({
-  vision: profiles.value.some((item) => item.purpose === 'vision' && item.is_default),
-  analysis: profiles.value.some((item) => ['analysis', 'deep_analysis'].includes(item.purpose) && item.is_default),
-}))
-const readiness = computed(() => [
-  { label: '持仓组合', ok: Boolean(defaultPortfolio.value), note: defaultPortfolio.value ? defaultPortfolio.value.name : '创建一个组合' },
-  { label: '识图模型', ok: modelReady.value.vision, note: modelReady.value.vision ? '已配置默认模型' : '需要在设置中配置' },
-  { label: '分析模型', ok: modelReady.value.analysis, note: modelReady.value.analysis ? '已配置默认模型' : '需要在设置中配置' },
-  { label: '自动分析', ok: schedules.value.some((item) => item.enabled), note: schedules.value.some((item) => item.enabled) ? '计划已启用' : '可选配置' },
+const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
+const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
+const market = computed<Record<string, any>>(() => dashboard.value?.market || {})
+const portfolio = computed<Record<string, any>>(() => dashboard.value?.portfolio || {})
+const health = computed<Record<string, any>>(() => dashboard.value?.data_health || {})
+const decision = computed<Record<string, any>>(() => dashboard.value?.decisions?.latest || {})
+const analysis = computed<Record<string, any>>(() => dashboard.value?.analysis?.latest || {})
+const hasTodayDecision = computed(() => Boolean(Object.keys(decision.value).length || Object.keys(analysis.value).length))
+const finalAction = computed(() => {
+  if (!hasTodayDecision.value) return 'NO_ACTION'
+  const grade = String(analysis.value.quality || decision.value.quality || '').toUpperCase()
+  if (grade === 'DATA_GAP') return 'DATA_GAP'
+  if (grade === 'BLOCKED') return 'BLOCKED'
+  return normalizeFinalAction(dashboard.value?.decisions?.final_action || decision.value.conclusion || analysis.value.portfolio_action)
+})
+const marketStatus = computed(() => String(market.value.health_status || market.value.freshness || market.value.status || 'MISSING').toUpperCase())
+const systemStatus = computed(() => {
+  const overall = String(health.value.overall || health.value.status || '').toUpperCase()
+  if (overall === 'OK') return 'ok'
+  if (overall === 'BLOCKED') return 'degraded'
+  if (!hasPortfolio.value) return 'setup'
+  return 'degraded'
+})
+const setupSteps = computed(() => [
+  { key: 'config', title: '配置行情与模型', description: '让系统能读取市场和运行分析。', done: providers.value.some((item) => item.enabled) && profiles.value.some((item) => item.is_default), action: () => router.push({ name: 'settings' }), actionLabel: '去配置' },
+  { key: 'holdings', title: '导入当前持仓', description: '上传券商截图并确认第一份组合快照。', done: hasPortfolio.value && Boolean(selectedPortfolio.value?.latest_snapshot_id), action: () => router.push({ name: 'holdings', query: { action: 'update' } }), actionLabel: '导入持仓' },
+  { key: 'analysis', title: '完成第一次分析', description: '基于最近确认快照生成今日建议。', done: hasTodayDecision.value, action: () => router.push({ name: 'analysis' }), actionLabel: '开始分析' },
 ])
+const candidates = computed<any[]>(() => {
+  const source = (dashboard.value?.candidates || {}) as Record<string, any>
+  return [...(source.action || []), ...(source.ready || []), ...(source.watchlist || [])].slice(0, 3)
+})
+const reasons = computed(() => {
+  const raw = decision.value.reasons || decision.value.top_reasons || decision.value.blocking_reasons || analysis.value.reasons || []
+  const list = Array.isArray(raw) ? raw.map((item: any) => typeof item === 'string' ? item : item.reason || item.summary || JSON.stringify(item)).filter(Boolean) : []
+  if (list.length) return list
+  if (!hasTodayDecision.value) return ['今天还没有完成分析，现有组合数据仍可查看。']
+  if (finalAction.value === 'ACTION') return ['组合层已给出调整建议，请进入分析查看具体持仓动作和执行前提。']
+  if (['BLOCKED', 'DATA_GAP'].includes(finalAction.value)) return ['市场或组合数据质量尚未满足可靠行动条件。']
+  return ['当前没有足够的新信息改变组合决策。']
+})
+const holdingActions = computed<any[]>(() => {
+  const raw = decision.value.holding_actions || analysis.value.holding_actions || []
+  return Array.isArray(raw) ? raw : []
+})
+const marketRegime = computed(() => ({ BULL: '偏强', BEAR: '偏弱', NEUTRAL: '震荡', RANGE: '震荡', RISK_OFF: '风险偏高' }[String(market.value.regime || '').toUpperCase()] || market.value.regime || '状态未知'))
 
-function fmt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+function metricValue(value: unknown, digits = 1) {
+  return value == null || value === '' ? '不可用' : formatNumber(value, digits)
 }
 
-function ratingText(value?: string | null) {
-  return value ? ratingLabels[value] || value : '暂无'
+function percentPoint(value: unknown, digits = 2) {
+  if (value == null || value === '') return '不可用'
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? `${parsed.toFixed(digits)}%` : '不可用'
+}
+
+function countValue(value: unknown) {
+  if (value == null || value === '') return '不可用'
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? String(Math.round(parsed)) : '不可用'
+}
+
+function ratioOrScore(value: unknown) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '不可用'
+  return Math.abs(number) <= 1 ? formatPercent(number) : formatNumber(number, 1)
+}
+
+function actionLabel(action?: string | null) {
+  return ({ ACTION: '需要调整', NO_ACTION: '暂不操作', BLOCKED: '暂不可形成可靠行动', DATA_GAP: '数据不完整' }[String(action || '').toUpperCase()] || String(action || '观察'))
+}
+
+function actionType(action?: string | null) {
+  const value = String(action || '').toUpperCase()
+  return ['BLOCKED', 'DATA_GAP'].includes(value) ? 'error' : value === 'ACTION' ? 'warning' : 'info'
+}
+
+function normalizeFinalAction(action: unknown): 'ACTION' | 'NO_ACTION' | 'BLOCKED' | 'DATA_GAP' {
+  const value = String(action || '').toUpperCase()
+  if (value === 'BLOCKED') return 'BLOCKED'
+  if (value === 'DATA_GAP') return 'DATA_GAP'
+  if (['ACTION', 'ADD', 'BUY', 'REDUCE', 'SELL', 'EXIT', 'REBALANCE'].includes(value)) return 'ACTION'
+  return 'NO_ACTION'
+}
+
+function candidateStage(item: any) {
+  const value = String(item.display_stage || item.stage || item.candidate_engine_stage || 'WATCH').toUpperCase()
+  return value === 'WATCHLIST' ? 'WATCH' : value
+}
+
+function candidateReason(item: any) {
+  const raw = item.reason || item.summary || item.rationale || item.blocking_reasons?.[0] || item.blocking_reasons_json?.[0]
+  return raw ? String(raw) : '等待更多确认信号'
+}
+
+function candidateGate(item: any) {
+  if (item.buyable === true || item.actionable === true || String(item.portfolio_gate || '').toUpperCase() === 'PASS') return '组合已通过'
+  return '组合层未批准'
+}
+
+function candidateRisk(item: any) {
+  const value = item.risk || item.risk_flags || item.risk_level
+  if (Array.isArray(value)) return value.join('、') || '不可用'
+  return value ? String(value) : '不可用'
+}
+
+function openAnalysis() {
+  void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined, run: analysis.value.analysis_run_id || decision.value.analysis_run_id || undefined } })
+}
+
+async function loadDashboard(silent = false) {
+  if (!selectedPortfolioId.value) {
+    dashboard.value = null
+    return
+  }
+  if (!silent) loading.value = true
+  error.value = null
+  try {
+    dashboard.value = await api.getDashboardToday(selectedPortfolioId.value)
+  } catch (reason) {
+    error.value = reason
+  } finally {
+    if (!silent) loading.value = false
+  }
+}
+
+async function loadMarketBrief() {
+  try {
+    marketBrief.value = (await api.getFuyaoMarketBrief()).brief
+  } catch {
+    // Enrichment is optional; the persisted Market Score remains visible.
+    marketBrief.value = null
+  }
 }
 
 async function load() {
   loading.value = true
+  error.value = null
   try {
-    const [portfolioRows, runRows, profileRows, scheduleRows] = await Promise.all([
-      api.listPortfolios(), api.listRuns(), api.listProfiles(), api.listSchedules(),
-    ])
-    portfolios.value = portfolioRows
-    runs.value = runRows
+    await loadPortfolios()
+    const requested = Number(route.query.portfolio)
+    if (requested && portfolios.value.some((item) => item.id === requested)) setSelectedPortfolio(requested)
+    const [providerRows, profileRows] = await Promise.all([api.listProviders(), api.listProfiles()])
+    providers.value = providerRows
     profiles.value = profileRows
-    schedules.value = scheduleRows
-  } catch (error) {
-    message.error((error as Error).message)
+    await Promise.all([loadDashboard(true), loadMarketBrief()])
+  } catch (reason) {
+    error.value = reason
   } finally {
     loading.value = false
   }
 }
 
 async function createPortfolio() {
-  if (!newPortfolioName.value.trim()) return
+  const name = newPortfolioName.value.trim()
+  if (!name || creating.value) return
   creating.value = true
   try {
-    await api.createPortfolio({ name: newPortfolioName.value.trim(), is_default: portfolios.value.length === 0 })
+    const created = await api.createPortfolio({ name, is_default: portfolios.value.length === 0 })
+    portfolios.value.push(created)
+    setSelectedPortfolio(created.id)
     createOpen.value = false
     message.success('组合已创建')
-    await load()
-  } catch (error) {
-    message.error((error as Error).message)
+    await loadDashboard()
+  } catch (reason) {
+    message.error((reason as Error).message)
   } finally {
     creating.value = false
   }
 }
 
-function openManualAnalysis(portfolio: Portfolio) {
-  if (!portfolio.latest_snapshot_id) {
-    message.warning('该组合还没有已确认持仓，请先上传并确认持仓截图')
-    void router.push({ name: 'upload', query: { portfolio: portfolio.id } })
-    return
-  }
-  if (!modelReady.value.analysis) {
-    message.warning('请先在系统设置中配置默认分析模型')
-    void router.push({ name: 'settings' })
-    return
-  }
-  analysisPortfolio.value = portfolio
-  analysisOpen.value = true
+function startRefresh() {
+  if (refreshTimer !== null) window.clearInterval(refreshTimer)
+  refreshTimer = window.setInterval(() => void Promise.all([loadDashboard(true), loadMarketBrief()]), 30_000)
 }
 
-async function startManualAnalysis() {
-  const portfolio = analysisPortfolio.value
-  if (!portfolio?.latest_snapshot_id || startingAnalysis.value) return
-  startingAnalysis.value = true
-  try {
-    const job = await api.createAnalysisJob(
-      portfolio.latest_snapshot_id,
-      analysisMode.value,
-      analysisCheckpoint.value || undefined,
-      analysisNotify.value,
-    )
-    analysisOpen.value = false
-    message.success('手动分析任务已创建')
-    await router.push({
-      name: 'upload',
-      query: { portfolio: portfolio.id, job: job.id, focus: 'analysis' },
-    })
-  } catch (error) {
-    message.error((error as Error).message)
-  } finally {
-    startingAnalysis.value = false
-  }
-}
-
-onMounted(load)
+watch(selectedPortfolioId, (id, previous) => {
+  if (mounted && id && id !== previous) void loadDashboard()
+})
+onMounted(async () => { await load(); mounted = true; startRefresh() })
+onUnmounted(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer) })
 </script>
 
 <template>
-  <section class="page-stack">
-    <div class="page-heading">
-      <div>
-        <p class="eyebrow">PORTFOLIO INTELLIGENCE</p>
-        <h1>今日决策总览</h1>
-        <p>从真实持仓出发，跟踪数据质量、历史建议与下一次自动分析。</p>
-      </div>
-      <div class="heading-actions">
+  <section class="workbench-page">
+    <PageHeader :title="dashboard?.trade_date ? `今天 · ${dashboard.trade_date}` : '今天的投资驾驶舱'" description="先看市场，再看组合和今日建议。">
+      <template #actions>
         <n-button secondary :loading="loading" @click="load"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
-        <n-button type="primary" @click="router.push({ name: 'upload' })"><template #icon><Camera :size="17" /></template>上传今日持仓</n-button>
-      </div>
-    </div>
+        <n-button v-if="hasPortfolio" secondary @click="router.push({ name: 'holdings', query: { action: 'update' } })">更新持仓</n-button>
+        <n-button v-if="hasPortfolio" type="primary" @click="openAnalysis"><template #icon><Sparkles :size="16" /></template>查看今日分析</n-button>
+        <n-button v-else secondary @click="createOpen = true"><template #icon><Plus :size="16" /></template>新建组合</n-button>
+      </template>
+    </PageHeader>
 
-    <div class="metric-grid">
-      <section class="metric-card panel-card">
-        <span>持仓组合</span><strong>{{ portfolios.length }}</strong><small>{{ defaultPortfolio?.name || '尚未创建' }}</small>
-      </section>
-      <section class="metric-card panel-card">
-        <span>历史报告</span><strong>{{ runs.length }}</strong><small>最近：{{ fmt(latestRun?.created_at) }}</small>
-      </section>
-      <section class="metric-card panel-card">
-        <span>最近结论</span><strong class="metric-word">{{ ratingText(latestRun?.final_rating) }}</strong><small>{{ latestRun?.data_quality_grade ? `质量 ${latestRun.data_quality_grade}` : '等待首次分析' }}</small>
-      </section>
-      <section class="metric-card panel-card">
-        <span>下次自动分析</span><strong class="metric-word">{{ schedules.find(s => s.enabled)?.checkpoint || '未配置' }}</strong><small>{{ fmt(schedules.find(s => s.enabled)?.next_run_at) }}</small>
-      </section>
-    </div>
+    <ErrorState v-if="error" :error="error" @retry="load" />
+    <LoadingState v-else-if="loading && !dashboard && hasPortfolio" message="正在读取今天的市场与组合" />
 
-    <div class="dashboard-grid">
-      <section class="panel-card main-decision">
-        <div class="section-title"><div><h2>最近一次组合结论</h2><p>系统保存的结构化最终裁决</p></div><n-tag v-if="latestRun?.data_quality_grade" :bordered="false" type="info">质量 {{ latestRun.data_quality_grade }}</n-tag></div>
-        <template v-if="latestRun">
-          <div class="decision-rating">{{ ratingText(latestRun.final_rating || 'watch_only') }}</div>
-          <p class="decision-summary">{{ latestRun.summary || '该报告没有摘要。' }}</p>
-          <div class="decision-meta"><span>现金目标：{{ latestRun.cash_target || '—' }}</span><span>置信度：{{ latestRun.confidence || '—' }}</span><span>{{ fmt(latestRun.created_at) }}</span></div>
-          <n-button text type="primary" @click="router.push({ name: 'reports', query: { run: latestRun.id } })">查看完整报告 <ArrowRight :size="15" /></n-button>
-        </template>
-        <n-empty v-else description="确认持仓并完成首次分析后，这里会显示组合结论。">
-          <template #extra><n-button type="primary" @click="router.push({ name: 'upload' })">开始上传</n-button></template>
-        </n-empty>
-      </section>
-
-      <section class="panel-card readiness-panel">
-        <div class="section-title"><div><h2>系统准备状态</h2><p>完成前 3 项即可开始分析</p></div><ShieldAlert :size="21" /></div>
-        <div class="readiness-list">
-          <button v-for="item in readiness" :key="item.label" type="button" :class="['readiness-item', { ready: item.ok }]" @click="!item.ok && router.push({ name: item.label === '持仓组合' ? 'dashboard' : 'settings' })">
-            <span class="status-dot" /><div><strong>{{ item.label }}</strong><small>{{ item.note }}</small></div><span>{{ item.ok ? '就绪' : '待配置' }}</span>
-          </button>
-        </div>
-      </section>
-    </div>
-
-    <section class="panel-card">
-      <div class="section-title">
-        <div><h2>持仓组合</h2><p>每个组合独立保存截图、快照和分析历史；已确认持仓可随时手动分析</p></div>
-        <n-button secondary @click="createOpen = true"><template #icon><Plus :size="16" /></template>新建组合</n-button>
-      </div>
-      <div v-if="portfolios.length" class="portfolio-grid">
-        <article v-for="portfolio in portfolios" :key="portfolio.id" class="portfolio-card">
-          <div class="portfolio-icon"><Bot :size="20" /></div>
-          <div><strong>{{ portfolio.name }}</strong><p>{{ portfolio.market }} · {{ portfolio.currency }}</p></div>
-          <n-tag v-if="portfolio.is_default" size="small" :bordered="false" type="success">默认</n-tag>
-          <div class="portfolio-time"><CalendarClock :size="14" />{{ fmt(portfolio.latest_snapshot_time) }}</div>
-          <div class="portfolio-actions">
-            <n-button secondary size="small" @click="router.push({ name: 'upload', query: { portfolio: portfolio.id } })"><template #icon><Camera :size="14" /></template>更新持仓</n-button>
-            <n-button type="primary" size="small" :disabled="!portfolio.latest_snapshot_id" @click="openManualAnalysis(portfolio)"><template #icon><Play :size="14" /></template>手动分析</n-button>
-          </div>
-        </article>
-      </div>
-      <n-empty v-else description="先创建一个持仓组合。" />
+    <section v-if="!hasPortfolio && !loading && !error" class="setup-card panel-card">
+      <div class="setup-title"><div><p class="page-eyebrow">FIRST RUN</p><h2>开始使用</h2><p>完成下面三步，就可以每天快速看清市场、组合和建议。</p></div><Sparkles :size="25" /></div>
+      <ol class="setup-list"><li v-for="(step, index) in setupSteps" :key="step.key" :class="{ done: step.done }"><div class="step-index">{{ step.done ? '✓' : index + 1 }}</div><div class="step-copy"><strong>{{ step.title }}</strong><span>{{ step.done ? '已完成' : step.description }}</span></div><n-button v-if="!step.done" secondary size="small" @click="step.action">{{ step.actionLabel }}<ArrowRight :size="14" /></n-button><span v-else class="step-done">已完成</span></li></ol>
+      <p class="setup-note">技术状态会在需要时显示，现在只关注下一步。</p>
     </section>
 
-    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, 92vw)">
-      <n-form label-placement="top">
-        <n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item>
-        <n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button>
-      </n-form>
-    </n-modal>
+    <template v-if="dashboard">
+      <div v-if="marketStatus === 'BLOCKED' || marketStatus === 'DATA_GAP' || marketStatus === 'MISSING'" class="quality-banner"><CircleAlert :size="17" /><div><strong>市场数据暂不完整</strong><p>当前不生成激进风险建议，已有持仓信息仍可查看。</p></div><n-button text @click="indicatorsOpen = true">查看原因</n-button></div>
 
-    <n-modal v-model:show="analysisOpen" preset="card" title="手动分析最新持仓" style="width: min(480px, 92vw)">
-      <n-alert type="info" :show-icon="false">
-        将使用 <strong>{{ analysisPortfolio?.name }}</strong> 的最新确认快照 #{{ analysisPortfolio?.latest_snapshot_id }}，不会重新识图或修改持仓。
-      </n-alert>
-      <n-form label-placement="top" class="analysis-modal-form">
-        <n-form-item label="分析模式">
-          <n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group>
-        </n-form-item>
-        <n-form-item label="检查点"><n-select v-model:value="analysisCheckpoint" :options="['09:35','10:30','13:05','14:30','15:10'].map(v => ({ label: v, value: v }))" /></n-form-item>
-        <n-form-item label="完成后发送通知"><n-switch v-model:value="analysisNotify" /></n-form-item>
-        <n-button type="primary" block size="large" :loading="startingAnalysis" @click="startManualAnalysis"><template #icon><Play :size="17" /></template>开始分析</n-button>
-      </n-form>
-    </n-modal>
+      <SectionCard title="今日市场" :description="dashboard.market_open ? '市场数据来自最近可用的生产快照。' : 'A 股今日休市，下面展示最近一个交易日的市场状态。'">
+        <template #actions><FreshnessLabel :freshness="market.freshness" :at="market.captured_at" /><n-button text type="primary" @click="indicatorsOpen = !indicatorsOpen">{{ indicatorsOpen ? '收起指标' : '查看指标' }}<ArrowRight :size="14" /></n-button></template>
+        <div class="market-head"><div><strong class="market-score mono-number">{{ metricValue(market.score, 1) }}</strong><span>Market Score</span></div><div><strong>{{ marketRegime }}</strong><span>{{ market.regime || 'Regime 不可用' }}</span></div><StatusIndicator :status="marketStatus === 'VALID' || marketStatus === 'FRESH' ? 'ok' : 'degraded'" :label="market.quality_status === 'VALID' ? '质量正常' : '需要关注'" /></div>
+        <div class="market-metrics"><MetricTile label="全 A 中位数" :value="metricValue(market.all_a_median?.index_value, 2)" helper="最近可用交易日" /><MetricTile label="成交集中度" :value="formatPercent(market.components?.top5_turnover_concentration)" /><MetricTile label="市场广度" :value="ratioOrScore(market.advance_ratio ?? market.breadth_ratio ?? market.components?.breadth)" /><MetricTile label="覆盖率" :value="formatPercent(market.coverage ?? market.metrics?.coverage)" /></div>
+        <p class="market-summary">{{ market.summary || (market.components?.breadth != null ? `市场广度指标为 ${metricValue(market.components.breadth, 1)}，建议结合组合暴露决定是否增加风险。` : '当前市场数据已加载，可在详情中查看量化指标。') }}</p>
+        <div v-if="marketBrief" class="market-context" data-testid="fuyao-market-context">
+          <div class="context-block"><span class="context-label">主要指数</span><div v-if="marketBrief.major_indices.length" class="context-items"><span v-for="index in marketBrief.major_indices.slice(0, 3)" :key="index.thscode || index.name"><strong>{{ index.name || index.thscode || '指数' }}</strong><em :class="Number(index.change_pct) >= 0 ? 'pos' : 'neg'">{{ percentPoint(index.change_pct) }}</em></span></div><span v-else class="context-empty">不可用</span></div>
+          <div class="context-block"><span class="context-label">行业强弱</span><div class="context-items"><span><strong>领涨 {{ marketBrief.industry?.leaders?.[0]?.name || '不可用' }}</strong><em class="pos">{{ percentPoint(marketBrief.industry?.leaders?.[0]?.change_pct) }}</em></span><span><strong>领跌 {{ marketBrief.industry?.laggards?.[0]?.name || '不可用' }}</strong><em class="neg">{{ percentPoint(marketBrief.industry?.laggards?.[0]?.change_pct) }}</em></span></div></div>
+          <div class="context-block"><span class="context-label">市场情绪</span><div class="context-items"><span><strong>涨停</strong><em>{{ countValue(marketBrief.sentiment?.limit_up_count) }}</em></span><span><strong>跌停</strong><em>{{ countValue(marketBrief.sentiment?.limit_down_count) }}</em></span><span><strong>异动</strong><em>{{ countValue(marketBrief.sentiment?.abnormal_count) }}</em></span></div></div>
+        </div>
+        <TechnicalDetails v-if="indicatorsOpen" title="市场指标与数据质量" name="market-details" :default-open="true"><div class="detail-grid"><div><span>Trend</span><strong>{{ metricValue(market.components?.trend) }}</strong></div><div><span>Liquidity</span><strong>{{ metricValue(market.components?.liquidity) }}</strong></div><div><span>Profitability</span><strong>{{ metricValue(market.components?.profitability) }}</strong></div><div><span>Diffusion</span><strong>{{ metricValue(market.components?.diffusion) }}</strong></div><div><span>Crowding</span><strong>{{ metricValue(market.components?.crowding) }}</strong></div><div><span>Tail Risk</span><strong>{{ metricValue(market.components?.tail_risk) }}</strong></div><div><span>Coverage</span><strong>{{ formatPercent(market.coverage ?? market.metrics?.coverage) }}</strong></div><div><span>Source</span><strong>{{ market.market_score_source || '—' }}</strong></div></div><pre>{{ JSON.stringify({ market, data_health: dashboard.data_health }, null, 2) }}</pre></TechnicalDetails>
+      </SectionCard>
+
+      <div class="decision-grid">
+        <DecisionHero class="decision-card" :action="finalAction" :summary="hasTodayDecision ? (decision.portfolio_conclusion || analysis.summary || '当前组合建议已生成，请根据持仓动作决定是否执行。') : '今天尚未完成分析，现有组合数据仍可查看。'" :reasons="reasons" :checkpoint="decision.checkpoint || analysis.checkpoint" :finalized-at="decision.decision_at || analysis.finished_at" :quality="decision.quality || analysis.quality" :freshness="market.freshness">
+          <template #actions><n-button type="primary" @click="openAnalysis">{{ hasTodayDecision ? '查看完整分析' : '完成第一次分析' }}<ArrowRight :size="14" /></n-button></template>
+        </DecisionHero>
+
+        <SectionCard title="我的组合" description="截至最近确认快照">
+          <template #actions><n-button text type="primary" @click="router.push({ name: 'holdings' })">查看持仓<ArrowRight :size="14" /></n-button></template>
+          <div class="portfolio-metrics"><MetricTile label="总资产" :value="formatCurrency(portfolio.total_assets, 2)" /><MetricTile label="持仓市值" :value="formatCurrency(portfolio.market_value, 2)" /><MetricTile label="可用现金" :value="formatCurrency(portfolio.spendable_cash, 2)" /><MetricTile label="仓位" :value="formatPercent(portfolio.gross_exposure)" tone="risk" /></div>
+          <div class="portfolio-meta"><span>持仓 {{ portfolio.position_count ?? '不可用' }} 个</span><span>确认时间 {{ portfolio.snapshot_time ? new Date(portfolio.snapshot_time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }}</span></div>
+          <p v-if="portfolio.risk_flags?.length" class="risk-note">主要风险：{{ portfolio.risk_flags.slice(0, 2).join('、') }}</p>
+        </SectionCard>
+      </div>
+
+      <SectionCard title="关注机会" description="最多展示三个值得继续观察的候选，候选不是最终交易指令。">
+        <template #actions><n-button text type="primary" @click="router.push({ name: 'analysis' })">查看全部<ArrowRight :size="14" /></n-button></template>
+        <div v-if="candidates.length" class="opportunity-list"><article v-for="item in candidates" :key="item.code || item.name" class="opportunity-row"><div class="opportunity-identity"><strong>{{ item.name || item.code || '未命名标的' }}</strong><small>{{ item.code || '代码待匹配' }}</small></div><n-tag size="small" :bordered="false" :type="candidateStage(item) === 'ACTION' ? 'warning' : candidateStage(item) === 'READY' ? 'info' : 'default'">{{ candidateStage(item) === 'ACTION' ? '需要调整' : candidateStage(item) === 'READY' ? '准备' : '观察' }}</n-tag><p>{{ candidateReason(item) }}</p><span class="opportunity-meta">风险：{{ candidateRisk(item) }}</span><span class="opportunity-gate">{{ candidateGate(item) }}</span></article></div>
+        <EmptyState v-else title="当前没有明显的新机会" description="当前没有明显优于保持现状的机会。系统仍会在下一次可靠扫描后更新候选。" />
+      </SectionCard>
+
+      <div class="home-system-line"><StatusIndicator :status="systemStatus" /><span>数据状态 · {{ dashboard.as_of ? new Date(dashboard.as_of).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }}</span><button type="button" @click="router.push({ name: 'settings', query: { section: 'system' } })">查看系统状态<ArrowRight :size="13" /></button></div>
+      <p class="disclaimer">系统提供研究与决策辅助，不保证收益。</p>
+    </template>
+
+    <n-modal v-model:show="createOpen" preset="card" title="新建持仓组合" style="width: min(460px, calc(100vw - 32px))"><n-form label-placement="top"><n-form-item label="组合名称"><n-input v-model:value="newPortfolioName" aria-label="组合名称" placeholder="例如：主账户、ETF 账户" @keyup.enter="createPortfolio" /></n-form-item><n-button type="primary" block :loading="creating" @click="createPortfolio">创建组合</n-button></n-form></n-modal>
   </section>
 </template>
 
 <style scoped>
-.page-stack { display: grid; gap: 18px; }
-.page-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
-.eyebrow { margin: 0 0 5px; color: var(--app-primary); font-size: 11px; font-weight: 900; letter-spacing: .13em; }
-h1 { margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -.035em; }
-.page-heading p:not(.eyebrow), .section-title p { margin: 6px 0 0; color: var(--app-text-muted); }
-.heading-actions { display: flex; gap: 9px; }
-.metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.metric-card { display: grid; gap: 7px; padding: 18px; }
-.metric-card span { color: var(--app-text-muted); font-size: 12px; font-weight: 700; }
-.metric-card strong { font-size: 32px; line-height: 1; }
-.metric-card .metric-word { overflow: hidden; font-size: 24px; text-overflow: ellipsis; white-space: nowrap; }
-.metric-card small { color: var(--app-text-muted); }
-.dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(310px, .8fr); gap: 16px; }
-.main-decision, .readiness-panel, section.panel-card { padding: 20px; }
-.section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
-.section-title h2 { margin: 0; font-size: 17px; }
-.section-title p { font-size: 12px; }
-.decision-rating { display: inline-flex; border-radius: 9px; background: var(--app-primary-soft); padding: 8px 12px; color: var(--app-primary); font-size: 13px; font-weight: 900; text-transform: uppercase; }
-.decision-summary { max-width: 850px; margin: 18px 0; font-size: 17px; line-height: 1.75; }
-.decision-meta { display: flex; flex-wrap: wrap; gap: 12px 22px; margin-bottom: 18px; color: var(--app-text-muted); font-size: 12px; }
-.readiness-list { display: grid; gap: 8px; }
-.readiness-item { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; width: 100%; border: 1px solid var(--app-border-soft); border-radius: 10px; background: var(--app-surface); padding: 11px; color: inherit; text-align: left; cursor: pointer; }
-.readiness-item div { display: grid; }
-.readiness-item small, .readiness-item > span:last-child { color: var(--app-text-muted); font-size: 11px; }
-.status-dot { width: 9px; height: 9px; border-radius: 50%; background: #f59e0b; box-shadow: 0 0 0 4px color-mix(in srgb, #f59e0b 18%, transparent); }
-.readiness-item.ready .status-dot { background: #22c55e; box-shadow: 0 0 0 4px color-mix(in srgb, #22c55e 18%, transparent); }
-.portfolio-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
-.portfolio-card { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; border: 1px solid var(--app-border-soft); border-radius: 12px; padding: 15px; }
-.portfolio-icon { display: grid; width: 40px; height: 40px; place-items: center; border-radius: 10px; background: var(--app-primary-soft); color: var(--app-primary); }
-.portfolio-card p { margin: 3px 0 0; color: var(--app-text-muted); font-size: 11px; }
-.portfolio-time { grid-column: 2 / 4; display: flex; align-items: center; gap: 5px; color: var(--app-text-muted); font-size: 11px; }
-.portfolio-actions { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 8px; }
-.analysis-modal-form { margin-top: 16px; }
-@media (max-width: 1050px) { .metric-grid { grid-template-columns: repeat(2, 1fr); } .dashboard-grid { grid-template-columns: 1fr; } .portfolio-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 650px) { .page-heading { align-items: start; flex-direction: column; } .heading-actions { width: 100%; } .heading-actions .n-button { flex: 1; } .metric-grid, .portfolio-grid { grid-template-columns: 1fr; } }
+.workbench-page { display: grid; gap: 18px; }.setup-card { padding: 26px; }.setup-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); padding-bottom: 18px; }.setup-title h2 { margin: 0; font-size: 25px; }.setup-title p:not(.page-eyebrow) { margin: 7px 0 0; color: var(--text-muted); }.setup-title > svg { color: var(--primary); }.page-eyebrow { margin: 0 0 5px; color: var(--primary); font-size: 10px; font-weight: 800; letter-spacing: .08em; }.setup-list { display: grid; gap: 0; margin: 20px 0 0; padding: 0; list-style: none; }.setup-list li { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); padding: 15px 0; }.setup-list li:last-child { border-bottom: 0; }.step-index { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border-radius: 50%; background: var(--primary-soft); color: var(--primary); font-weight: 800; }.setup-list li.done .step-index { background: color-mix(in srgb, var(--negative) 14%, transparent); color: var(--negative); }.step-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }.step-copy span { color: var(--text-muted); font-size: 12px; }.step-done { color: var(--negative); font-size: 12px; }.setup-note { margin: 18px 0 0; color: var(--text-muted); font-size: 12px; }.quality-banner { display: flex; align-items: flex-start; gap: 10px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--warning) 9%, var(--surface)); padding: 12px 14px; }.quality-banner > svg { flex: none; color: var(--warning); margin-top: 2px; }.quality-banner div { flex: 1; min-width: 0; }.quality-banner p { margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }.market-head { display: grid; grid-template-columns: 1.4fr 1fr auto; align-items: center; gap: 22px; border-bottom: 1px solid var(--border); padding: 4px 0 18px; }.market-head > div { display: grid; gap: 4px; }.market-head span { color: var(--text-muted); font-size: 12px; }.market-head strong { font-size: 19px; }.market-head .market-score { font-size: 36px; line-height: 1; color: var(--primary); }.market-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 18px 0 2px; }.market-summary { max-width: 760px; margin: 16px 0 0; color: var(--text-muted); line-height: 1.65; }.market-context { display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 14px; margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }.context-block { display: grid; gap: 7px; min-width: 0; }.context-label { color: var(--text-muted); font-size: 11px; }.context-items { display: flex; flex-wrap: wrap; gap: 7px 14px; }.context-items span { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--text); font-size: 12px; }.context-items strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.context-items em { color: var(--text-muted); font-style: normal; font-variant-numeric: tabular-nums; white-space: nowrap; }.context-empty { color: var(--text-muted); font-size: 12px; }.detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }.detail-grid div { display: grid; gap: 4px; border-left: 2px solid var(--border); padding-left: 10px; }.detail-grid span { color: var(--text-muted); font-size: 11px; }.detail-grid strong { color: var(--text); font-size: 13px; }.detail-grid + pre { max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }.decision-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 18px; align-items: stretch; }.decision-card { height: 100%; }.portfolio-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 14px; }.portfolio-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 22px; color: var(--text-muted); font-size: 12px; }.risk-note { margin: 14px 0 0; border-left: 3px solid var(--risk-high); background: color-mix(in srgb, var(--risk-high) 9%, transparent); padding: 8px 10px; color: var(--text-muted); font-size: 12px; }.opportunity-list { display: grid; }.opportunity-row { display: grid; grid-template-columns: minmax(150px, .7fr) auto minmax(0, 1.8fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid var(--border); padding: 14px 0; }.opportunity-row:first-child { border-top: 0; padding-top: 0; }.opportunity-row:last-child { padding-bottom: 0; }.opportunity-identity { display: grid; gap: 3px; }.opportunity-identity small { color: var(--text-muted); font-size: 11px; }.opportunity-row p { margin: 0; color: var(--text-muted); line-height: 1.5; }.opportunity-meta, .opportunity-gate { color: var(--text-muted); font-size: 11px; white-space: nowrap; }.home-system-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; color: var(--text-muted); font-size: 12px; }.home-system-line button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--primary); cursor: pointer; }.disclaimer { margin: -7px 0 0; color: var(--text-muted); font-size: 11px; text-align: center; }
+@media (max-width: 850px) { .decision-grid { grid-template-columns: 1fr; }.market-head { grid-template-columns: 1fr 1fr; }.market-head .status-indicator { grid-column: 1 / -1; }.opportunity-row { grid-template-columns: minmax(120px, .7fr) auto; }.opportunity-row p, .opportunity-meta, .opportunity-gate { grid-column: 1 / -1; } }
+@media (max-width: 640px) { .market-context { grid-template-columns: 1fr; }.market-metrics, .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.portfolio-metrics { grid-template-columns: 1fr; }.setup-card { padding: 18px; }.setup-list li { align-items: flex-start; }.setup-list li .n-button { align-self: center; }.quality-banner { flex-wrap: wrap; }.quality-banner > .n-button { margin-left: 27px; } }
+@media (max-width: 430px) { .market-head { grid-template-columns: 1fr; }.market-head .status-indicator { grid-column: auto; }.market-metrics, .detail-grid { grid-template-columns: 1fr; }.setup-list li { flex-wrap: wrap; }.setup-list li .n-button { margin-left: 42px; } }
 </style>

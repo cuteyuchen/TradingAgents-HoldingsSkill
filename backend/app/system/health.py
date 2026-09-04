@@ -1,0 +1,826 @@
+"""Liveness, readiness, and operational health without LLM or network work."""
+
+from __future__ import annotations
+
+import shutil
+import sqlite3
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+
+from ..clock import utc_now
+from ..config import settings
+from .backup import backup_freshness
+from .release import alembic_db_revision, schema_state
+from .tables import table_exists
+
+_QUICK_CHECK_TTL_SECONDS = 6 * 3600
+_QUICK_CHECK_CACHE: dict[str, Any] = {
+    "checked_at": None,
+    "source_path": None,
+    "source_size": None,
+    "source_mtime": None,
+    "result": None,
+}
+
+
+class RuntimeNotReadyError(RuntimeError):
+    """Raised when readiness hard blockers forbid new risk-increasing work."""
+
+
+def liveness() -> dict[str, Any]:
+    return {"status": "ok", "time": utc_now().isoformat()}
+
+
+def run_quick_check(db: Session) -> dict[str, Any]:
+    """Run one heavy PRAGMA quick_check and cache it by DB file identity."""
+
+    try:
+        quick = db.execute(text("PRAGMA quick_check")).scalar()
+    except Exception as exc:  # noqa: BLE001
+        result = {"ok": False, "result": f"error:{exc}"}
+    else:
+        result = {"ok": str(quick or "").lower() == "ok", "result": str(quick or "error")}
+    path = Path(settings.DB_PATH).expanduser().resolve()
+    try:
+        stat = path.stat()
+        size, mtime = stat.st_size, stat.st_mtime
+    except OSError:
+        size = mtime = None
+    _QUICK_CHECK_CACHE.update(
+        {
+            "checked_at": utc_now(),
+            "source_path": str(path),
+            "source_size": size,
+            "source_mtime": mtime,
+            "result": result,
+        }
+    )
+    return result
+
+
+def _cached_quick_check() -> dict[str, Any] | None:
+    path = Path(settings.DB_PATH).expanduser().resolve()
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    cache = _QUICK_CHECK_CACHE
+    checked_at = cache.get("checked_at")
+    if (
+        checked_at is None
+        or cache.get("source_path") != str(path)
+        or cache.get("source_size") != stat.st_size
+        or cache.get("source_mtime") != stat.st_mtime
+        or (utc_now() - checked_at).total_seconds() > _QUICK_CHECK_TTL_SECONDS
+    ):
+        return None
+    return dict(cache["result"]) if cache.get("result") is not None else None
+
+
+def disk_status() -> dict[str, Any]:
+    directory = Path(settings.BACKUP_DIR).expanduser().resolve()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(directory)
+        free_ratio = usage.free / usage.total if usage.total else 0.0
+    except OSError as exc:
+        return {
+            "status": "BLOCKED",
+            "reason": f"disk_unavailable:{exc}",
+            "free_ratio": None,
+            "free_bytes": None,
+            "total_bytes": None,
+        }
+    if free_ratio <= settings.DISK_BLOCKED_RATIO:
+        status = "BLOCKED"
+    elif free_ratio <= settings.DISK_DEGRADED_RATIO:
+        status = "DEGRADED"
+    else:
+        status = "OK"
+    return {
+        "status": status,
+        "free_ratio": round(free_ratio, 6),
+        "free_bytes": usage.free,
+        "total_bytes": usage.total,
+        "used_bytes": usage.used,
+    }
+
+
+def database_status(db: Session, *, check_writable: bool = True) -> dict[str, Any]:
+    path = Path(settings.DB_PATH).expanduser().resolve()
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "BLOCKED", "reason": f"db_unavailable:{exc}", "quick_check": None}
+    quick = _cached_quick_check()
+    quick_ok = bool(quick is not None and quick["ok"])
+    writable = None
+    if check_writable and path.is_file():
+        try:
+            with sqlite3.connect(str(path), timeout=5) as probe_conn:
+                probe_conn.execute("CREATE TABLE advisor_write_probe_tmp(id INTEGER)")
+                probe_conn.execute("DROP TABLE advisor_write_probe_tmp")
+            writable = True
+        except Exception:  # noqa: BLE001
+            writable = False
+    required = (
+        "users",
+        "portfolios",
+        "analysis_jobs",
+        "parameter_set_versions",
+        "market_score_snapshots",
+        "candidate_runs",
+        "decision_memories",
+        "daily_operational_runs",
+    )
+    present = {name for name in required if table_exists(db, name)}
+    missing = sorted(set(required) - present)
+    status = "OK"
+    reason = None
+    if quick is not None and not quick_ok:
+        status, reason = "BLOCKED", "DB_QUICK_CHECK_FAILED"
+    elif missing:
+        status, reason = "BLOCKED", f"MISSING_TABLES:{','.join(missing)}"
+    elif writable is False:
+        status, reason = "BLOCKED", "DB_NOT_WRITABLE"
+    size = wal_size = shm_size = None
+    try:
+        size = path.stat().st_size if path.is_file() else None
+        wal = Path(str(path) + "-wal")
+        shm = Path(str(path) + "-shm")
+        wal_size = wal.stat().st_size if wal.is_file() else None
+        shm_size = shm.stat().st_size if shm.is_file() else None
+    except OSError:
+        pass
+    return {
+        "status": status,
+        "reason": reason,
+        "quick_check": str(quick["result"] if quick is not None else "not_recently_checked"),
+        "quick_check_source": "cache" if quick is not None else "deferred",
+        "writable": writable,
+        "required_tables_present": not missing,
+        "missing_tables": missing,
+        "db_size": size,
+        "wal_size": wal_size,
+        "shm_size": shm_size,
+    }
+
+
+def schema_status(db: Session) -> dict[str, Any]:
+    state = schema_state(db_revision=alembic_db_revision(db))
+    state_map = {
+        "CURRENT": "OK",
+        "BEHIND": "BLOCKED",
+        "AHEAD": "BLOCKED",
+        "BROKEN": "BLOCKED",
+        "UNKNOWN": "UNKNOWN",
+    }
+    return {
+        "status": state_map.get(state["state"], "UNKNOWN"),
+        "state": state["state"],
+        "reason": state["reason"],
+        "db_revision": state["db_revision"],
+        "code_head_revision": state["code_head_revision"],
+    }
+
+
+def governance_status(db: Session) -> dict[str, Any]:
+    from ..governance.service import governance_health
+
+    try:
+        if not table_exists(db, "parameter_set_versions"):
+            return {
+                "status": "DEGRADED",
+                "reasons": ["LEGACY_PRE_GOVERNANCE"],
+                "active_version": None,
+                "active_version_id": None,
+            }
+        health = governance_health(db)
+        return {
+            "status": health["status"],
+            "reasons": health.get("reasons") or [],
+            "active_version": (health.get("active") or {}).get("version"),
+            "active_version_id": (health.get("active") or {}).get("id"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "BLOCKED", "reasons": [f"GOVERNANCE_UNAVAILABLE:{exc}"]}
+
+
+def scheduler_status() -> dict[str, Any]:
+    from ..services.scheduler import scheduler_running
+
+    if not settings.SCHEDULER_ENABLED:
+        return {"status": "OK", "reason": "scheduler_disabled_by_config"}
+    if scheduler_running():
+        return {"status": "OK", "reason": None}
+    return {"status": "BLOCKED", "reason": "scheduler_not_running"}
+
+
+def monitor_status() -> dict[str, Any]:
+    from ..services.realtime_monitor import get_realtime_monitor
+
+    try:
+        monitor = get_realtime_monitor()
+        state = monitor.status()
+        alive = monitor.is_running()
+        state_status = str(state.get("status") or "")
+    except Exception:  # noqa: BLE001
+        return {"status": "UNKNOWN", "reason": "monitor_unavailable"}
+    if not settings.REALTIME_MONITOR_ENABLED:
+        return {"status": "OK", "reason": "monitor_disabled_by_config"}
+    # paused 是休市/午休的正常 cycle，不等于 monitor 失败。
+    healthy = alive and state_status in {"running", "paused"}
+    reason = None
+    if state_status == "paused":
+        session = str(state.get("last_session") or "closed").lower()
+        reason = f"session_{session}"
+    elif not healthy:
+        reason = state.get("last_error") or "monitor_not_running"
+    return {
+        "status": "OK" if healthy else "DEGRADED",
+        "reason": reason,
+        "last_tick_at": state.get("last_tick_at"),
+        "last_success_at": state.get("last_success_at"),
+    }
+
+
+def worker_recovery_status(db: Session) -> dict[str, Any]:
+    from .startup import collect_startup_recovery_report
+
+    report = collect_startup_recovery_report(db)
+    stale_total = sum(report["counts"].values())
+    if report["errors"]:
+        return {"status": "BLOCKED", "reasons": report["errors"], "counts": report["counts"]}
+    return {
+        "status": "DEGRADED" if stale_total else "OK",
+        "reasons": ["STALE_DURABLE_JOBS"] if stale_total else [],
+        "counts": report["counts"],
+    }
+
+
+def _shadow_db_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+def _shadow_db_datetime_text(value: Any) -> str | None:
+    parsed = _shadow_db_datetime(value)
+    return parsed.isoformat() if parsed is not None else (str(value) if value else None)
+
+
+def shadow_status(db: Session) -> dict[str, Any]:
+    """Return aggregate shadow health without exposing portfolio details."""
+    required = (
+        "shadow_accounts",
+        "shadow_order_intents",
+        "live_decision_outcomes",
+        "shadow_daily_snapshots",
+    )
+    missing = sorted(name for name in required if not table_exists(db, name))
+    empty: dict[str, Any] = {
+        "schema_installed": not missing,
+        "active_shadow_accounts": 0,
+        "active_generation_ids": [],
+        "pending_intents": 0,
+        "blocked_intents": 0,
+        "expired_pending_intents": 0,
+        "failed_evaluations": 0,
+        "oldest_pending_created_at": None,
+        "oldest_pending_age_seconds": None,
+        "last_daily_snapshot": None,
+        "last_validation_at": None,
+        "maintenance_authority": "existing_scheduler",
+    }
+    if missing:
+        return {
+            "status": "DEGRADED",
+            "reason": "shadow_schema_not_installed",
+            "missing_tables": missing,
+            **empty,
+        }
+
+    now = utc_now().replace(tzinfo=None)
+    try:
+        active_accounts = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_accounts WHERE status = 'ACTIVE'"
+        )).scalar_one() or 0)
+        active_generations = [
+            int(value)
+            for value in db.execute(text(
+                "SELECT shadow_generation FROM shadow_accounts "
+                "WHERE status = 'ACTIVE' ORDER BY id"
+            )).scalars().all()
+            if value is not None
+        ]
+        pending = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_order_intents "
+            "WHERE status IN ('PENDING', 'PARTIAL')"
+        )).scalar_one() or 0)
+        blocked = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_order_intents WHERE status = 'BLOCKED'"
+        )).scalar_one() or 0)
+        expired_pending = int(db.execute(text(
+            "SELECT COUNT(*) FROM shadow_order_intents "
+            "WHERE status IN ('PENDING', 'PARTIAL') AND expires_at < :now"
+        ), {"now": now}).scalar_one() or 0)
+        failed_evaluations = int(db.execute(text(
+            "SELECT COUNT(*) FROM live_decision_outcomes "
+            "WHERE status IN ('FAILED', 'ERROR')"
+        )).scalar_one() or 0)
+        oldest_pending = db.execute(text(
+            "SELECT MIN(created_at) FROM shadow_order_intents "
+            "WHERE status IN ('PENDING', 'PARTIAL')"
+        )).scalar_one_or_none()
+        last_snapshot = db.execute(text(
+            "SELECT trade_date, created_at FROM shadow_daily_snapshots "
+            "ORDER BY trade_date DESC, created_at DESC LIMIT 1"
+        )).mappings().first()
+        last_validation = db.execute(text(
+            "SELECT MAX(computed_at) FROM live_decision_outcomes "
+            "WHERE computed_at IS NOT NULL"
+        )).scalar_one_or_none()
+    except Exception:  # noqa: BLE001
+        return {
+            "status": "DEGRADED",
+            "reason": "shadow_health_unavailable",
+            "missing_tables": [],
+            **empty,
+        }
+
+    oldest_dt = _shadow_db_datetime(oldest_pending)
+    oldest_age = max(0.0, (now - oldest_dt).total_seconds()) if oldest_dt else None
+    reasons: list[str] = []
+    if expired_pending:
+        reasons.append("EXPIRED_PENDING_INTENTS")
+    if failed_evaluations:
+        reasons.append("FAILED_OUTCOME_EVALUATIONS")
+    return {
+        "status": "DEGRADED" if reasons else "OK",
+        "reason": ";".join(reasons) if reasons else None,
+        "missing_tables": [],
+        "schema_installed": True,
+        "active_shadow_accounts": active_accounts,
+        "active_generation_ids": active_generations,
+        "pending_intents": pending,
+        "blocked_intents": blocked,
+        "expired_pending_intents": expired_pending,
+        "failed_evaluations": failed_evaluations,
+        "oldest_pending_created_at": _shadow_db_datetime_text(oldest_pending),
+        "oldest_pending_age_seconds": round(oldest_age, 3) if oldest_age is not None else None,
+        "last_daily_snapshot": {
+            "trade_date": str(last_snapshot["trade_date"]) if last_snapshot else None,
+            "created_at": _shadow_db_datetime_text(last_snapshot["created_at"]) if last_snapshot else None,
+        } if last_snapshot else None,
+        "last_validation_at": _shadow_db_datetime_text(last_validation),
+        "maintenance_authority": "existing_scheduler",
+    }
+
+
+def backup_status() -> dict[str, Any]:
+    freshness = backup_freshness()
+    return {
+        "status": freshness["status"],
+        "last_success_at": freshness["last_success_at"],
+        "age_hours": freshness["age_hours"],
+        "backup_count": freshness["backup_count"],
+    }
+
+
+def require_runtime_ready_for_risk_work(db: Session | None = None) -> dict[str, Any]:
+    """Fail closed before creating new risk-increasing analysis or candidate work."""
+
+    owns_session = db is None
+    if owns_session:
+        from ..database import SessionLocal
+
+        session = SessionLocal()
+    else:
+        session = db
+    try:
+        checks = {
+            "schema": schema_status(session),
+            "governance": governance_status(session),
+            "database": database_status(session, check_writable=False),
+            "storage": disk_status(),
+        }
+        blocked = {
+            key: value
+            for key, value in checks.items()
+            if str(value.get("status") or "").upper() == "BLOCKED"
+        }
+        if blocked:
+            reasons = ", ".join(
+                f"{key}={value.get('reason') or value.get('reasons') or value.get('state') or value.get('status')}"
+                for key, value in sorted(blocked.items())
+            )
+            raise RuntimeNotReadyError(f"RUNTIME_NOT_READY:{reasons}")
+        return checks
+    finally:
+        if owns_session:
+            session.close()
+
+
+def readiness(db: Session | None = None, *, detailed: bool = False) -> dict[str, Any]:
+    owns_session = db is None
+    if owns_session:
+        from ..database import SessionLocal
+
+        session = SessionLocal()
+    else:
+        session = db
+    try:
+        from .startup import startup_preflight_completed, startup_preflight_state
+
+        checks = {
+            "database": database_status(session),
+            "storage": disk_status(),
+            "schema": schema_status(session),
+            "governance": governance_status(session),
+            "scheduler": scheduler_status(),
+            "worker_recovery": worker_recovery_status(session),
+            "backup": backup_status(),
+            "preflight": {
+                "status": "OK" if startup_preflight_completed() else "UNKNOWN",
+                "reason": None if startup_preflight_completed() else "startup_preflight_not_completed",
+                "blocked": startup_preflight_state().get("blocked", False),
+            },
+        }
+        blocked = any(
+            str(checks[key].get("status") or "").upper() == "BLOCKED"
+            for key in ("database", "storage", "schema", "governance", "scheduler", "preflight")
+            if key in checks
+        )
+        warnings = [
+            key
+            for key, value in checks.items()
+            if str(value.get("status") or "").upper() == "DEGRADED"
+        ]
+        status = "BLOCKED" if blocked else "READY_WITH_WARNINGS" if warnings else "READY"
+        payload: dict[str, Any] = {
+            "status": status,
+            "ready": not blocked,
+            "checks": checks if detailed else {
+                key: {"status": value["status"]} for key, value in checks.items()
+            },
+        }
+        return payload
+    finally:
+        if owns_session:
+            session.close()
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    """把 Monitor / DB 时间戳规范成 UTC，无法解析则视为缺失。"""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _recent_monitor_cycle(now: datetime) -> dict[str, Any]:
+    """成功 Monitor cycle 的 evidence：last_success_at 在两个 interval 内。
+
+    仅 REALTIME_MONITOR_ENABLED=true 不算通过。
+    """
+
+    if not settings.REALTIME_MONITOR_ENABLED:
+        return {"observed": False, "last_success_at": None}
+    try:
+        from ..services.realtime_monitor import get_realtime_monitor
+
+        state = get_realtime_monitor().status()
+    except Exception:  # noqa: BLE001
+        return {"observed": False, "last_success_at": None}
+    last_success = _parse_utc_timestamp(state.get("last_success_at"))
+    if last_success is None:
+        return {"observed": False, "last_success_at": None}
+    window = max(int(settings.MONITOR_INTERVAL_SECONDS) * 2, int(settings.MARKET_SNAPSHOT_FRESHNESS_SECONDS))
+    age = max(0.0, (now - last_success).total_seconds())
+    return {
+        "observed": age <= window,
+        "last_success_at": last_success.isoformat(),
+        "age_seconds": round(age, 1),
+    }
+
+
+def live_validation_readiness(db: Session, *, user_id: int) -> dict[str, Any]:
+    """Evaluate the evidence chain required before live validation.
+
+    This is deliberately stricter than the process readiness endpoint.  It
+    checks persisted market, portfolio, analysis, candidate, and Shadow facts
+    without starting a provider call or an analysis job.
+    """
+
+    from ..candidates.models import CandidateRun
+    from ..market_models import TradingCalendar
+    from ..market_runtime_models import MarketSnapshot, ProviderHealth
+    from ..services.market_identity_sync import calendar_status
+    from ..shadow_models import LiveQuoteObservation
+    from ..v2_models import AnalysisRun, PortfolioSnapshot
+    from ..services.trading_calendar import CHINA_TZ
+
+    now = utc_now()
+    local_now = now.astimezone(CHINA_TZ)
+    checks: dict[str, dict[str, Any]] = {}
+
+    base = readiness(db, detailed=True)
+    base_checks = base.get("checks", {})
+    checks["database"] = dict(base_checks.get("database") or {"status": "UNKNOWN", "reason": "database_check_missing"})
+    checks["schema"] = dict(base_checks.get("schema") or {"status": "UNKNOWN", "reason": "schema_check_missing"})
+    checks["disk"] = dict(base_checks.get("storage") or {"status": "UNKNOWN", "reason": "disk_check_missing"})
+    checks["backup"] = dict(base_checks.get("backup") or {"status": "UNKNOWN", "reason": "backup_check_missing"})
+    checks["scheduler"] = dict(base_checks.get("scheduler") or {"status": "UNKNOWN", "reason": "scheduler_check_missing"})
+    checks["worker_recovery"] = dict(base_checks.get("worker_recovery") or {"status": "UNKNOWN", "reason": "worker_recovery_check_missing"})
+    checks["governance"] = dict(base_checks.get("governance") or {"status": "UNKNOWN", "reason": "governance_check_missing"})
+
+    if not settings.SCHEDULER_ENABLED:
+        checks["scheduler"] = {
+            **checks["scheduler"],
+            "status": "BLOCKED",
+            "reason": "scheduler_disabled_by_config",
+        }
+
+    calendar = calendar_status(db, market="CN")
+    current_calendar = db.execute(
+        select(TradingCalendar).where(
+            TradingCalendar.market == "CN",
+            TradingCalendar.trade_date == local_now.date(),
+        )
+    ).scalar_one_or_none()
+    if current_calendar is not None and not current_calendar.is_open:
+        checks["trading_calendar"] = {
+            "status": "OK",
+            "reason": "non_trading_day",
+            "calendar_status": calendar.get("status"),
+            "trade_date": local_now.date(),
+        }
+    elif calendar.get("status") == "ready":
+        checks["trading_calendar"] = {
+            "status": "OK",
+            "reason": None,
+            "calendar_status": calendar.get("status"),
+            "trade_date": local_now.date(),
+        }
+    else:
+        checks["trading_calendar"] = {
+            "status": "BLOCKED",
+            "reason": calendar.get("status") or "calendar_unavailable",
+            "calendar_status": calendar.get("status"),
+            "trade_date": local_now.date(),
+        }
+
+    from ..services.market_snapshot_service import is_acceptance_provider
+
+    # 仅配置 API Key 或验收夹具不得解除 blocker；必须看到非 acceptance 的 production evidence。
+    acceptance_runtime = bool(settings.ACCEPTANCE_MODE)
+    provider_rows = [
+        row
+        for row in db.query(ProviderHealth).filter(ProviderHealth.data_type == "quote").all()
+        if not is_acceptance_provider(row.provider_name)
+    ]
+    healthy_provider = next(
+        (row for row in provider_rows if str(row.status).upper() == "HEALTHY" and row.last_success_at),
+        None,
+    )
+    recovering_provider = next(
+        (row for row in provider_rows if str(row.status).upper() == "RECOVERING"),
+        None,
+    )
+    if acceptance_runtime or healthy_provider is None:
+        if not acceptance_runtime and recovering_provider is not None:
+            checks["market_provider"] = {
+                "status": "DEGRADED",
+                "reason": "provider_recovering",
+                "provider": recovering_provider.provider_name,
+            }
+        else:
+            checks["market_provider"] = {
+                "status": "BLOCKED",
+                "reason": "quote_provider_not_observed",
+                "configured_primary": settings.MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER,
+            }
+    else:
+        checks["market_provider"] = {
+            "status": "OK",
+            "provider": healthy_provider.provider_name,
+            "last_success_at": healthy_provider.last_success_at,
+        }
+
+    latest_market = None
+    if not acceptance_runtime:
+        for row in (
+            db.query(MarketSnapshot)
+            .filter(MarketSnapshot.market == "CN")
+            .order_by(MarketSnapshot.completed_at.desc(), MarketSnapshot.id.desc())
+            .limit(50)
+        ):
+            if not is_acceptance_provider(row.provider):
+                latest_market = row
+                break
+    if latest_market is None:
+        checks["quote_pipeline"] = {"status": "BLOCKED", "reason": "market_snapshot_not_observed"}
+        checks["market_refresh"] = {"status": "BLOCKED", "reason": "market_refresh_not_observed"}
+    else:
+        completed_at = latest_market.completed_at
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=UTC)
+        age_seconds = max(0.0, (now - completed_at.astimezone(UTC)).total_seconds())
+        quality = str(latest_market.quality_status or "MISSING").upper()
+        market_closed = checks["trading_calendar"].get("reason") == "non_trading_day"
+        is_usable = quality in {"VALID", "DEGRADED"}
+        is_fresh = age_seconds <= settings.MARKET_SNAPSHOT_FRESHNESS_SECONDS
+        monitor_cycle = _recent_monitor_cycle(now)
+        # Monitor 打开本身不算 refresh；必须有一次成功 cycle，且已有可用 production snapshot。
+        refresh_ok = is_usable and (is_fresh or market_closed or monitor_cycle["observed"])
+        pipeline_status = "OK" if is_usable else "BLOCKED"
+        refresh_status = "OK" if refresh_ok else "BLOCKED"
+        checks["quote_pipeline"] = {
+            "status": pipeline_status,
+            "reason": None if is_usable else f"market_snapshot_quality:{quality}",
+            "provider": latest_market.provider,
+            "quality_status": quality,
+            "completed_at": latest_market.completed_at,
+            "age_seconds": round(age_seconds, 1),
+        }
+        checks["market_refresh"] = {
+            "status": refresh_status,
+            "reason": None if refresh_status == "OK" else (
+                "market_refresh_not_observed" if not monitor_cycle["observed"] and not is_fresh and not market_closed
+                else "market_snapshot_stale"
+            ),
+            "trade_date": latest_market.trade_date,
+            "completed_at": latest_market.completed_at,
+            "age_seconds": round(age_seconds, 1),
+            "closed_day_grace": market_closed,
+            "monitor_cycle_observed": monitor_cycle["observed"],
+            "monitor_last_success_at": monitor_cycle["last_success_at"],
+        }
+
+    latest_snapshot = db.query(PortfolioSnapshot).filter(
+        PortfolioSnapshot.user_id == user_id,
+        PortfolioSnapshot.status == "confirmed",
+    ).order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc()).first()
+    if latest_snapshot is None:
+        checks["portfolio_snapshot"] = {"status": "BLOCKED", "reason": "confirmed_portfolio_snapshot_missing"}
+    else:
+        snapshot_time = latest_snapshot.snapshot_time
+        if snapshot_time.tzinfo is None:
+            snapshot_time = snapshot_time.replace(tzinfo=UTC)
+        snapshot_age = max(0.0, (now - snapshot_time.astimezone(UTC)).total_seconds())
+        fresh_enough = snapshot_age <= timedelta(days=3).total_seconds()
+        checks["portfolio_snapshot"] = {
+            "status": "OK" if fresh_enough else "BLOCKED",
+            "reason": None if fresh_enough else "confirmed_portfolio_snapshot_stale",
+            "portfolio_id": latest_snapshot.portfolio_id,
+            "snapshot_id": latest_snapshot.id,
+            "snapshot_time": latest_snapshot.snapshot_time,
+            "age_seconds": round(snapshot_age, 1),
+        }
+
+    latest_analysis = db.query(AnalysisRun).filter(AnalysisRun.user_id == user_id).order_by(
+        AnalysisRun.created_at.desc(), AnalysisRun.id.desc()
+    ).first()
+    checks["analysis_smoke"] = {
+        "status": "OK" if latest_analysis else "BLOCKED",
+        "reason": None if latest_analysis else "successful_analysis_run_not_observed",
+        "run_id": latest_analysis.id if latest_analysis else None,
+        "completed_at": latest_analysis.created_at if latest_analysis else None,
+    }
+
+    latest_candidate = db.query(CandidateRun).filter(
+        CandidateRun.user_id == user_id,
+        CandidateRun.status == "COMPLETED",
+    ).order_by(CandidateRun.as_of.desc(), CandidateRun.id.desc()).first()
+    checks["candidate_smoke"] = {
+        "status": "OK" if latest_candidate else "BLOCKED",
+        "reason": None if latest_candidate else "successful_candidate_run_not_observed",
+        "run_id": latest_candidate.id if latest_candidate else None,
+        "captured_at": latest_candidate.captured_at if latest_candidate else None,
+    }
+
+    shadow = shadow_status(db)
+    checks["shadow_subsystem"] = {
+        "status": "OK" if shadow.get("schema_installed") and shadow.get("status") == "OK" else "BLOCKED" if not shadow.get("schema_installed") else "DEGRADED",
+        "reason": shadow.get("reason"),
+        "schema_installed": shadow.get("schema_installed"),
+        "active_shadow_accounts": shadow.get("active_shadow_accounts"),
+    }
+
+    future_quote = db.query(LiveQuoteObservation).filter(
+        LiveQuoteObservation.quality_status.in_(("VALID", "DEGRADED")),
+        LiveQuoteObservation.price.is_not(None),
+    ).order_by(LiveQuoteObservation.captured_at.desc(), LiveQuoteObservation.id.desc()).first()
+    checks["future_quote_observation"] = {
+        "status": "OK" if future_quote else "BLOCKED",
+        "reason": None if future_quote else "future_quote_observation_not_observed",
+        "quote_id": future_quote.id if future_quote else None,
+        "captured_at": future_quote.captured_at if future_quote else None,
+        "provider": future_quote.provider if future_quote else None,
+    }
+    checks["real_broker_write_path"] = {
+        "status": "OK",
+        "reason": "real_broker_order_path_not_exposed",
+    }
+
+    blockers = [
+        {"key": key, "reason": value.get("reason") or value.get("status") or "check_failed"}
+        for key, value in checks.items()
+        if str(value.get("status") or "UNKNOWN").upper() in {"BLOCKED", "UNKNOWN"}
+    ]
+    warnings = [
+        {"key": key, "reason": value.get("reason") or "degraded"}
+        for key, value in checks.items()
+        if str(value.get("status") or "UNKNOWN").upper() == "DEGRADED"
+    ]
+    return {
+        "status": "READY" if not blockers else "NOT_READY",
+        "ready": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "checks": checks,
+        "evaluated_at": now.isoformat(),
+    }
+
+
+def operational_health(db: Session | None = None) -> dict[str, Any]:
+    owns_session = db is None
+    if owns_session:
+        from ..database import SessionLocal
+
+        session = SessionLocal()
+    else:
+        session = db
+    try:
+        components: dict[str, Any] = {
+            "release": {
+                "status": "OK",
+                "detail": {
+                    "schema": schema_status(session)["state"],
+                    "governance": governance_status(session)["status"],
+                },
+            },
+            "database": database_status(session),
+            "storage": disk_status(),
+            "backup": backup_status(),
+            "governance": governance_status(session),
+            "scheduler": scheduler_status(),
+            "realtime_monitor": monitor_status(),
+            "worker_recovery": worker_recovery_status(session),
+            "shadow": shadow_status(session),
+        }
+        severity = {"OK": 0, "UNKNOWN": 1, "DEGRADED": 2, "BLOCKED": 3}
+        overall = max(
+            (severity.get(str(value.get("status") or "UNKNOWN").upper(), 1) for value in components.values()),
+            default=0,
+        )
+        status = {0: "OK", 1: "UNKNOWN", 2: "DEGRADED", 3: "BLOCKED"}[overall]
+        return {
+            "status": status,
+            "components": components,
+            "as_of": utc_now().isoformat(),
+        }
+    finally:
+        if owns_session:
+            session.close()
+
+
+__all__ = [
+    "backup_status",
+    "database_status",
+    "disk_status",
+    "governance_status",
+    "liveness",
+    "live_validation_readiness",
+    "monitor_status",
+    "operational_health",
+    "readiness",
+    "scheduler_status",
+    "schema_status",
+    "shadow_status",
+    "worker_recovery_status",
+]

@@ -27,6 +27,7 @@ REQUIRED_STRUCTURED_OUTPUTS = (
     "buy_candidates",
     "rebalance_plan",
     "checkpoint_plan",
+    "memory_context",
 )
 
 

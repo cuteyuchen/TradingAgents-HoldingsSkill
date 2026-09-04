@@ -63,6 +63,25 @@ def test_quality_block_preserves_watch_only():
     assert result["portfolio_manager_final"]["portfolio_rating"] == "watch_only"
 
 
+def test_portfolio_gate_failure_fail_closes_new_position_candidates():
+    from app.services.analysis_engine import _fail_closed_portfolio_gate_result
+
+    result = _fail_closed_portfolio_gate_result(
+        {
+            "final_rating": "add",
+            "holdings": [{"code": "600519", "action": "add", "target_weight": 0.2}],
+            "candidates": [{"code": "510300", "candidate_type": "new_position", "action": "new_position", "buyable": True}],
+        },
+        RuntimeError("portfolio gate unavailable"),
+    )
+
+    assert result["final_rating"] == "watch_only"
+    assert result["holdings"][0]["action"] == "watch"
+    assert result["candidates"][0]["buyable"] is False
+    assert result["candidates"][0]["actionable"] is False
+    assert result["decision_gate"]["portfolio_action"] == "WATCH_ONLY"
+
+
 def test_candidate_zero_valid():
     from app.services.analysis_engine import _normalize_final
 
