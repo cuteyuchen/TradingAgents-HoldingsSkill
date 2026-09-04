@@ -15,6 +15,7 @@ from ..market.fuyao_analytics import (
 )
 from ..market.providers.factory import build_critical_quote_provider
 from ..market_engine_models import MarketMetricSnapshot, MarketScoreSnapshot
+from ..services.holding_identity import RESOLVED, audit_holding_item
 from ..v2_dependencies import get_current_user
 from ..v2_models import HoldingItem, Portfolio, PortfolioSnapshot, User
 
@@ -58,6 +59,26 @@ def _score_context(db: Session) -> dict[str, Any]:
             "coverage": metric.coverage if metric is not None else None,
         },
     }
+
+
+def _resolved_holding_rows(db: Session, holdings: list[HoldingItem]) -> list[dict[str, Any]]:
+    """Build quote inputs only from holdings with verified identity authority."""
+
+    rows: list[dict[str, Any]] = []
+    for row in holdings:
+        audit = audit_holding_item(db, row)
+        if audit.get("status") != RESOLVED or not audit.get("code"):
+            continue
+        rows.append(
+            {
+                "code": audit["code"],
+                "name": audit.get("display_name") or row.name,
+                "qty": row.qty,
+                "market_value": row.market_value,
+                "cost": row.cost,
+            }
+        )
+    return rows
 
 
 @router.get("/status")
@@ -119,17 +140,7 @@ def portfolio_contribution(
     holdings = db.execute(
         select(HoldingItem).where(HoldingItem.snapshot_id == snapshot.id).order_by(HoldingItem.id.asc())
     ).scalars().all()
-    holding_rows = [
-        {
-            "code": row.code,
-            "name": row.name,
-            "qty": row.qty,
-            "market_value": row.market_value,
-            "cost": row.cost,
-        }
-        for row in holdings
-        if row.code
-    ]
+    holding_rows = _resolved_holding_rows(db, holdings)
     codes = [str(row["code"]) for row in holding_rows]
     provider = build_critical_quote_provider()
     quotes = provider.get_quotes(codes) if codes else {}

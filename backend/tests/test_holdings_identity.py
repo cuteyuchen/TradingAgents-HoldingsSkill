@@ -30,6 +30,7 @@ from app.services.holding_identity import (
     resolve_holding_identity,
     resolve_payload_identities,
 )
+from app.routers.fuyao_v3 import _resolved_holding_rows
 from app.services.holdings_service import parse_payload_dict
 from app.services.security_master import ETF, STOCK, upsert_security
 from app.v2_models import AnalysisJob, HoldingItem, PortfolioSnapshot, User
@@ -224,6 +225,31 @@ def test_unresolved_holding_does_not_expose_unverified_canonical_code(security_d
     )[0].holdings[0]
     assert bare_canonical.canonical_code is None
     assert bare_canonical.extra["submitted_canonical_code"] == "600519"
+
+
+def test_quote_inputs_skip_unresolved_snapshot_rows(security_db):
+    _seed(security_db, "600519", "SSE", "贵州茅台", STOCK)
+    security_db.commit()
+    master = security_db.query(SecurityMaster).filter(SecurityMaster.code == "600519").one()
+    rows = _resolved_holding_rows(
+        security_db,
+        [
+            HoldingItem(
+                code="600519",
+                name="错误名称",
+                qty=100,
+                extra_json={
+                    "canonical_code": "600519.SH",
+                    "security_id": master.id,
+                    "exchange": "SSE",
+                    "asset_type": STOCK,
+                },
+            ),
+            HoldingItem(code="300750", name="未确认证券", qty=100, extra_json={}),
+        ],
+    )
+
+    assert rows == [{"code": "600519", "name": "贵州茅台", "qty": 100, "market_value": None, "cost": None}]
 
 
 def test_snapshot_audit_rejects_mismatched_security_id_and_code(security_db):
