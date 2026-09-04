@@ -12,8 +12,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
+from ..config import settings
 from ..market.codes import (
     canonical_security_code,
     exchange_for_code,
@@ -200,6 +201,129 @@ def _aliases(row: SecurityMaster) -> set[str]:
     if isinstance(aliases, list):
         values.update(normalize_security_name(item) for item in aliases)
     return {item for item in values if item}
+
+
+class PortfolioIdentityHistory:
+    """Validated RESOLVED identities from the same user + portfolio.
+
+    Alias keys are normalized by ``normalize_security_name``.  A normalized
+    alias can point to several canonical securities; that conflict is preserved
+    so callers can fail closed instead of silently taking the newest row.
+    """
+
+    def __init__(self) -> None:
+        self.aliases: dict[str, dict[str, SecurityMaster]] = {}
+
+    @property
+    def empty(self) -> bool:
+        return not self.aliases
+
+
+def _history_master_for_canonical(
+    db: Session,
+    canonical_raw: str,
+    security_id: Any,
+) -> SecurityMaster | None:
+    code = normalize_security_code(canonical_raw)
+    if not code:
+        return None
+    exchange = exchange_hint(canonical_raw)
+    if exchange is not None and exchange not in {"SSE", "SZSE", "BSE"}:
+        return None
+    if security_id not in (None, ""):
+        try:
+            master = db.get(SecurityMaster, int(security_id))
+        except (TypeError, ValueError):
+            master = None
+        candidate = _candidate_dict(master) if master is not None else None
+        if candidate is not None and candidate["canonical_code"] == canonical_security_code(code, exchange):
+            return master
+    rows = _unique_candidate_rows(_local_code_rows(db, code, exchange))
+    if len(rows) == 1:
+        candidate = _candidate_dict(rows[0])
+        if candidate and candidate["canonical_code"] == canonical_security_code(code, exchange):
+            return rows[0]
+    return None
+
+
+def load_portfolio_identity_history(
+    db: Session,
+    *,
+    user_id: int | None,
+    portfolio_id: int | None,
+) -> PortfolioIdentityHistory:
+    """Load only same-user/same-portfolio confirmed RESOLVED identities."""
+
+    history = PortfolioIdentityHistory()
+    if not user_id or not portfolio_id:
+        return history
+    statement = (
+        select(PortfolioSnapshot)
+        .where(
+            PortfolioSnapshot.user_id == user_id,
+            PortfolioSnapshot.portfolio_id == portfolio_id,
+            PortfolioSnapshot.status == "confirmed",
+        )
+        .options(selectinload(PortfolioSnapshot.holdings))
+        .order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())
+        .limit(max(1, settings.IDENTITY_HISTORY_SNAPSHOT_LIMIT))
+    )
+    snapshots = list(db.execute(statement).scalars())
+    for snapshot in snapshots:
+        for item in snapshot.holdings:
+            extra = item.extra_json if isinstance(item.extra_json, Mapping) else {}
+            if str(extra.get("resolution_status") or "").upper() != RESOLVED:
+                continue
+            canonical_raw = str(extra.get("canonical_code") or "").strip()
+            if not canonical_raw:
+                continue
+            master = _history_master_for_canonical(db, canonical_raw, extra.get("security_id"))
+            if master is None:
+                continue
+            candidate = _candidate_dict(master)
+            if candidate is None:
+                continue
+            canonical = candidate["canonical_code"]
+            alias_values = {
+                normalize_security_name(item.name),
+                normalize_security_name(extra.get("ocr_name")),
+                normalize_security_name(extra.get("name")),
+                normalize_security_name(extra.get("display_name")),
+            }
+            alias_values.update(_aliases(master))
+            for alias in alias_values:
+                if not alias:
+                    continue
+                history.aliases.setdefault(alias, {})[canonical] = master
+    return history
+
+
+def _portfolio_history_resolution(
+    holding: HoldingInput,
+    history: PortfolioIdentityHistory,
+    *,
+    asset_type: str | None,
+) -> tuple[str, SecurityMaster | None, list[dict[str, Any]]] | None:
+    name = (holding.name or holding.display_name or "").strip()
+    if not name:
+        return None
+    by_canonical = history.aliases.get(normalize_security_name(name))
+    if not by_canonical:
+        return None
+    matches: dict[str, SecurityMaster] = {}
+    for canonical, master in sorted(by_canonical.items()):
+        candidate = _candidate_dict(master)
+        if candidate is None:
+            continue
+        if asset_type and candidate["asset_type"] != asset_type:
+            continue
+        matches[canonical] = master
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return (RESOLVED, next(iter(matches.values())), [])
+    candidates = [item for item in (_candidate_dict(row) for row in matches.values()) if item]
+    return (AMBIGUOUS, None, candidates)
 
 
 def _local_code_rows(db: Session, code: str, exchange: str | None) -> list[SecurityMaster]:
@@ -398,14 +522,252 @@ def _remote_search(
         return [], str(exc.__class__.__name__)
 
 
+def _fuzzy_name_core(value: str) -> str:
+    """Strip common fund/OCR tail tokens for controlled prefix comparison."""
+
+    text = normalize_security_name(value)
+    for suffix in ("etf", "lof", "of", "nf", "指数", "联接"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+            break
+    return text
+
+
+def _fund_suffix(value: str) -> bool:
+    return value.endswith(("etf", "lof", "of", "nf"))
+
+
+def _name_rank_score(
+    input_name: str,
+    candidate_name: str,
+    *,
+    alias: bool = False,
+) -> tuple[float, str]:
+    """Return deterministic name-only evidence; SecurityMaster stays authority."""
+
+    if alias:
+        return 1.0, "official_alias_exact"
+    input_norm = normalize_security_name(input_name)
+    candidate_norm = normalize_security_name(candidate_name)
+    if not input_norm or not candidate_norm:
+        return 0.0, "no_name_signal"
+    if input_norm == candidate_norm:
+        return 1.0, "exact_name"
+    input_core = _fuzzy_name_core(input_norm)
+    candidate_core = _fuzzy_name_core(candidate_norm)
+    if input_core and input_core == candidate_core:
+        has_digit = any(char.isdigit() for char in input_core)
+        chinese_chars = sum(1 for char in input_core if "\u4e00" <= char <= "\u9fff")
+        if _fund_suffix(input_norm):
+            return 0.98, "fund_suffix_variant"
+        if has_digit or chinese_chars >= 4:
+            return 0.97, "core_name_variant"
+        # A bare three-character generic name such as 创业板/半导体/证券 is a
+        # reasonable candidate hint but not unique identity evidence without
+        # history, an exact alias, or corroborating facts.
+        return 0.90, "short_core_variant"
+    if input_core.startswith(candidate_core) or candidate_core.startswith(input_core):
+        shared = min(len(input_core), len(candidate_core))
+        chinese_shared = sum(1 for char in input_core[:shared] if "\u4e00" <= char <= "\u9fff")
+        has_digit = any(char.isdigit() for char in input_core) or any(
+            char.isdigit() for char in candidate_core
+        )
+        if chinese_shared >= 3 and (_fund_suffix(input_norm) or has_digit):
+            return 0.94, "prefix_with_fund_or_code_evidence"
+        if chinese_shared >= 4:
+            return 0.92, "strong_prefix"
+        if chinese_shared >= 3 and not has_digit:
+            return 0.80, "generic_prefix"
+    return 0.0, "no_name_signal"
+
+
+def _ranked_candidates(
+    db: Session,
+    *,
+    name: str,
+    asset_type: str | None,
+    exchange: str | None,
+) -> list[tuple[float, SecurityMaster, str]]:
+    """Collect deterministic local candidates without any LLM guess."""
+
+    normalized_input = normalize_security_name(name)
+    if not normalized_input:
+        return []
+    rows = list(
+        db.execute(
+            select(SecurityMaster)
+            .where(
+                SecurityMaster.market == "CN",
+                SecurityMaster.status != "DELISTED",
+            )
+            .order_by(SecurityMaster.code.asc(), SecurityMaster.id.asc())
+        ).scalars()
+    )
+    ranked: list[tuple[float, SecurityMaster, str]] = []
+    for row in rows:
+        candidate = _candidate_dict(row)
+        if candidate is None:
+            continue
+        if asset_type and candidate["asset_type"] != asset_type:
+            continue
+        if exchange and candidate["exchange"] != exchange:
+            continue
+        score, signal = 0.0, "no_name_signal"
+        aliases = _aliases(row)
+        if normalized_input in aliases:
+            score, signal = _name_rank_score(name, candidate["display_name"] or "", alias=True)
+        if score < 1.0:
+            best_score, best_signal = _name_rank_score(name, candidate["display_name"] or "")
+            if best_score > score:
+                score, signal = best_score, best_signal
+        if score >= 0.80:
+            ranked.append((score, row, signal))
+    ranked.sort(key=lambda item: (-item[0], item[1].code, item[1].id))
+    return ranked
+
+
+def _ranked_remote_candidates(
+    rows: list[Mapping[str, Any]],
+    *,
+    name: str,
+    asset_type: str | None,
+    exchange: str | None,
+) -> list[tuple[float, Mapping[str, Any], str]]:
+    normalized_input = normalize_security_name(name)
+    ranked: list[tuple[float, Mapping[str, Any], str]] = []
+    for row in rows:
+        candidate = _candidate_dict(row)
+        if candidate is None or candidate["display_name"] is None:
+            continue
+        if asset_type and candidate["asset_type"] != asset_type:
+            continue
+        if exchange and candidate["exchange"] != exchange:
+            continue
+        aliases = {normalize_security_name(candidate["display_name"])}
+        metadata = row.get("raw_metadata_json") if isinstance(row, Mapping) else None
+        if isinstance(metadata, Mapping):
+            raw_aliases = metadata.get("aliases") or []
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            if isinstance(raw_aliases, list):
+                aliases.update(normalize_security_name(item) for item in raw_aliases)
+        score, signal = 0.0, "no_name_signal"
+        if normalized_input in aliases:
+            score, signal = _name_rank_score(name, candidate["display_name"], alias=True)
+        if score < 1.0:
+            best_score, best_signal = _name_rank_score(name, candidate["display_name"])
+            if best_score > score:
+                score, signal = best_score, best_signal
+        if score >= 0.80:
+            ranked.append((score, row, signal))
+    ranked.sort(key=lambda item: (-item[0], item[1].get("code") or ""))
+    return ranked
+
+
+def _merge_ranked_candidates(
+    local: list[tuple[float, SecurityMaster, str]],
+    remote: list[tuple[float, Mapping[str, Any], str]],
+) -> list[tuple[float, SecurityMaster | Mapping[str, Any], str, dict[str, Any]]]:
+    """Merge local/remote rows by canonical identity, preferring local."""
+
+    best: dict[tuple[str, str, str], tuple[float, SecurityMaster | Mapping[str, Any], str, dict[str, Any]]] = {}
+    for score, row, _signal in local:
+        candidate = _candidate_dict(row)
+        if candidate is None:
+            continue
+        key = (candidate["canonical_code"], candidate["asset_type"], candidate["exchange"])
+        source_kind = "local"
+        current = best.get(key)
+        if current is None or score > current[0]:
+            best[key] = (score, row, source_kind, candidate)
+    for score, row, _signal in remote:
+        candidate = _candidate_dict(row)
+        if candidate is None:
+            continue
+        key = (candidate["canonical_code"], candidate["asset_type"], candidate["exchange"])
+        source_kind = "fuyao"
+        current = best.get(key)
+        if current is None or (score > current[0] and source_kind == "local"):
+            best[key] = (score, row, source_kind, candidate)
+    return sorted(
+        best.values(),
+        key=lambda item: (-item[0], item[3].get("canonical_code") or ""),
+    )
+
+
+def _ranked_resolution(
+    db: Session,
+    holding: HoldingInput,
+    *,
+    name: str,
+    asset_type: str | None,
+    exchange: str | None,
+    remote_rows: list[Mapping[str, Any]] | None = None,
+) -> HoldingInput | None:
+    """Apply controlled ranking and return a RESOLVED/AMBIGUOUS result or None."""
+
+    local = _ranked_candidates(db, name=name, asset_type=asset_type, exchange=exchange)
+    remote = (
+        _ranked_remote_candidates(
+            remote_rows,
+            name=name,
+            asset_type=asset_type,
+            exchange=exchange,
+        )
+        if remote_rows
+        else []
+    )
+    merged = _merge_ranked_candidates(local, remote)
+    if not merged:
+        return None
+    merged = merged[: max(1, settings.IDENTITY_MAX_RANK_CANDIDATES)]
+    top_score = merged[0][0]
+    if top_score >= settings.IDENTITY_AUTO_CONFIDENCE:
+        second_score = merged[1][0] if len(merged) > 1 else 0.0
+        if top_score - second_score >= settings.IDENTITY_AUTO_MARGIN:
+            top_score, top_row, top_source, top_candidate = merged[0]
+            if top_source == "fuyao" and isinstance(top_row, Mapping):
+                cached = _cache_remote_security(db, top_row)
+                return _resolved_holding(
+                    holding,
+                    cached,
+                    source="name_ranked_fuyao",
+                    confidence=top_score,
+                )
+            if top_source == "local" and isinstance(top_row, SecurityMaster):
+                return _resolved_holding(
+                    holding,
+                    top_row,
+                    source="name_ranked_local",
+                    confidence=top_score,
+                )
+    limited = [
+        {
+            **candidate,
+            "rank_score": score,
+            "rank_source": source,
+        }
+        for score, _row, source, candidate in merged
+    ]
+    return _unresolved_holding(
+        holding,
+        status=AMBIGUOUS,
+        source="name_ranked_ambiguous",
+        candidates=limited,
+    )
+
+
 def resolve_holding_identity(
     db: Session,
     holding: HoldingInput,
     *,
     fuyao_provider: FuyaoSecurityProvider | None = None,
     allow_remote: bool = True,
+    user_id: int | None = None,
+    portfolio_id: int | None = None,
+    portfolio_history: PortfolioIdentityHistory | None = None,
 ) -> HoldingInput:
-    """Resolve one holding using code-first, then exact-name matching."""
+    """Resolve one holding using code, same-portfolio history, and ranking."""
 
     identity_error = _identity_input_error(holding)
     if identity_error:
@@ -454,6 +816,30 @@ def resolve_holding_identity(
     name = (holding.name or holding.display_name or "").strip()
     if not name:
         return _unresolved_holding(holding, status=UNRESOLVED, source="name_missing", error="缺少证券名称")
+    history = portfolio_history
+    if history is None:
+        history = load_portfolio_identity_history(
+            db,
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+        )
+    history_result = _portfolio_history_resolution(holding, history, asset_type=asset_type)
+    if history_result is not None:
+        status, master, candidates = history_result
+        if status == RESOLVED and master is not None:
+            return _resolved_holding(
+                holding,
+                master,
+                source="portfolio_history",
+                confidence=1.0,
+            )
+        if status == AMBIGUOUS:
+            return _unresolved_holding(
+                holding,
+                status=AMBIGUOUS,
+                source="portfolio_history_ambiguous",
+                candidates=candidates,
+            )
     local_rows = _unique_candidate_rows(_local_name_rows(db, name, normalize_exchange(holding.exchange), asset_type))
     if len(local_rows) == 1:
         return _resolved_holding(holding, local_rows[0], source="name_exact_local", confidence=0.98)
@@ -478,6 +864,26 @@ def resolve_holding_identity(
         if len(matches) > 1:
             candidates = [_candidate_dict(item) for item in matches]
             return _unresolved_holding(holding, status=AMBIGUOUS, source="name_exact_fuyao_ambiguous", candidates=[item for item in candidates if item])
+        ranked = _ranked_resolution(
+            db,
+            holding,
+            name=name,
+            asset_type=asset_type,
+            exchange=normalize_exchange(holding.exchange),
+            remote_rows=rows or None,
+        )
+        if ranked is not None:
+            return ranked
+        return _unresolved_holding(holding, status=UNRESOLVED, source="name_not_found", error="未找到唯一证券身份")
+    ranked = _ranked_resolution(
+        db,
+        holding,
+        name=name,
+        asset_type=asset_type,
+        exchange=normalize_exchange(holding.exchange),
+    )
+    if ranked is not None:
+        return ranked
     return _unresolved_holding(holding, status=UNRESOLVED, source="name_not_found", error="未找到唯一证券身份")
 
 
@@ -512,12 +918,29 @@ def resolve_payload_identities(
     *,
     fuyao_provider: FuyaoSecurityProvider | None = None,
     allow_remote: bool = True,
+    user_id: int | None = None,
+    portfolio_id: int | None = None,
 ) -> tuple[ParsedHoldingsPayload, list[dict[str, Any]]]:
     resolved: list[HoldingInput] = []
     provider = fuyao_provider or (FuyaoSecurityProvider() if allow_remote else None)
+    history = (
+        load_portfolio_identity_history(
+            db,
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+        )
+        if user_id is not None and portfolio_id is not None
+        else PortfolioIdentityHistory()
+    )
     seen_codes: set[str] = set()
     for holding in payload.holdings:
-        item = resolve_holding_identity(db, holding, fuyao_provider=provider, allow_remote=allow_remote)
+        item = resolve_holding_identity(
+            db,
+            holding,
+            fuyao_provider=provider,
+            allow_remote=allow_remote,
+            portfolio_history=history,
+        )
         canonical = item.canonical_code if item.resolution_status == RESOLVED else None
         if canonical and canonical in seen_codes:
             item = _unresolved_holding(

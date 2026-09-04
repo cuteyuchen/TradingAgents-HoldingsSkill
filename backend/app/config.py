@@ -79,6 +79,12 @@ class Settings:
     MODEL_STREAM_DEFAULT: bool = _bool_env("MODEL_STREAM_DEFAULT", "true")
     # 超时或连接中断后的自动重试次数（仅对可安全重试的网络错误生效）。
     MODEL_MAX_RETRIES: int = int(os.getenv("MODEL_MAX_RETRIES", "1"))
+    # 模型正文已返回但结构化 JSON 校验失败时的自动重试次数。2 表示初次失败后
+    # 最多再重试 2 次，即单 phase 最多 3 次结构化尝试；0-3 为允许范围。
+    MODEL_JSON_MAX_RETRIES: int = max(
+        0,
+        min(int(os.getenv("MODEL_JSON_MAX_RETRIES", "2")), 3),
+    )
 
     # Analysis and scheduler.
     ANALYSIS_HISTORY_LIMIT: int = int(os.getenv("ANALYSIS_HISTORY_LIMIT", "5"))
@@ -207,6 +213,16 @@ class Settings:
     # intentionally insufficient for these writes.
     MARKET_IDENTITY_SYNC_TOKEN: str = os.getenv("MARKET_IDENTITY_SYNC_TOKEN", "").strip()
     DAILY_BAR_SYNC_ENABLED: bool = _bool_env("DAILY_BAR_SYNC_ENABLED", "false")
+
+    # Holdings identity deterministic resolution.
+    IDENTITY_HISTORY_SNAPSHOT_LIMIT: int = max(
+        1, int(os.getenv("IDENTITY_HISTORY_SNAPSHOT_LIMIT", "20"))
+    )
+    IDENTITY_AUTO_CONFIDENCE: float = float(os.getenv("IDENTITY_AUTO_CONFIDENCE", "0.95"))
+    IDENTITY_AUTO_MARGIN: float = float(os.getenv("IDENTITY_AUTO_MARGIN", "0.10"))
+    IDENTITY_MAX_RANK_CANDIDATES: int = max(
+        1, min(int(os.getenv("IDENTITY_MAX_RANK_CANDIDATES", "10")), 20)
+    )
 
     # Phase E Portfolio Operating System.  Hard caps remain defined by the
     # decision contract; these settings only control market-history and cost

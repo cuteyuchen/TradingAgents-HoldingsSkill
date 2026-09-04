@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -191,11 +191,18 @@ def resolve_holding(
     payload: HoldingInput,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    portfolio_id: int | None = Query(default=None),
 ) -> HoldingInput:
     """Validate a user-entered code/name without creating a snapshot."""
 
-    del current_user
-    resolved = resolve_holding_identity(db, payload)
+    if portfolio_id is not None:
+        _get_portfolio(db, current_user.id, portfolio_id)
+    resolved = resolve_holding_identity(
+        db,
+        payload,
+        user_id=current_user.id,
+        portfolio_id=portfolio_id,
+    )
     db.commit()
     return resolved
 
@@ -297,7 +304,12 @@ async def create_upload(
             if isinstance(raw, list):
                 raw = {"holdings": raw}
             parsed, validation_errors = parse_payload_dict(raw)
-            parsed, _identity_issues = resolve_payload_identities(db, parsed)
+            parsed, _identity_issues = resolve_payload_identities(
+                db,
+                parsed,
+                user_id=current_user.id,
+                portfolio_id=portfolio_id,
+            )
             parsed_json = parsed.model_dump(mode="json")
             parsing_status = "waiting_confirmation"
         except (json.JSONDecodeError, ValueError) as exc:
@@ -373,7 +385,12 @@ def update_parsed_holdings(
     if row.confirmed_at:
         raise HTTPException(status_code=409, detail="Confirmed upload is immutable.")
     parsed, errors = normalize_payload(payload.parsed)
-    parsed, _identity_issues = resolve_payload_identities(db, parsed)
+    parsed, _identity_issues = resolve_payload_identities(
+        db,
+        parsed,
+        user_id=row.user_id,
+        portfolio_id=row.portfolio_id,
+    )
     row.parsed_json = parsed.model_dump(mode="json")
     row.validation_errors = errors
     row.parsing_status = "waiting_confirmation"
@@ -406,7 +423,12 @@ def confirm_upload(
     if not row.parsed_json:
         raise HTTPException(status_code=409, detail="Upload has no parsed holdings.")
     parsed, errors = parse_payload_dict(row.parsed_json)
-    parsed, identity_issues = resolve_payload_identities(db, parsed)
+    parsed, identity_issues = resolve_payload_identities(
+        db,
+        parsed,
+        user_id=row.user_id,
+        portfolio_id=row.portfolio_id,
+    )
     row.parsed_json = parsed.model_dump(mode="json")
     row.validation_errors = errors
     row.parsing_status = "waiting_confirmation"

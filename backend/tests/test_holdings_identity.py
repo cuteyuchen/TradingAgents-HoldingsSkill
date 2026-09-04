@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -47,6 +48,209 @@ def security_db():
 
 def _seed(db: Session, code: str, exchange: str, name: str, security_type: str = STOCK) -> None:
     upsert_security(db, {"code": code, "exchange": exchange, "name": name, "security_type": security_type})
+
+
+def _seed_history(
+    db: Session,
+    *,
+    user_id: int,
+    portfolio_id: int,
+    code: str,
+    exchange: str,
+    name: str,
+    alias: str,
+    security_type: str,
+    when: datetime,
+) -> None:
+    master = db.query(SecurityMaster).filter(
+        SecurityMaster.code == code,
+        SecurityMaster.exchange == exchange,
+    ).one()
+    PortfolioSnapshot.__table__.create(db.get_bind(), checkfirst=True)
+    HoldingItem.__table__.create(db.get_bind(), checkfirst=True)
+    snapshot = PortfolioSnapshot(
+        user_id=user_id,
+        portfolio_id=portfolio_id,
+        snapshot_time=when,
+        status="confirmed",
+    )
+    db.add(snapshot)
+    db.flush()
+    db.add(
+        HoldingItem(
+            snapshot_id=snapshot.id,
+            code=code,
+            name=name,
+            extra_json={
+                "security_id": master.id,
+                "canonical_code": f"{code}.{'SH' if exchange == 'SSE' else 'SZ'}",
+                "ocr_name": alias,
+                "name": name,
+                "display_name": name,
+                "asset_type": security_type,
+                "exchange": exchange,
+                "resolution_status": RESOLVED,
+                "resolution_source": "portfolio_history",
+                "resolution_confidence": 1.0,
+            },
+        )
+    )
+    db.commit()
+
+
+def test_same_portfolio_history_resolves_short_alias(security_db):
+    _seed(security_db, "159915", "SZSE", "创业板ETF", ETF)
+    _seed_history(
+        security_db,
+        user_id=7,
+        portfolio_id=11,
+        code="159915",
+        exchange="SZSE",
+        name="创业板ETF",
+        alias="创业板",
+        security_type=ETF,
+        when=datetime(2026, 1, 1),
+    )
+    holding = parse_payload_dict({"holdings": [{"name": "创业板"}]})[0].holdings[0]
+
+    resolved = resolve_holding_identity(
+        security_db,
+        holding,
+        allow_remote=False,
+        user_id=7,
+        portfolio_id=11,
+    )
+
+    assert resolved.resolution_status == RESOLVED
+    assert resolved.canonical_code == "159915.SZ"
+    assert resolved.resolution_source == "portfolio_history"
+    assert resolved.name == "创业板ETF"
+    assert resolved.extra["ocr_name"] == "创业板"
+    assert resolved.security_id == security_db.query(SecurityMaster).filter(SecurityMaster.code == "159915").one().id
+
+
+def test_conflicting_history_alias_is_ambiguous_not_last_winner(security_db):
+    _seed(security_db, "600001", "SSE", "同名验收股票A", STOCK)
+    _seed(security_db, "000001", "SZSE", "同名验收股票A", STOCK)
+    _seed_history(
+        security_db,
+        user_id=7,
+        portfolio_id=11,
+        code="600001",
+        exchange="SSE",
+        name="同名验收股票A",
+        alias="同名股票",
+        security_type=STOCK,
+        when=datetime(2026, 1, 2),
+    )
+    _seed_history(
+        security_db,
+        user_id=7,
+        portfolio_id=11,
+        code="000001",
+        exchange="SZSE",
+        name="同名验收股票A",
+        alias="同名股票",
+        security_type=STOCK,
+        when=datetime(2026, 1, 1),
+    )
+    holding = parse_payload_dict({"holdings": [{"name": "同名股票"}]})[0].holdings[0]
+
+    resolved = resolve_holding_identity(
+        security_db,
+        holding,
+        allow_remote=False,
+        user_id=7,
+        portfolio_id=11,
+    )
+
+    assert resolved.resolution_status == AMBIGUOUS
+    assert resolved.canonical_code is None
+    assert resolved.resolution_source == "portfolio_history_ambiguous"
+    assert len(resolved.extra["identity_candidates"]) == 2
+
+
+def test_delisted_history_is_not_auto_reused(security_db):
+    _seed(security_db, "159915", "SZSE", "创业板ETF", ETF)
+    _seed_history(
+        security_db,
+        user_id=7,
+        portfolio_id=11,
+        code="159915",
+        exchange="SZSE",
+        name="创业板ETF",
+        alias="历史旧名",
+        security_type=ETF,
+        when=datetime(2026, 1, 1),
+    )
+    master = security_db.query(SecurityMaster).filter(SecurityMaster.code == "159915").one()
+    master.status = "DELISTED"
+    security_db.commit()
+    holding = parse_payload_dict({"holdings": [{"name": "历史旧名"}]})[0].holdings[0]
+
+    resolved = resolve_holding_identity(
+        security_db,
+        holding,
+        allow_remote=False,
+        user_id=7,
+        portfolio_id=11,
+    )
+
+    assert resolved.resolution_status == UNRESOLVED
+    assert resolved.canonical_code is None
+
+
+def test_history_is_scoped_to_same_user_and_portfolio(security_db):
+    _seed(security_db, "159915", "SZSE", "创业板ETF", ETF)
+    _seed_history(
+        security_db,
+        user_id=7,
+        portfolio_id=11,
+        code="159915",
+        exchange="SZSE",
+        name="创业板ETF",
+        alias="历史旧名",
+        security_type=ETF,
+        when=datetime(2026, 1, 1),
+    )
+    holding = parse_payload_dict({"holdings": [{"name": "历史旧名"}]})[0].holdings[0]
+
+    resolved = resolve_holding_identity(
+        security_db,
+        holding,
+        allow_remote=False,
+        user_id=8,
+        portfolio_id=12,
+    )
+
+    assert resolved.resolution_status == UNRESOLVED
+    assert resolved.canonical_code is None
+
+    resolved_other_portfolio = resolve_holding_identity(
+        security_db,
+        holding,
+        allow_remote=False,
+        user_id=7,
+        portfolio_id=12,
+    )
+    assert resolved_other_portfolio.resolution_status == UNRESOLVED
+
+
+def test_controlled_rank_resolves_fund_suffix_variant_but_not_bare_short_name(security_db):
+    _seed(security_db, "512480", "SSE", "半导体ETF", ETF)
+    _seed(security_db, "159915", "SZSE", "创业板ETF", ETF)
+    security_db.commit()
+
+    suffix_variant = parse_payload_dict({"holdings": [{"name": "半导体NF"}]})[0].holdings[0]
+    resolved = resolve_holding_identity(security_db, suffix_variant, allow_remote=False)
+    assert resolved.resolution_status == RESOLVED
+    assert resolved.canonical_code == "512480.SH"
+    assert resolved.resolution_source == "name_ranked_local"
+
+    bare_short = parse_payload_dict({"holdings": [{"name": "创业板"}]})[0].holdings[0]
+    ambiguous = resolve_holding_identity(security_db, bare_short, allow_remote=False)
+    assert ambiguous.resolution_status == AMBIGUOUS
+    assert ambiguous.canonical_code is None
 
 
 def test_unicode_names_survive_parser_json_and_db_roundtrip(security_db):

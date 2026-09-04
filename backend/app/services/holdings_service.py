@@ -188,7 +188,12 @@ def parse_upload(upload_id: int) -> None:
         parsed, errors = parse_payload_dict(parse_json_result(result))
         upload.parsing_status = "identity_resolving"
         db.commit()
-        parsed, _identity_issues = resolve_payload_identities(db, parsed)
+        parsed, _identity_issues = resolve_payload_identities(
+            db,
+            parsed,
+            user_id=upload.user_id,
+            portfolio_id=upload.portfolio_id,
+        )
         upload.parsed_json = parsed.model_dump(mode="json")
         upload.validation_errors = errors
         upload.parsing_status = "waiting_confirmation"
