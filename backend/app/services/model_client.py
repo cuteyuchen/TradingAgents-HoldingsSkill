@@ -85,6 +85,9 @@ class ModelResult:
 class StructuredModelResult:
     data: dict[str, Any]
     retry_count: int = 0
+    transport_retry_count: int = 0
+    raw_text: str | None = None
+    latency_ms: int | None = None
 
 
 def _api_key(provider: ModelProvider) -> str | None:
@@ -309,7 +312,13 @@ def call_model_json(
                             retry_count=attempt,
                         )
                     else:
-                        return StructuredModelResult(data=parsed, retry_count=attempt)
+                        return StructuredModelResult(
+                            data=parsed,
+                            retry_count=attempt,
+                            transport_retry_count=int(getattr(result, "retries", 0) or 0),
+                            raw_text=getattr(result, "text", None),
+                            latency_ms=getattr(result, "latency_ms", None),
+                        )
         if attempt >= attempts - 1:
             break
         current_messages = list(messages) + [
