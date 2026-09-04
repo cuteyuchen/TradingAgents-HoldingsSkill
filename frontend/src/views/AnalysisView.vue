@@ -238,8 +238,8 @@ async function loadScreenshot() {
 async function loadJob(jobId: number) {
   try {
     job.value = await api.getAnalysisJob(jobId)
-    if (!['queued', 'running'].includes(String(job.value.status).toLowerCase())) {
-      if (job.value.run_id) await selectRun(job.value.run_id)
+    if (!['queued', 'running', 'retrying'].includes(String(job.value.status).toLowerCase())) {
+      if (job.value.status === 'succeeded' && job.value.run_id) await selectRun(job.value.run_id)
       return
     }
     startJobPolling()

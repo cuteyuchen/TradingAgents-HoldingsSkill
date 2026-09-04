@@ -7,6 +7,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
@@ -16,6 +17,16 @@ from ..services.analysis_admission import active_portfolio_analysis
 from ..services.holding_identity import snapshot_identity_issues
 from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk_work
 from ..v2_dependencies import get_current_user
+from ..analysis_workflow.constants import RunStatus
+from ..analysis_workflow.queries import (
+    load_artifact_detail,
+    load_artifact_metadata,
+    load_claims,
+    load_resume_contract,
+    load_timeline,
+    load_workflow_tree,
+)
+from ..analysis_workflow.schemas import ArtifactDetail, ArtifactMetadata, ClaimSummary, WorkflowTree
 from ..v2_models import AnalysisJob, AnalysisRun, PortfolioSnapshot, User
 from ..v2_schemas import AnalysisJobCreate, AnalysisJobResponse, AnalysisRunDetail, AnalysisRunSummary
 
@@ -251,6 +262,7 @@ def list_runs(
     query = db.query(AnalysisRun).join(AnalysisJob, AnalysisRun.job_id == AnalysisJob.id).filter(AnalysisRun.user_id == current_user.id)
     if portfolio_id is not None:
         query = query.filter(AnalysisJob.portfolio_id == portfolio_id)
+    query = query.filter(or_(AnalysisRun.status.in_(list(RunStatus.REPORTABLE)), AnalysisRun.status.is_(None)))
     rows = query.order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(limit).all()
     return [_run_summary(row) for row in rows]
 
@@ -307,3 +319,103 @@ def compare_run(
         "previous": _run_summary(previous).model_dump(mode="json"),
         "changes": changes,
     }
+
+
+@router.get("/runs/{run_id}/workflow", response_model=WorkflowTree)
+def get_run_workflow(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WorkflowTree:
+    return load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+
+
+@router.get("/runs/{run_id}/stages")
+def get_run_stages(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    tree = load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+    return {"stages": [item.model_dump(mode="json") for item in tree.stages]}
+
+
+@router.get("/runs/{run_id}/nodes")
+def get_run_nodes(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    tree = load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+    nodes = [node.model_dump(mode="json") for stage in tree.stages for node in stage.nodes]
+    return {"nodes": nodes}
+
+
+@router.get("/runs/{run_id}/attempts")
+def get_run_attempts(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    tree = load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+    attempts = [
+        attempt.model_dump(mode="json")
+        for stage in tree.stages
+        for node in stage.nodes
+        for attempt in node.attempts
+    ]
+    return {"attempts": attempts}
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=list[ArtifactMetadata])
+def get_run_artifacts(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ArtifactMetadata]:
+    _get_run(db, current_user.id, run_id)
+    return load_artifact_metadata(db, run_id)
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}", response_model=ArtifactDetail)
+def get_run_artifact(
+    run_id: int,
+    artifact_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ArtifactDetail:
+    _get_run(db, current_user.id, run_id)
+    row = load_artifact_detail(db, run_id, artifact_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return row
+
+
+@router.get("/runs/{run_id}/claims", response_model=list[ClaimSummary])
+def get_run_claims(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ClaimSummary]:
+    _get_run(db, current_user.id, run_id)
+    return load_claims(db, run_id)
+
+
+@router.get("/runs/{run_id}/timeline")
+def get_run_timeline(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _get_run(db, current_user.id, run_id)
+    return {"events": load_timeline(db, run_id)}
+
+
+@router.get("/runs/{run_id}/resume-contract")
+def get_run_resume_contract(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    run = _get_run(db, current_user.id, run_id)
+    return load_resume_contract(db, run)
