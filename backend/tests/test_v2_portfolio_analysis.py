@@ -174,7 +174,16 @@ def test_v2_portfolio_flow(monkeypatch):
             "evidence": ["test-source"],
         }
 
-    monkeypatch.setattr(analysis_engine, "_call_json", fake_call)
+    monkeypatch.setattr(
+        analysis_engine,
+        "_structured_call_json",
+        lambda _profile, _system, _payload, instruction, _phase_name: fake_call(
+            _profile,
+            _system,
+            _payload,
+            instruction,
+        ),
+    )
     created_job = client.post(
         "/api/v2/analysis/jobs",
         headers=headers,

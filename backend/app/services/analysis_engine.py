@@ -26,7 +26,7 @@ from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .holding_identity import UnresolvedSecurityIdentityError, snapshot_identity_issues
 from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
-from .model_client import call_model, parse_json_result
+from .model_client import StructuredModelResult, call_model, call_model_json, parse_json_result
 from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_prompt
 
@@ -226,6 +226,48 @@ def _call_json(profile: ModelProfile, system: str, payload: dict[str, Any], inst
     return parse_json_result(response)
 
 
+_PHASE_REQUIRED_ANY = {
+    "analyst_evidence": ("market_read", "quality_grade", "analyst_reports", "data_gaps", "holding_evidence"),
+    "investment_debate": ("bull_claims", "bull_case", "bear_claims", "bear_case", "investment_debate_state"),
+    "research_verdict": ("rating", "winner", "strategic_action", "reasoning"),
+    "trader_proposal": ("orders", "proposals", "holdings"),
+    "trader_revision": ("orders", "proposals", "holdings"),
+    "risk_revision": ("decision", "risk_decision", "reason", "hard_constraints"),
+    "risk_debate": ("claims", "risk_debate_state"),
+    "portfolio_synthesis": ("data_quality_grade", "final_rating", "portfolio_conclusion", "holdings", "market_read"),
+}
+
+
+def _phase_object_valid(phase_name: str, value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = _PHASE_REQUIRED_ANY.get(phase_name)
+    if not required:
+        return bool(value)
+    return any(key in value for key in required)
+
+
+def _structured_call_json(
+    profile: ModelProfile,
+    system: str,
+    payload: dict[str, Any],
+    instruction: str,
+    phase_name: str,
+) -> dict[str, Any]:
+    result = call_model_json(
+        profile,
+        [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": instruction + "\n\n输入数据：\n" + json.dumps(payload, ensure_ascii=False, default=str),
+            },
+        ],
+        validator=lambda value: _phase_object_valid(phase_name, value),
+    )
+    return result.data
+
+
 def _required_call_json(
     profile: ModelProfile | None,
     system: str,
@@ -236,10 +278,7 @@ def _required_call_json(
     """Run a required Skill phase and reject incomplete provider output."""
     if profile is None:
         raise RuntimeError(f"{phase_name}_model_not_configured")
-    result = _call_json(profile, system, payload, instruction)
-    if not isinstance(result, dict) or not result:
-        raise RuntimeError(f"{phase_name}_empty_result")
-    return result
+    return _structured_call_json(profile, system, payload, instruction, phase_name)
 
 
 def _quality_rank(grade: Any) -> int:

@@ -15,17 +15,36 @@ sys.path.insert(0, BACKEND_DIR)
 
 def test_required_skill_phase_rejects_provider_failures(monkeypatch):
     from app.services import analysis_engine
+    from app.services import model_client
+    from app.services.model_client import ModelResult, StructuredOutputError
 
-    def fail(*_args, **_kwargs):
+    def fail(_profile, _messages, **_kwargs):
         raise ValueError("provider unavailable")
 
-    monkeypatch.setattr(analysis_engine, "_call_json", fail)
+    monkeypatch.setattr(model_client, "call_model", fail)
     with pytest.raises(ValueError, match="provider unavailable"):
-        analysis_engine._required_call_json(object(), "system", {}, "instruction", "investment_debate")
+        analysis_engine._required_call_json(
+            SimpleNamespace(parameters_json={}),
+            "system",
+            {},
+            "instruction",
+            "investment_debate",
+        )
 
-    monkeypatch.setattr(analysis_engine, "_call_json", lambda *_args, **_kwargs: {})
-    with pytest.raises(RuntimeError, match="investment_debate_empty_result"):
-        analysis_engine._required_call_json(object(), "system", {}, "instruction", "investment_debate")
+    def empty(_profile, _messages, **_kwargs):
+        return ModelResult(text="{}", latency_ms=0, raw={})
+
+    monkeypatch.setattr(model_client, "call_model", empty)
+    with pytest.raises(StructuredOutputError) as excinfo:
+        analysis_engine._required_call_json(
+            SimpleNamespace(parameters_json={}),
+            "system",
+            {},
+            "instruction",
+            "investment_debate",
+        )
+    assert excinfo.value.category == "EMPTY_OBJECT"
+    assert "已自动重试 2 次" in str(excinfo.value)
 
 
 def test_claim_states_are_structured_and_risk_ids_are_stable():

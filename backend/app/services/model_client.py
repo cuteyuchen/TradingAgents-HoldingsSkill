@@ -44,6 +44,28 @@ class ModelTimeoutError(ModelCallError):
     """
 
 
+class StructuredOutputError(ModelCallError):
+    """Model returned content, but it was not a usable structured object.
+
+    ``category`` keeps the safe diagnostic machine-readable without exposing
+    raw model text to the UI.  This is a structured-output failure and is
+    retried separately from transport-level failures.
+    """
+
+    code = "structured_output_error"
+
+    def __init__(
+        self,
+        category: str,
+        message: str,
+        *,
+        retry_count: int = 0,
+    ) -> None:
+        self.category = category
+        self.retry_count = retry_count
+        super().__init__(message)
+
+
 @dataclass
 class ModelResult:
     text: str
@@ -55,6 +77,14 @@ class ModelResult:
     streamed: bool = False
     # 因超时或连接中断而自动重试的次数。
     retries: int = field(default=0)
+    # 上游明确给出的 finish_reason / stop_reason；用于识别输出截断。
+    finish_reason: str | None = None
+
+
+@dataclass
+class StructuredModelResult:
+    data: dict[str, Any]
+    retry_count: int = 0
 
 
 def _api_key(provider: ModelProvider) -> str | None:
@@ -153,14 +183,143 @@ def _json_from_text(text: str) -> dict[str, Any]:
     try:
         value = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        raise ModelCallError(f"模型没有返回有效 JSON：{text[:240]}") from exc
+        raise StructuredOutputError("INVALID_JSON", "模型没有返回有效 JSON") from exc
     if not isinstance(value, dict):
-        raise ModelCallError("模型 JSON 顶层必须是对象")
+        raise StructuredOutputError("WRONG_TOP_LEVEL_TYPE", "模型 JSON 顶层必须是对象")
     return value
 
 
 def parse_json_result(result: ModelResult) -> dict[str, Any]:
     return _json_from_text(result.text)
+
+
+def _structured_retry_budget(profile: ModelProfile, retries: int | None) -> int:
+    if retries is not None:
+        try:
+            value = int(retries)
+        except (TypeError, ValueError):
+            value = settings.MODEL_JSON_MAX_RETRIES
+    else:
+        params = _params(profile)
+        try:
+            value = int(params.get("json_max_retries", settings.MODEL_JSON_MAX_RETRIES))
+        except (TypeError, ValueError):
+            value = settings.MODEL_JSON_MAX_RETRIES
+    return max(0, min(value, 3))
+
+
+def _truncated_finish(result: ModelResult) -> bool:
+    value = str(result.finish_reason or "").strip().upper()
+    if value in {"LENGTH", "MAX_TOKENS"}:
+        return True
+    raw = result.raw
+    if not isinstance(raw, dict):
+        return False
+    candidates = [raw.get("stop_reason")]
+    choices = raw.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        candidates.append(choices[0].get("finish_reason"))
+    gemini = raw.get("candidates")
+    if isinstance(gemini, list) and gemini and isinstance(gemini[0], dict):
+        candidates.append(gemini[0].get("finishReason"))
+    return any(str(item or "").strip().upper() in {"LENGTH", "MAX_TOKENS"} for item in candidates)
+
+
+def _structured_repair_instruction(category: str) -> str:
+    text = (
+        "上一响应未通过结构化 JSON 校验。请重新完成同一分析，仅返回一个完整、合法、"
+        "闭合的 JSON 对象。不要 Markdown，不要代码围栏，不要 JSON 之外的解释。"
+        "保持原始输入事实、数据质量和风险门控不变，不得为通过校验而编造数据。"
+    )
+    if category == "TRUNCATED_OUTPUT":
+        text += " 请减少冗长解释，优先保证所有必填 JSON 字段和对象完整闭合。"
+    return text
+
+
+def _validator_failure(validator: Any, value: dict[str, Any]) -> str | None:
+    if validator is None:
+        return None
+    outcome = validator(value)
+    if outcome in (None, True):
+        return None
+    if outcome is False:
+        return "MISSING_REQUIRED_FIELDS"
+    text = str(outcome or "").strip().upper()
+    return text if text else "MISSING_REQUIRED_FIELDS"
+
+
+def call_model_json(
+    profile: ModelProfile,
+    messages: list[dict[str, Any]],
+    *,
+    image_bytes: bytes | None = None,
+    image_mime: str | None = None,
+    retries: int | None = None,
+    validator: Any = None,
+    transport: Any = None,
+) -> StructuredModelResult:
+    """Call a model and retry only structured-output failures.
+
+    Transport failures (timeout/connection/upstream) remain inside
+    ``call_model`` and are not counted against the structured retry budget.
+    Invalid/truncated model content is retried up to ``retries`` times with a
+    repair instruction; raw malformed output is never fed back to the model.
+    """
+
+    budget = _structured_retry_budget(profile, retries)
+    attempts = budget + 1
+    transport_call = transport or (
+        lambda attempt_messages: call_model(
+            profile,
+            attempt_messages,
+            image_bytes=image_bytes,
+            image_mime=image_mime,
+            json_mode=True,
+        )
+    )
+    current_messages = list(messages)
+    last_error: StructuredOutputError | None = None
+    for attempt in range(attempts):
+        result = transport_call(current_messages)
+        if _truncated_finish(result):
+            last_error = StructuredOutputError(
+                "TRUNCATED_OUTPUT",
+                "模型输出达到长度上限，正文可能不完整。",
+                retry_count=attempt,
+            )
+        else:
+            try:
+                parsed = parse_json_result(result)
+            except StructuredOutputError as exc:
+                last_error = exc
+                last_error.retry_count = attempt
+            else:
+                if not parsed:
+                    last_error = StructuredOutputError(
+                        "EMPTY_OBJECT",
+                        "模型返回了空对象。",
+                        retry_count=attempt,
+                    )
+                else:
+                    missing = _validator_failure(validator, parsed)
+                    if missing:
+                        last_error = StructuredOutputError(
+                            missing,
+                            "模型返回对象缺少本阶段要求的字段。",
+                            retry_count=attempt,
+                        )
+                    else:
+                        return StructuredModelResult(data=parsed, retry_count=attempt)
+        if attempt >= attempts - 1:
+            break
+        current_messages = list(messages) + [
+            {"role": "user", "content": _structured_repair_instruction(last_error.category)}
+        ]
+    raise StructuredOutputError(
+        last_error.category if last_error is not None else "INVALID_JSON",
+        f"分析暂时失败。模型连续返回无法解析的结构化结果，系统已自动重试 {budget} 次。",
+        retry_count=budget,
+    )
 
 
 def _response_text_utf8(response: requests.Response) -> str:
@@ -310,12 +469,14 @@ def _openai_compatible(
             reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise ModelCallError(f"无法解析模型返回：{str(raw)[:500]}") from exc
+        finish_reason = raw.get("choices", [{}])[0].get("finish_reason")
         return ModelResult(
             text=text or "",
             latency_ms=latency,
             raw=raw,
             reasoning=str(reasoning or ""),
             streamed=False,
+            finish_reason=finish_reason,
         )
 
     text_parts: list[str] = []
@@ -377,7 +538,14 @@ def _openai_compatible(
         "usage": usage or {},
         "streamed": True,
     }
-    return ModelResult(text=text, latency_ms=latency, raw=raw, reasoning=reasoning, streamed=True)
+    return ModelResult(
+        text=text,
+        latency_ms=latency,
+        raw=raw,
+        reasoning=reasoning,
+        streamed=True,
+        finish_reason=finish_reason,
+    )
 
 
 def _anthropic(
@@ -446,7 +614,14 @@ def _anthropic(
         thinking = "".join(
             item.get("thinking", "") for item in raw.get("content", []) if item.get("type") == "thinking"
         )
-        return ModelResult(text=text, latency_ms=latency, raw=raw, reasoning=thinking, streamed=False)
+        return ModelResult(
+            text=text,
+            latency_ms=latency,
+            raw=raw,
+            reasoning=thinking,
+            streamed=False,
+            finish_reason=raw.get("stop_reason"),
+        )
 
     # Anthropic 的 SSE 用 content_block_delta 增量推送，thinking 块与正文分开。
     text_parts: list[str] = []
@@ -498,7 +673,14 @@ def _anthropic(
         "usage": usage,
         "streamed": True,
     }
-    return ModelResult(text=text, latency_ms=latency, raw=raw, reasoning=thinking, streamed=True)
+    return ModelResult(
+        text=text,
+        latency_ms=latency,
+        raw=raw,
+        reasoning=thinking,
+        streamed=True,
+        finish_reason=stop_reason,
+    )
 
 
 def _gemini(
@@ -558,7 +740,14 @@ def _gemini(
             text = raw["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ModelCallError(f"无法解析 Gemini 返回：{str(raw)[:500]}") from exc
-        return ModelResult(text=text, latency_ms=latency, raw=raw, streamed=False)
+        finish_reason = raw.get("candidates", [{}])[0].get("finishReason")
+        return ModelResult(
+            text=text,
+            latency_ms=latency,
+            raw=raw,
+            streamed=False,
+            finish_reason=finish_reason,
+        )
 
     text_parts: list[str] = []
     finish_reason: str | None = None
@@ -600,19 +789,42 @@ def _gemini(
         "usageMetadata": usage,
         "streamed": True,
     }
-    return ModelResult(text=text, latency_ms=latency, raw=raw, streamed=True)
+    return ModelResult(
+        text=text,
+        latency_ms=latency,
+        raw=raw,
+        streamed=True,
+        finish_reason=finish_reason,
+    )
 
 
 def _acceptance_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    content = str(messages[-1].get("content") or "") if messages else ""
     marker = "输入数据："
-    if marker not in content:
-        return {}
-    try:
-        value = json.loads(content.split(marker, 1)[1].strip())
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        if marker not in content:
+            continue
+        try:
+            value = json.loads(content.split(marker, 1)[1].strip())
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _acceptance_phase_content(messages: list[dict[str, Any]]) -> str:
+    """Return the model-facing phase instruction, skipping repair prompts."""
+
+    repair = (
+        "上一响应未通过结构化 JSON 校验",
+        "请重新完成同一分析",
+    )
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        if content.startswith(repair):
+            continue
+        return content
+    return str(messages[-1].get("content") or "") if messages else ""
 
 
 def _identity_fixture_holdings(
@@ -620,7 +832,7 @@ def _identity_fixture_holdings(
 ) -> dict[str, Any] | None:
     """Return fictional O.2 holding fixtures used by the browser acceptance."""
 
-    def holding(code: str | None, name: str) -> dict[str, Any]:
+    def holding(code: str | None, name: str, *, ocr_name: str | None = None) -> dict[str, Any]:
         return {
             "code": code,
             "name": name,
@@ -633,6 +845,7 @@ def _identity_fixture_holdings(
             "pnl": 0.1,
             "pnl_amount": 1000,
             "weight": 0.1,
+            "extra": {"ocr_name": ocr_name} if ocr_name else {},
         }
 
     if b"identity-7cn" in image_bytes:
@@ -677,6 +890,48 @@ def _identity_fixture_holdings(
             "excluded_items": [],
             "notes": ["phase-o.2 unresolved fixture"],
         }
+    if b"identity-history-source" in image_bytes:
+        return {
+            "holdings": [holding("159915", "创业板", ocr_name="创业板")],
+            "total_assets": 200000,
+            "total_market_value": 22000,
+            "broker_available_cash": 178000,
+            "corrected_unused_funds": 178000,
+            "repo_or_standard_bond_value": 0,
+            "excluded_items": [],
+            "notes": ["phase-o.2 history source fixture"],
+        }
+    if b"identity-history-reuse" in image_bytes:
+        return {
+            "holdings": [holding(None, "创业板")],
+            "total_assets": 200000,
+            "total_market_value": 22000,
+            "broker_available_cash": 178000,
+            "corrected_unused_funds": 178000,
+            "repo_or_standard_bond_value": 0,
+            "excluded_items": [],
+            "notes": ["phase-o.2 history reuse fixture"],
+        }
+    if b"identity-mostly" in image_bytes:
+        holdings = [
+            holding(None, "创业板ETF"),
+            holding(None, "通信ETF"),
+            holding(None, "有色ETF"),
+            holding(None, "半导体ETF"),
+            holding(None, "科创50ETF"),
+            holding(None, "中证1000ETF"),
+            holding(None, "同名验收ETF"),
+        ]
+        return {
+            "holdings": holdings,
+            "total_assets": 1000000,
+            "total_market_value": 77000,
+            "broker_available_cash": 923000,
+            "corrected_unused_funds": 923000,
+            "repo_or_standard_bond_value": 0,
+            "excluded_items": [],
+            "notes": ["phase-o.2 mostly automatic fixture"],
+        }
     return None
 
 
@@ -688,7 +943,21 @@ def _acceptance_result(
 ) -> ModelResult:
     """Return deterministic provider facts for the isolated acceptance runner."""
 
-    content = str(messages[-1].get("content") or "") if messages else ""
+    content = _acceptance_phase_content(messages)
+    last_content = str(messages[-1].get("content") or "") if messages else ""
+    input_value = _acceptance_input(messages)
+    payload_input = input_value.get("input") if isinstance(input_value.get("input"), dict) else input_value
+    checkpoint = str((payload_input or {}).get("checkpoint") or "").strip()
+    if "多空辩论" in content and checkpoint in {"retry-success", "retry-exhausted"}:
+        repair_present = "上一响应未通过结构化 JSON 校验" in last_content or "请重新完成同一分析" in last_content
+        if checkpoint == "retry-exhausted" or not repair_present:
+            return ModelResult(
+                text='{"bull_claims": [{"claim": "acceptance truncation fixture',
+                latency_ms=0,
+                raw={"provider": "acceptance", "deterministic": True},
+                streamed=False,
+                finish_reason="length",
+            )
     if image_bytes is not None:
         identity_value = _identity_fixture_holdings(image_bytes)
         if identity_value is not None:
@@ -776,6 +1045,15 @@ def _acceptance_result(
             "confidence": "medium",
             "reasoning": "确定性 provider 只用于浏览器验收。",
         }
+    elif "风控经理审查" in content:
+        raw = {
+            "decision": "pass",
+            "reason": "持仓动作均为 hold，候选仍由后端组合 Gate 约束。",
+            "hard_constraints": ["不得绕过 Portfolio Gate"],
+            "soft_constraints": ["验收环境不发送真实订单"],
+            "de_risk_triggers": ["quote_missing"],
+            "execution_prerequisites": ["paper-only shadow"],
+        }
     elif "交易员方案" in content:
         input_value = _acceptance_input(messages)
         snapshot = input_value.get("input", {}).get("snapshot") or input_value.get("snapshot") or {}
@@ -795,15 +1073,6 @@ def _acceptance_result(
             if item.get("code")
         ]
         raw = {"orders": orders, "checkpoint_rule": "固定检查点复核", "cancel_all_buys_when": "质量门控阻断"}
-    elif "风控经理审查" in content:
-        raw = {
-            "decision": "pass",
-            "reason": "持仓动作均为 hold，候选仍由后端组合 Gate 约束。",
-            "hard_constraints": ["不得绕过 Portfolio Gate"],
-            "soft_constraints": ["验收环境不发送真实订单"],
-            "de_risk_triggers": ["quote_missing"],
-            "execution_prerequisites": ["paper-only shadow"],
-        }
     elif "三方风控辩论" in content:
         raw = {
             "claims": [
@@ -886,6 +1155,7 @@ def _acceptance_result(
         latency_ms=0,
         raw={"provider": "acceptance", "deterministic": True},
         streamed=False,
+        finish_reason="stop",
     )
 
 
