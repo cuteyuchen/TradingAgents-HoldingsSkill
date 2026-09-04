@@ -33,6 +33,7 @@ AMBIGUOUS = "AMBIGUOUS"
 UNRESOLVED = "UNRESOLVED"
 INVALID = "INVALID"
 IDENTITY_STATUSES = {RESOLVED, AMBIGUOUS, UNRESOLVED, INVALID}
+SUPPORTED_MARKETS = {"CN", "A_SHARE", "A-SHARE", "CN_A_SHARE"}
 
 STATUS_LABELS = {
     RESOLVED: "已匹配",
@@ -67,10 +68,10 @@ def normalize_security_name(value: Any) -> str:
 def _asset_type(value: Any) -> str | None:
     if value in (None, ""):
         return None
-    normalized = str(value).strip().upper()
-    if normalized in {"SHARE", "EQUITY", "A_SHARE", "STOCK"}:
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    if normalized in {"SHARE", "EQUITY", "A_SHARE", "A_SHARE_STOCK", "A_SHARE_EQUITY", "STOCK"}:
         return STOCK
-    if normalized in {"ETF", "FUND_ETF", "EXCHANGE_TRADED_FUND"}:
+    if normalized in {"ETF", "FUND_ETF", "EXCHANGE_TRADED_FUND", "EXCHANGE_TRADED_ETF"}:
         return ETF
     return normalized
 
@@ -83,14 +84,92 @@ def _asset_hint(holding: HoldingInput) -> str | None:
     return ETF if name.endswith("etf") else None
 
 
+def _identity_tokens(holding: HoldingInput) -> list[tuple[str, str, str, str | None]]:
+    """Return every submitted code token with deterministic normalization.
+
+    ``extra`` is user-controlled transport metadata, so it is included only to
+    detect stale/conflicting edits; it is never allowed to silently override a
+    visible ``code`` or ``canonical_code`` field.
+    """
+
+    extra = holding.extra if isinstance(holding.extra, Mapping) else {}
+    raw_values = (
+        ("code", holding.code),
+        ("canonical_code", holding.canonical_code),
+        ("submitted_code", extra.get("submitted_code")),
+        ("submitted_canonical_code", extra.get("submitted_canonical_code")),
+    )
+    tokens: list[tuple[str, str, str, str | None]] = []
+    for label, value in raw_values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        tokens.append((label, text, normalize_security_code(text), exchange_hint(text)))
+    return tokens
+
+
+def _identity_input_error(holding: HoldingInput) -> tuple[str, str] | None:
+    """Reject malformed or internally inconsistent identity fields."""
+
+    tokens = _identity_tokens(holding)
+    if not tokens:
+        market = str(holding.market or "").strip().upper()
+        if market and market not in SUPPORTED_MARKETS:
+            return "unsupported_market", "仅支持 A 股持仓"
+        return None
+
+    invalid = [label for label, _text, normalized, _hint in tokens if not normalized]
+    if invalid:
+        return "invalid_code_format", "代码格式无效"
+
+    normalized_codes = {normalized for _label, _text, normalized, _hint in tokens}
+    if len(normalized_codes) > 1:
+        return "conflicting_code_tokens", "提交的证券代码不一致"
+
+    hints = {hint for _label, _text, _normalized, hint in tokens if hint}
+    explicit_exchange = normalize_exchange(holding.exchange)
+    if explicit_exchange and explicit_exchange not in {"SSE", "SZSE", "BSE"}:
+        return "unsupported_exchange", "交易所无效"
+    if explicit_exchange and hints and explicit_exchange not in hints:
+        return "exchange_mismatch", "代码与交易所不一致"
+
+    market = str(holding.market or "").strip().upper()
+    if market and market not in SUPPORTED_MARKETS:
+        return "unsupported_market", "仅支持 A 股持仓"
+    return None
+
+
+def _identity_raw_code(holding: HoldingInput) -> str:
+    """Choose a validated raw token while retaining an explicit exchange hint."""
+
+    tokens = _identity_tokens(holding)
+    for _label, text, _normalized, hint in tokens:
+        if hint:
+            return text
+    for label in ("canonical_code", "code", "submitted_canonical_code", "submitted_code"):
+        for token_label, text, _normalized, _hint in tokens:
+            if token_label == label:
+                return text
+    return ""
+
+
 def _candidate_dict(row: SecurityMaster | Mapping[str, Any]) -> dict[str, Any] | None:
     if isinstance(row, SecurityMaster):
+        if str(row.market or "CN").strip().upper() != "CN":
+            return None
+        if str(row.status or "ACTIVE").strip().upper() == "DELISTED":
+            return None
         code = normalize_security_code(row.code)
         exchange = normalize_exchange(row.exchange)
         security_type = _asset_type(row.security_type)
         security_id = row.id
         name = row.name
     else:
+        market = str(row.get("market") or "CN").strip().upper()
+        if market != "CN":
+            return None
+        if str(row.get("status") or "ACTIVE").strip().upper() == "DELISTED":
+            return None
         code = normalize_security_code(row.get("code") or row.get("symbol") or row.get("thscode"))
         exchange = normalize_exchange(row.get("exchange")) or exchange_for_code(code)
         security_type = _asset_type(row.get("security_type") or row.get("asset_type"))
@@ -141,11 +220,14 @@ def _local_name_rows(db: Session, name: str, exchange: str | None, asset_type: s
     )
     if exchange:
         statement = statement.where(SecurityMaster.exchange == exchange)
-    if asset_type in {STOCK, ETF}:
-        statement = statement.where(SecurityMaster.security_type == asset_type)
     rows = list(db.execute(statement.order_by(SecurityMaster.code.asc(), SecurityMaster.id.asc())).scalars())
     normalized_name = normalize_security_name(name)
-    return [row for row in rows if normalized_name in _aliases(row)]
+    return [
+        row
+        for row in rows
+        if _asset_type(row.security_type) in ({STOCK, ETF} if asset_type is None else {asset_type})
+        and normalized_name in _aliases(row)
+    ]
 
 
 def _remote_name_matches(rows: list[Mapping[str, Any]], name: str, asset_type: str | None, exchange: str | None) -> list[Mapping[str, Any]]:
@@ -186,6 +268,23 @@ def _remote_code_matches(rows: list[Mapping[str, Any]], code: str, asset_type: s
     return matches
 
 
+def _unique_candidate_rows(rows: list[SecurityMaster | Mapping[str, Any]]) -> list[SecurityMaster | Mapping[str, Any]]:
+    """Collapse duplicate provider rows by canonical identity."""
+
+    unique: list[SecurityMaster | Mapping[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        candidate = _candidate_dict(row)
+        if candidate is None:
+            continue
+        key = (candidate["canonical_code"], candidate["asset_type"], candidate["exchange"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
 def _cache_remote_security(db: Session, raw: Mapping[str, Any]) -> SecurityMaster:
     candidate = _candidate_dict(raw)
     if candidate is None:
@@ -217,6 +316,9 @@ def _identity_extra(
     extra["resolution_status"] = status
     extra["resolution_source"] = source
     extra["resolution_confidence"] = confidence
+    if status != RESOLVED:
+        for key in ("canonical_code", "security_id", "code", "display_name", "name", "asset_type", "exchange"):
+            extra.pop(key, None)
     if candidates is not None:
         extra["identity_candidates"] = candidates
     else:
@@ -305,7 +407,12 @@ def resolve_holding_identity(
 ) -> HoldingInput:
     """Resolve one holding using code-first, then exact-name matching."""
 
-    raw_code = str((holding.extra or {}).get("submitted_code") or holding.canonical_code or holding.code or "").strip()
+    identity_error = _identity_input_error(holding)
+    if identity_error:
+        source, message = identity_error
+        return _unresolved_holding(holding, status=INVALID, source=source, error=message)
+
+    raw_code = _identity_raw_code(holding)
     code = normalize_security_code(raw_code)
     explicit_exchange = exchange_hint(raw_code) or normalize_exchange(holding.exchange)
     inferred_exchange = exchange_for_code(code) if code else None
@@ -318,7 +425,13 @@ def resolve_holding_identity(
 
     provider = fuyao_provider
     if code:
-        local_rows = [row for row in _local_code_rows(db, code, exchange) if not asset_type or row.security_type == asset_type]
+        local_rows = _unique_candidate_rows(
+            [
+                row
+                for row in _local_code_rows(db, code, exchange)
+                if not asset_type or _asset_type(row.security_type) == asset_type
+            ]
+        )
         if len(local_rows) == 1:
             return _resolved_holding(holding, local_rows[0], source="direct_code_local", confidence=1.0)
         if len(local_rows) > 1:
@@ -329,7 +442,7 @@ def resolve_holding_identity(
             rows, lookup_error = _remote_search(provider, code, exchange=exchange, asset_type=asset_type)
             if lookup_error:
                 return _unresolved_holding(holding, status=UNRESOLVED, source="direct_code_fuyao_unavailable", error="证券查询暂不可用")
-            matches = _remote_code_matches(rows, code, asset_type, exchange)
+            matches = _unique_candidate_rows(_remote_code_matches(rows, code, asset_type, exchange))
             if len(matches) == 1:
                 cached = _cache_remote_security(db, matches[0])
                 return _resolved_holding(holding, cached, source="direct_code_fuyao", confidence=0.99)
@@ -341,7 +454,7 @@ def resolve_holding_identity(
     name = (holding.name or holding.display_name or "").strip()
     if not name:
         return _unresolved_holding(holding, status=UNRESOLVED, source="name_missing", error="缺少证券名称")
-    local_rows = _local_name_rows(db, name, normalize_exchange(holding.exchange), asset_type)
+    local_rows = _unique_candidate_rows(_local_name_rows(db, name, normalize_exchange(holding.exchange), asset_type))
     if len(local_rows) == 1:
         return _resolved_holding(holding, local_rows[0], source="name_exact_local", confidence=0.98)
     if len(local_rows) > 1:
@@ -358,7 +471,7 @@ def resolve_holding_identity(
         )
         if lookup_error:
             return _unresolved_holding(holding, status=UNRESOLVED, source="name_fuyao_unavailable", error="证券查询暂不可用")
-        matches = _remote_name_matches(rows, name, asset_type, normalize_exchange(holding.exchange))
+        matches = _unique_candidate_rows(_remote_name_matches(rows, name, asset_type, normalize_exchange(holding.exchange)))
         if len(matches) == 1:
             cached = _cache_remote_security(db, matches[0])
             return _resolved_holding(holding, cached, source="name_exact_fuyao", confidence=0.97)
@@ -424,19 +537,58 @@ def audit_holding_item(db: Session, row: HoldingItem) -> dict[str, Any]:
     """Audit a persisted row using local identity facts only."""
 
     extra = dict(row.extra_json or {})
-    raw_code = str(extra.get("canonical_code") or row.code or extra.get("submitted_code") or "").strip()
-    code = normalize_security_code(raw_code)
-    exchange = exchange_hint(raw_code) or normalize_exchange(extra.get("exchange")) or exchange_for_code(code)
-    expected_type = _asset_type(extra.get("asset_type") or extra.get("security_type"))
+    row_code = str(row.code or "").strip()
+    stored_canonical = str(extra.get("canonical_code") or "").strip()
     security_id = extra.get("security_id")
+    # An existing authoritative snapshot may carry either a qualified
+    # canonical code or a SecurityMaster id.  A bare code alone is not an
+    # authority; keep it auditable but block analysis until it can be verified.
+    canonical_raw = stored_canonical if exchange_hint(stored_canonical) else (
+        row_code if exchange_hint(row_code) else ""
+    )
+    if not canonical_raw and security_id in (None, ""):
+        return {"status": UNRESOLVED, "source": "snapshot_audit_missing_identity_authority", "master": None}
+
+    raw_values = (
+        ("row_code", row_code),
+        ("canonical_code", stored_canonical),
+        ("submitted_code", extra.get("submitted_code")),
+        ("submitted_canonical_code", extra.get("submitted_canonical_code")),
+    )
+    tokens: list[tuple[str, str, str, str | None]] = []
+    for label, value in raw_values:
+        text = str(value or "").strip()
+        if text:
+            tokens.append((label, text, normalize_security_code(text), exchange_hint(text)))
+    invalid_tokens = [label for label, _text, normalized, _hint in tokens if not normalized]
+    if invalid_tokens:
+        return {"status": INVALID, "source": "snapshot_audit_invalid_code", "master": None}
+
+    normalized_codes = {normalized for _label, _text, normalized, _hint in tokens}
+    if len(normalized_codes) > 1:
+        return {"status": INVALID, "source": "snapshot_audit_conflicting_code", "master": None}
+    code = next(iter(normalized_codes), "")
+    hints = {hint for _label, _text, _normalized, hint in tokens if hint}
+    stored_exchange = normalize_exchange(extra.get("exchange"))
+    if stored_exchange and stored_exchange not in {"SSE", "SZSE", "BSE"}:
+        return {"status": INVALID, "source": "snapshot_audit_invalid_exchange", "master": None}
+    if stored_exchange and hints and stored_exchange not in hints:
+        return {"status": INVALID, "source": "snapshot_audit_exchange_mismatch", "master": None}
+    exchange = next(iter(hints), None) or stored_exchange or (exchange_for_code(code) if code else None)
+    expected_type = _asset_type(extra.get("asset_type") or extra.get("security_type"))
+    if expected_type not in {None, STOCK, ETF}:
+        return {"status": INVALID, "source": "snapshot_audit_asset_type_mismatch", "master": None}
+
     master = None
-    if security_id is not None:
+    if security_id not in (None, ""):
         try:
             master = db.get(SecurityMaster, int(security_id))
         except (TypeError, ValueError):
-            master = None
-    if master is None and code:
-        rows = _local_code_rows(db, code, exchange)
+            return {"status": INVALID, "source": "snapshot_audit_invalid_security_id", "master": None}
+        if master is None:
+            return {"status": INVALID, "source": "snapshot_audit_missing_security_id", "master": None}
+    elif code:
+        rows = _unique_candidate_rows(_local_code_rows(db, code, exchange))
         if len(rows) == 1:
             master = rows[0]
         elif len(rows) > 1:
@@ -444,11 +596,20 @@ def audit_holding_item(db: Session, row: HoldingItem) -> dict[str, Any]:
     if master is None:
         status = INVALID if code else UNRESOLVED
         return {"status": status, "source": "snapshot_audit_missing", "master": None}
-    if exchange and normalize_exchange(master.exchange) != exchange:
+
+    candidate = _candidate_dict(master)
+    if candidate is None:
+        return {"status": INVALID, "source": "snapshot_audit_invalid_master", "master": None}
+    if code and candidate["code"] != code:
+        return {"status": INVALID, "source": "snapshot_audit_code_mismatch", "master": None}
+    if canonical_raw and canonical_security_code(canonical_raw) != candidate["canonical_code"]:
+        return {"status": INVALID, "source": "snapshot_audit_canonical_code_mismatch", "master": None}
+    if exchange and candidate["exchange"] != exchange:
         return {"status": INVALID, "source": "snapshot_audit_exchange_mismatch", "master": None}
-    if expected_type and expected_type != _asset_type(master.security_type):
+    if expected_type and expected_type != candidate["asset_type"]:
         return {"status": INVALID, "source": "snapshot_audit_asset_type_mismatch", "master": None}
-    candidate = _candidate_dict(master) or {}
+    if security_id is not None and candidate.get("security_id") != int(security_id):
+        return {"status": INVALID, "source": "snapshot_audit_security_id_mismatch", "master": None}
     return {
         "status": RESOLVED,
         "source": extra.get("resolution_source") or "snapshot_audit_local",

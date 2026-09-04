@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 
 _CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
@@ -26,7 +27,7 @@ def normalize_security_code(value: object) -> str:
     leaking a vendor-specific symbol into the normalized layer.
     """
 
-    text = str(value or "").strip().upper()
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().upper()
     if not text:
         return ""
     match = _EXCHANGE_PREFIX_RE.fullmatch(text)
@@ -55,7 +56,7 @@ def normalize_security_code(value: object) -> str:
 def exchange_hint(value: object) -> str | None:
     """Return an explicit exchange token from a qualified security code."""
 
-    text = str(value or "").strip().upper()
+    text = unicodedata.normalize("NFKC", str(value or "")).strip().upper()
     if not text:
         return None
     match = _EXCHANGE_PREFIX_RE.fullmatch(text)
@@ -72,7 +73,7 @@ def normalize_exchange(value: object) -> str | None:
 
     if value is None:
         return None
-    text = str(value).strip().upper()
+    text = unicodedata.normalize("NFKC", str(value)).strip().upper()
     return _EXCHANGE_ALIASES.get(text, text or None)
 
 

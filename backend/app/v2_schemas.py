@@ -181,18 +181,23 @@ class HoldingInput(BaseModel):
         if not isinstance(value, Mapping):
             return value
         data = dict(value)
-        raw_code = data.get("canonical_code") or data.get("code")
+        raw_code = data.get("code")
+        raw_canonical = data.get("canonical_code")
+        raw_identity = raw_canonical or raw_code
         if not data.get("exchange"):
-            hinted_exchange = exchange_hint(raw_code)
+            hinted_exchange = exchange_hint(raw_identity)
             if hinted_exchange:
                 data["exchange"] = hinted_exchange
-        if raw_code and not data.get("canonical_code"):
-            qualified = canonical_security_code(raw_code, data.get("exchange"))
-            if qualified:
-                data["canonical_code"] = qualified
-        if raw_code not in (None, ""):
+        # Keep the user's raw tokens for the identity resolver, but do not
+        # manufacture a canonical code before Security Master verification.
+        # A six-digit code is only a hint until a master row supplies the
+        # exchange-qualified authority.
+        if raw_code not in (None, "") or raw_canonical not in (None, ""):
             extra = dict(data.get("extra") or {})
-            extra.setdefault("submitted_code", str(raw_code))
+            if raw_code not in (None, ""):
+                extra.setdefault("submitted_code", str(raw_code))
+            if raw_canonical not in (None, ""):
+                extra.setdefault("submitted_canonical_code", str(raw_canonical))
             data["extra"] = extra
         return data
 
@@ -206,8 +211,15 @@ class HoldingInput(BaseModel):
     def normalize_canonical_code(cls, value: Any) -> str | None:
         if value in (None, ""):
             return None
-        qualified = canonical_security_code(value)
-        return qualified or str(value).strip().upper()
+        # A bare six-digit value is only a submitted hint.  Do not infer an
+        # exchange suffix until the resolver verifies the code against the
+        # Security Master.  Explicitly qualified input can be normalized here
+        # without becoming authoritative on its own.
+        text = str(value).strip().upper()
+        if not exchange_hint(text):
+            return None
+        qualified = canonical_security_code(text)
+        return qualified or text
 
     @field_validator("exchange", mode="before")
     @classmethod

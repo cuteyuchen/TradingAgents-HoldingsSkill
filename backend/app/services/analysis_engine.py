@@ -159,7 +159,7 @@ def _holdings(snapshot: PortfolioSnapshot) -> list[dict[str, Any]]:
         identity = row.extra_json or {}
         result.append(
             {
-                "code": row.code,
+                "code": identity.get("code") or row.code,
                 "canonical_code": identity.get("canonical_code"),
                 "name": identity.get("display_name") or row.name,
                 "display_name": identity.get("display_name") or row.name,

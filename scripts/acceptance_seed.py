@@ -66,6 +66,7 @@ from app.v2_models import (
     User,
 )
 from app.security import hash_password
+from app.market.codes import canonical_security_code
 from app.services.analysis_engine import run_analysis_job
 from app.services.model_client import ModelResult
 from app.market.providers.acceptance import AcceptanceQuoteProvider
@@ -414,7 +415,38 @@ def _ensure_snapshot(db, user: User, portfolio: Portfolio, *, when: datetime, ki
         PortfolioSnapshot.portfolio_id == portfolio.id,
         PortfolioSnapshot.snapshot_time == when,
     )).scalar_one_or_none()
+    def _fixture_identity(item: HoldingItem) -> dict[str, object]:
+        code = str(item.code or "").strip()
+        exchange = {"600519": "SSE", "510300": "SSE", "000001": "SZSE"}.get(code)
+        security = db.execute(select(SecurityMaster).where(
+            SecurityMaster.market == "CN",
+            SecurityMaster.exchange == exchange,
+            SecurityMaster.code == code,
+        )).scalar_one_or_none() if exchange else None
+        if security is None:
+            raise RuntimeError(f"acceptance fixture security missing: {code}")
+        security_type = str(security.security_type or "STOCK").upper()
+        extra = dict(item.extra_json or {})
+        extra.update({
+            "security_id": security.id,
+            "canonical_code": canonical_security_code(security.code, security.exchange),
+            "code": security.code,
+            "display_name": security.name,
+            "name": security.name,
+            "asset_type": security_type,
+            "exchange": security.exchange,
+            "resolution_status": "RESOLVED",
+            "resolution_source": "acceptance_fixture_security_master",
+            "resolution_confidence": 1.0,
+        })
+        item.name = security.name
+        item.extra_json = extra
+        return extra
+
     if row is not None:
+        for item in row.holdings:
+            _fixture_identity(item)
+        db.flush()
         return row
     if kind == "action":
         holdings = [
@@ -444,12 +476,15 @@ def _ensure_snapshot(db, user: User, portfolio: Portfolio, *, when: datetime, ki
     db.add(row)
     db.flush()
     for code, name, qty, available, cost, price, value, weight in holdings:
-        db.add(HoldingItem(
+        item = HoldingItem(
             snapshot_id=row.id, code=code, name=name, market="A_SHARE", qty=qty,
             available_qty=available, unavailable_qty=max(qty - available, 0), cost=cost,
             screenshot_price=price, market_value=value, pnl_ratio=0.05, pnl_amount=value * 0.05,
             weight=weight, extra_json={"security_type": "ETF" if code == "510300" else "STOCK", "quote_quality": "VALID"},
-        ))
+        )
+        db.add(item)
+        db.flush()
+        _fixture_identity(item)
     db.flush()
     return row
 

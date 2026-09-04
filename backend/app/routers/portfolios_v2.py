@@ -143,7 +143,7 @@ def _holding_schema(db: Session, row: HoldingItem) -> HoldingInput:
     extra.update({key: value for key, value in identity.items() if value is not None})
     extra["resolution_status"] = identity["resolution_status"]
     return HoldingInput(
-        code=row.code or "",
+        code=(audit.get("code") if audit["status"] == RESOLVED else row.code) or "",
         canonical_code=identity["canonical_code"],
         name=name,
         display_name=identity["display_name"],
@@ -406,8 +406,6 @@ def confirm_upload(
     if not row.parsed_json:
         raise HTTPException(status_code=409, detail="Upload has no parsed holdings.")
     parsed, errors = parse_payload_dict(row.parsed_json)
-    if errors:
-        raise HTTPException(status_code=422, detail={"message": "Please correct holdings before confirmation.", "errors": errors})
     parsed, identity_issues = resolve_payload_identities(db, parsed)
     row.parsed_json = parsed.model_dump(mode="json")
     row.validation_errors = errors
@@ -422,6 +420,9 @@ def confirm_upload(
                 "issues": identity_issues,
             },
         )
+    if errors:
+        db.rollback()
+        raise HTTPException(status_code=422, detail={"message": "Please correct holdings before confirmation.", "errors": errors})
 
     snapshot = PortfolioSnapshot(
         user_id=current_user.id,

@@ -58,7 +58,16 @@ function invalidate(holding: Holding, options: { clearName?: boolean } = {}) {
   extra.resolution_status = 'UNRESOLVED'
   delete extra.identity_candidates
   delete extra.identity_error
+  delete extra.submitted_canonical_code
+  delete extra.canonical_code
+  delete extra.security_id
+  delete extra.asset_type
+  delete extra.exchange
+  delete extra.code
+  delete extra.display_name
+  delete extra.name
   if (holding.code) extra.submitted_code = holding.code
+  else delete extra.submitted_code
   holding.extra = extra
 }
 

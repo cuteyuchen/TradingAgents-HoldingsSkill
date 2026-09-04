@@ -189,6 +189,105 @@ def test_sh_sz_bj_and_etf_constraints(security_db):
     assert resolved.holdings[-1].exchange == "SZSE"
 
 
+def test_invalid_or_conflicting_submitted_code_never_falls_back_to_name(security_db):
+    _seed(security_db, "600519", "SSE", "贵州茅台", STOCK)
+    _seed(security_db, "159915", "SZSE", "创业板ETF", ETF)
+    security_db.commit()
+
+    malformed = parse_payload_dict({"holdings": [{"code": "not-a-code", "name": "贵州茅台"}]})[0].holdings[0]
+    result = resolve_holding_identity(security_db, malformed, allow_remote=False)
+    assert result.resolution_status == INVALID
+    assert result.canonical_code is None
+
+    exchange_mismatch = parse_payload_dict(
+        {"holdings": [{"code": "600519.SH", "exchange": "SZ", "name": "贵州茅台"}]}
+    )[0].holdings[0]
+    result = resolve_holding_identity(security_db, exchange_mismatch, allow_remote=False)
+    assert result.resolution_status == INVALID
+
+    conflicting_tokens = parse_payload_dict(
+        {"holdings": [{"code": "159915", "canonical_code": "600519.SH", "name": "创业板ETF"}]}
+    )[0].holdings[0]
+    result = resolve_holding_identity(security_db, conflicting_tokens, allow_remote=False)
+    assert result.resolution_status == INVALID
+
+
+def test_unresolved_holding_does_not_expose_unverified_canonical_code(security_db):
+    holding = parse_payload_dict({"holdings": [{"code": "600519", "name": "不存在的验收标的"}]})[0].holdings[0]
+    assert holding.canonical_code is None
+    resolved = resolve_holding_identity(security_db, holding, allow_remote=False)
+    assert resolved.resolution_status == INVALID
+    assert resolved.canonical_code is None
+
+    bare_canonical = parse_payload_dict(
+        {"holdings": [{"canonical_code": "600519", "name": "不存在的验收标的"}]}
+    )[0].holdings[0]
+    assert bare_canonical.canonical_code is None
+    assert bare_canonical.extra["submitted_canonical_code"] == "600519"
+
+
+def test_snapshot_audit_rejects_mismatched_security_id_and_code(security_db):
+    _seed(security_db, "600519", "SSE", "贵州茅台", STOCK)
+    _seed(security_db, "159915", "SZSE", "创业板ETF", ETF)
+    security_db.commit()
+    stock = security_db.query(SecurityMaster).filter(SecurityMaster.code == "600519").one()
+
+    db_engine = security_db.get_bind()
+    PortfolioSnapshot.__table__.create(db_engine, checkfirst=True)
+    HoldingItem.__table__.create(db_engine, checkfirst=True)
+    snapshot = PortfolioSnapshot(user_id=1, portfolio_id=1, status="confirmed")
+    security_db.add(snapshot)
+    security_db.flush()
+    security_db.add(
+        HoldingItem(
+            snapshot_id=snapshot.id,
+            code="159915",
+            name="贵州茅台",
+            extra_json={"security_id": stock.id, "canonical_code": "159915.SZ", "asset_type": ETF},
+        )
+    )
+    security_db.commit()
+    security_db.refresh(snapshot)
+    issues = __import__("app.services.holding_identity", fromlist=["snapshot_identity_issues"]).snapshot_identity_issues(
+        security_db, snapshot
+    )
+    assert issues and issues[0]["status"] == INVALID
+
+
+def test_snapshot_audit_accepts_either_verified_canonical_or_security_id(security_db):
+    _seed(security_db, "600519", "SSE", "贵州茅台", STOCK)
+    security_db.commit()
+    master = security_db.query(SecurityMaster).filter(SecurityMaster.code == "600519").one()
+
+    db_engine = security_db.get_bind()
+    PortfolioSnapshot.__table__.create(db_engine, checkfirst=True)
+    HoldingItem.__table__.create(db_engine, checkfirst=True)
+    snapshot = PortfolioSnapshot(user_id=1, portfolio_id=1, status="confirmed")
+    security_db.add(snapshot)
+    security_db.flush()
+    security_db.add_all(
+        [
+            HoldingItem(
+                snapshot_id=snapshot.id,
+                code="600519",
+                name="旧显示名",
+                extra_json={"canonical_code": "600519.SH", "asset_type": STOCK},
+            ),
+            HoldingItem(
+                snapshot_id=snapshot.id,
+                code=None,
+                name="旧显示名",
+                extra_json={"security_id": master.id, "asset_type": STOCK},
+            ),
+        ]
+    )
+    security_db.commit()
+    security_db.refresh(snapshot)
+    assert __import__("app.services.holding_identity", fromlist=["snapshot_identity_issues"]).snapshot_identity_issues(
+        security_db, snapshot
+    ) == []
+
+
 def test_fuyao_search_is_used_after_local_master_miss(security_db):
     calls: list[dict[str, object]] = []
 

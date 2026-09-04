@@ -137,7 +137,7 @@ def _normalized_payload(row: SecurityMaster | Mapping[str, Any]) -> dict[str, An
     exchange = infer_exchange(code, raw.get("exchange"),)
     symbol = raw.get("symbol")
     if not symbol:
-        suffix = {SSE: "SH", SZSE: "SZ"}.get(exchange, exchange)
+        suffix = {SSE: "SH", SZSE: "SZ", BSE: "BJ"}.get(exchange, exchange)
         symbol = f"{code}.{suffix}" if suffix else code
     return {
         "market": str(raw.get("market") or CN_MARKET).upper(),

@@ -602,7 +602,9 @@ class FuyaoSecurityProvider(SecurityProvider):
         if exchange:
             params["exchange"] = str(exchange).upper()
         if asset_type:
-            params["asset_type"] = asset_type
+            params["asset_type"] = {"STOCK": "a-share", "ETF": "fund-etf"}.get(
+                str(asset_type).strip().upper(), asset_type
+            )
         response = self.client.get(FUYAO_TICKER_SEARCH_ENDPOINT, params=params, capability="security_master")
         fetched_at = datetime.now(UTC)
         data = response.data if isinstance(response.data, Mapping) else {}
