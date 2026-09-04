@@ -6,7 +6,7 @@ import { useMessage } from 'naive-ui'
 import { api, errorMessage } from '../api'
 import type { Holding } from '../api/types'
 
-const props = defineProps<{ holdings: Holding[] }>()
+const props = defineProps<{ holdings: Holding[]; portfolioId?: number | null }>()
 const emit = defineEmits<{ remove: [index: number] }>()
 const message = useMessage()
 const resolving = ref<Record<number, boolean>>({})
@@ -29,7 +29,17 @@ function statusOf(holding: Holding): 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED' | '
 }
 
 function statusLabel(holding: Holding): string {
-  return ({ RESOLVED: '已匹配', AMBIGUOUS: '需要选择', UNRESOLVED: '未找到', INVALID: '代码无效' } as Record<string, string>)[statusOf(holding)]
+  const base = ({ RESOLVED: '已匹配', AMBIGUOUS: '需要选择', UNRESOLVED: '未找到', INVALID: '代码无效' } as Record<string, string>)[statusOf(holding)]
+  if (statusOf(holding) !== 'RESOLVED') return base
+  const source = String(holding.resolution_source || '')
+  const suffix = source.startsWith('portfolio_history')
+    ? '历史'
+    : source.includes('fuyao')
+      ? '行情核验'
+      : source.includes('ranked') || source.includes('exact') || source.includes('direct_code')
+        ? '证券库'
+        : ''
+  return suffix ? `${base} · ${suffix}` : base
 }
 
 function statusType(holding: Holding): 'success' | 'warning' | 'info' | 'error' {
@@ -109,7 +119,10 @@ async function resolve(index: number) {
   }
   resolving.value = { ...resolving.value, [index]: true }
   try {
-    const resolved = await api.resolveHolding({ ...holding, extra: { ...(holding.extra || {}), submitted_code: holding.code || undefined } })
+    const resolved = await api.resolveHolding(
+      { ...holding, extra: { ...(holding.extra || {}), submitted_code: holding.code || undefined } },
+      props.portfolioId,
+    )
     Object.assign(holding, resolved)
   } catch (error) {
     invalidate(holding, { clearName: false })
@@ -124,6 +137,17 @@ async function resolve(index: number) {
     delete next[index]
     resolving.value = next
   }
+}
+
+async function rematch(index: number) {
+  const holding = props.holdings[index]
+  if (!holding || resolving.value[index]) return
+  const ocrName = typeof holding.extra?.ocr_name === 'string' ? holding.extra.ocr_name : ''
+  holding.code = ''
+  holding.name = holding.name || ocrName || ''
+  holding.display_name = holding.display_name || holding.name || ''
+  invalidate(holding, { clearName: false })
+  await resolve(index)
 }
 
 function openCandidates(index: number) {
@@ -183,6 +207,7 @@ onUnmounted(() => {
           <td class="status-column">
             <n-tag size="small" :type="statusType(holding)">{{ resolving[index] ? '匹配中' : statusLabel(holding) }}</n-tag>
             <n-button v-if="statusOf(holding) === 'AMBIGUOUS'" text type="primary" size="small" @click="openCandidates(index)">选择证券</n-button>
+            <n-button v-if="!resolving[index] && ['UNRESOLVED', 'INVALID'].includes(statusOf(holding))" text type="primary" size="small" @click="rematch(index)">重新匹配</n-button>
           </td>
           <td class="action-column"><n-button quaternary circle type="error" aria-label="删除持仓行" @click="emit('remove', index)"><template #icon><Trash2 :size="15" /></template></n-button></td>
         </tr>

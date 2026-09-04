@@ -37,6 +37,7 @@ const analysisMode = ref<AnalysisMode>('deep')
 const checkpoint = ref('10:30')
 const notify = ref(true)
 const analysisPanel = ref<HTMLElement | null>(null)
+let contextOpening = false
 let pollTimer: number | null = null
 let pollBusy = false
 
@@ -333,24 +334,33 @@ function close() {
   emit('update:show', false)
 }
 
-watch(() => props.show, async (show) => {
-  if (!show) return
+async function openWithContext() {
+  contextOpening = true
   try {
     await loadContext()
     const requestedJob = Number(route.query.job)
     if (requestedJob) await resumeJob(requestedJob)
   } catch (error) {
     message.error((error as Error).message)
+  } finally {
+    contextOpening = false
   }
+}
+
+watch(() => props.show, (show) => {
+  if (show) void openWithContext()
 })
 watch(() => props.portfolioId, (id, previous) => {
-  if (id && id !== previous && props.show) {
+  if (id && previous && id !== previous && props.show && !contextOpening) {
     clearDraft()
     void loadLatestSnapshot(id)
   }
 })
 
-onMounted(() => window.addEventListener('paste', pasteImage))
+onMounted(() => {
+  window.addEventListener('paste', pasteImage)
+  if (props.show) void openWithContext()
+})
 onUnmounted(() => {
   window.removeEventListener('paste', pasteImage)
   stopPolling()
@@ -402,7 +412,7 @@ onUnmounted(() => {
         <section v-if="parsed" class="drawer-section">
           <div class="section-title"><div><h3>2. 核对并修正</h3><p>请核对后确认，数量和现金均来自你提交的快照。</p></div><div class="section-actions"><n-button secondary size="small" @click="addHolding"><template #icon><Plus :size="14" /></template>新增一行</n-button><n-button secondary size="small" :loading="saving" @click="saveParsed"><template #icon><Save :size="14" /></template>保存修正</n-button></div></div>
           <div class="fund-grid"><n-form-item label="总资产"><n-input-number v-model:value="parsed.total_assets" :show-button="false" /></n-form-item><n-form-item label="持仓总市值"><n-input-number v-model:value="parsed.total_market_value" :show-button="false" /></n-form-item><n-form-item label="券商可用资金"><n-input-number v-model:value="parsed.broker_available_cash" :show-button="false" /></n-form-item><n-form-item label="修正后未使用资金"><n-input-number v-model:value="parsed.corrected_unused_funds" :show-button="false" /></n-form-item></div>
-          <HoldingsIdentityTable :holdings="parsed.holdings" @remove="removeHolding" />
+          <HoldingsIdentityTable :holdings="parsed.holdings" :portfolio-id="activePortfolioId" @remove="removeHolding" />
           <n-alert v-if="upload?.parsing_status === 'identity_resolving'" type="info" :show-icon="false">正在匹配证券身份...</n-alert>
           <n-alert v-else-if="identityIssueCount" type="warning" :show-icon="false">还有 {{ identityIssueCount }} 个持仓未确认证券身份。请先补全或确认代码，再保存为正式持仓快照。</n-alert>
           <div class="confirm-row"><n-button secondary size="large" :disabled="!canConfirm" :loading="confirming" @click="confirmHoldings(false)">仅确认快照</n-button><n-button type="success" size="large" :disabled="!canConfirm" :loading="confirming" @click="confirmHoldings(true)"><template #icon><Play :size="16" /></template>确认并立即分析</n-button></div>
@@ -412,7 +422,7 @@ onUnmounted(() => {
           <div class="section-title"><div><h3>{{ parsed ? '3.' : '2.' }} 手动执行组合分析</h3><p>当前使用快照 #{{ snapshot.id }} · {{ fmtDateTime(snapshot.snapshot_time) }}</p></div><Play :size="18" /></div>
           <n-alert v-if="snapshotIdentityBlocked" type="warning" :show-icon="false">证券身份不完整。该快照保留审计历史，但不会作为新的分析默认输入，请重新导入并修正。</n-alert>
           <div class="analysis-form"><n-form-item label="分析模式"><n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group></n-form-item><n-form-item label="检查点"><n-select v-model:value="checkpoint" :options="['09:35', '10:30', '13:05', '14:30', '15:10'].map((value) => ({ label: value, value }))" /></n-form-item><n-form-item label="完成后通知"><n-switch v-model:value="notify" /></n-form-item><n-button type="primary" size="large" :loading="analysisStarting" :disabled="snapshotIdentityBlocked || Boolean(job && !terminalJob)" @click="runAnalysis"><template #icon><Play :size="16" /></template>开始分析</n-button></div>
-          <div v-if="job" class="job-status"><div><strong>{{ stageLabels[job.current_stage] || job.current_stage }}</strong><span>{{ job.progress_percent }}%</span></div><n-progress type="line" :percentage="job.progress_percent" :status="jobProgressStatus" :processing="!terminalJob" /><n-alert v-if="job.error_message" type="error" :show-icon="false">{{ job.error_message }}</n-alert><n-alert v-if="pollingError" type="warning" :show-icon="false">{{ pollingError }} 页面会继续尝试恢复。</n-alert><div class="job-actions"><n-button v-if="jobSucceeded" type="primary" @click="openAnalysis">查看今日分析</n-button><n-button v-if="jobRunning" secondary :loading="jobActionLoading" @click="cancelAnalysis">取消任务</n-button><n-button v-if="jobFailed" secondary :loading="jobActionLoading" @click="retryAnalysis">重试分析</n-button><n-button v-if="terminalJob" secondary @click="job = null">再次分析当前快照</n-button></div></div>
+          <div v-if="job" class="job-status"><div><strong>{{ stageLabels[job.current_stage] || job.current_stage }}</strong><span>{{ job.progress_percent }}%</span></div><n-progress type="line" :percentage="job.progress_percent" :status="jobProgressStatus" :processing="!terminalJob" /><n-alert v-if="job.error_message" type="error" :show-icon="false">{{ job.error_message }}</n-alert><n-alert v-if="pollingError" type="warning" :show-icon="false">{{ pollingError }} 页面会继续尝试恢复。</n-alert><div class="job-actions"><n-button v-if="jobSucceeded" type="primary" @click="openAnalysis">查看今日分析</n-button><n-button v-if="jobRunning" secondary :loading="jobActionLoading" @click="cancelAnalysis">取消任务</n-button><n-button v-if="jobFailed" secondary :loading="jobActionLoading" @click="retryAnalysis">重新分析</n-button><n-button v-if="terminalJob" secondary @click="job = null">再次分析当前快照</n-button></div></div>
         </section>
       </div>
     </n-drawer-content>

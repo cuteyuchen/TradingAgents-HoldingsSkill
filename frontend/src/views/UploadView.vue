@@ -464,7 +464,7 @@ onUnmounted(() => {
         <n-form-item label="修正后未使用资金"><n-input-number v-model:value="parsed.corrected_unused_funds" :show-button="false" /></n-form-item>
       </div>
 
-      <HoldingsIdentityTable :holdings="parsed.holdings" @remove="removeHolding" />
+      <HoldingsIdentityTable :holdings="parsed.holdings" :portfolio-id="portfolioId" @remove="removeHolding" />
       <n-alert v-if="upload?.parsing_status === 'identity_resolving'" type="info" :show-icon="false">正在匹配证券身份...</n-alert>
       <n-alert v-else-if="identityIssueCount" type="warning" :show-icon="false">还有 {{ identityIssueCount }} 个持仓未确认证券身份。请先补全或确认代码，再保存为正式持仓快照。</n-alert>
       <n-alert type="info" :show-icon="false">盈亏率使用小数，例如 -27.73% 应填写 -0.2773。减仓建议的数量上限是当前可用数量。</n-alert>
@@ -494,7 +494,7 @@ onUnmounted(() => {
         <div class="job-actions">
           <n-button v-if="job.status === 'succeeded' && job.run_id" type="primary" @click="openReport">查看完整报告</n-button>
           <n-button v-if="['queued', 'running'].includes(job.status)" secondary :loading="jobActionLoading" @click="cancelAnalysis">取消任务</n-button>
-          <n-button v-if="job.status === 'failed'" secondary :loading="jobActionLoading" @click="retryAnalysis">重试分析</n-button>
+          <n-button v-if="job.status === 'failed'" secondary :loading="jobActionLoading" @click="retryAnalysis">重新分析</n-button>
           <n-button v-if="terminalJob" secondary @click="job = null">再次分析当前快照</n-button>
         </div>
       </div>

@@ -87,3 +87,47 @@ test('Case C: unresolved identity fails closed and keeps confirm disabled', asyn
   await expect(drawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeDisabled()
   await expect(drawer.getByRole('button', { name: '确认并立即分析', exact: true })).toBeDisabled()
 })
+
+test('Historical auto reuse: same-portfolio confirmed alias fills a blank code', async ({ acceptancePage: page, facts }) => {
+  await login(page, facts.users.a)
+  const id = await createPortfolio(page, `Identity History Reuse ${Date.now()}`)
+
+  await uploadIdentityFixture(page, 'identity-history-source', id)
+  const firstDrawer = page.locator('.n-drawer').last()
+  await expect(firstDrawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeEnabled()
+  await firstDrawer.getByRole('button', { name: '仅确认快照', exact: true }).click()
+  await expect(page.getByText(/持仓快照已确认/)).toBeVisible({ timeout: 10_000 })
+
+  await uploadIdentityFixture(page, 'identity-history-reuse', id)
+  const row = page.locator('.edit-table tbody tr').first()
+  await expect(row.locator('input[placeholder="证券代码"]')).toHaveValue('159915')
+  await expect(row.locator('input[placeholder="名称"]')).toHaveValue('创业板ETF')
+  await expect(row).toContainText('已匹配 · 历史')
+
+  const drawer = page.locator('.n-drawer').last()
+  await expect(drawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeEnabled()
+})
+
+test('Mostly automatic: six rows auto-resolve and one ambiguous row blocks confirm', async ({ acceptancePage: page, facts }) => {
+  await login(page, facts.users.a)
+  const id = await createPortfolio(page, `Identity Mostly ${Date.now()}`)
+  await uploadIdentityFixture(page, 'identity-mostly', id)
+
+  const rows = page.locator('.edit-table tbody tr')
+  await expect(rows).toHaveCount(7)
+  await expect(page.getByText('需要选择', { exact: true })).toBeVisible()
+  await expect(page.locator('.edit-table')).toContainText('已匹配')
+
+  const drawer = page.locator('.n-drawer').last()
+  await expect(drawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeDisabled()
+  await drawer.getByRole('button', { name: '选择证券', exact: true }).click()
+
+  const dialog = page.locator('.n-modal').filter({ hasText: '选择证券' })
+  await expect(dialog).toBeVisible()
+  const candidateRows = dialog.locator('.candidate-table tbody tr')
+  await expect(candidateRows).toHaveCount(2)
+  await candidateRows.nth(0).getByRole('button', { name: '选择', exact: true }).click()
+
+  await expect(page.getByText('已匹配', { exact: true }).first()).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeEnabled()
+})
