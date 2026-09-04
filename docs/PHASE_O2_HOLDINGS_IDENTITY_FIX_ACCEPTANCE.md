@@ -85,8 +85,9 @@ worker 以 `unresolved_security_identity` 阻断。
 本地专项覆盖：创业板ETF、通信ETF、有色ETF、半导体ETF、科创50ETF、
 中证1000ETF、沪深300ETF、贵州茅台、宁德时代；SH/SZ/BJ、ETF、exact code、
 exact unique name、ambiguous、unknown、invalid code、wrong asset type、API JSON
-和 DB roundtrip 均有断言。Exact-head CI（PR workflow `33833870409`）已通过：
-backend、frontend、frontend-acceptance、docker 全部 PASS；同一 SHA 的 push
-workflow `33833868133` 也全部 PASS。
+和 DB roundtrip 均有断言。当前分支 exact-head 的 PR 与 push workflow 均已通过：
+backend、frontend、frontend-acceptance、docker 全部 PASS。push workflow 的
+frontend-acceptance 首次运行曾出现启动竞态，仅重跑失败 job 后通过，未放宽断言。
+具体 run/check 编号以当前 GitHub Checks 为准。
 
 以上自动化不替代用户本人对同一张真实持仓截图的重新 UAT。
