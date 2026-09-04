@@ -52,6 +52,8 @@ test.describe('decision states', () => {
   test('Dashboard freshness does not promote yesterday ACTION to today', async ({ acceptancePage: page, facts }) => {
     await login(page, facts.users.a)
     await selectPortfolio(page, 'Acceptance Freshness')
+    await page.goto(`/dashboard?portfolio=${facts.portfolios.freshness}`)
+    await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/)
     await expect(page.locator('.decision-card')).toContainText('NO_ACTION')
     await expect(page.locator('.decision-card')).toContainText('今天尚未完成分析')
   })
