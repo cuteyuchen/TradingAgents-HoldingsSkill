@@ -32,6 +32,8 @@ from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_metadata, runtime_prompt
 from ..analysis_workflow.constants import ArtifactType, DebateType, RunStatus
 from ..analysis_workflow.recorder import WorkflowAuditRecorder
+from ..analysis_workflow.resume import hash_input, is_run_resumable, validate_resume_inputs
+from ..analysis_workflow.failures import ResumeRejected
 
 logger = logging.getLogger(__name__)
 _LAST_STRUCTURED_RESULT: contextvars.ContextVar[StructuredModelResult | None] = contextvars.ContextVar(
@@ -148,6 +150,22 @@ def _job_stage(db: Session, job: AnalysisJob, stage: str, progress: int) -> None
     db.commit()
 
 
+def _phase_skipped(audit: WorkflowAuditRecorder, db: Session, job: AnalysisJob, phase_key: str, progress: int | None) -> bool:
+    """Start a workflow stage. Return True when resume should reuse the completed stage."""
+
+    audit.start_stage(phase_key)
+    if audit.stage_skipped:
+        return True
+    if progress is not None:
+        _job_stage(db, job, phase_key, progress)
+    return False
+
+
+def _restore_output(audit: WorkflowAuditRecorder, node_key: str, *artifact_keys: str) -> Any:
+    output = audit.restore_output(node_key, *artifact_keys)
+    return {} if output is None else output
+
+
 def _profile_meta(profile: ModelProfile | None) -> tuple[str | None, str | None, int | None]:
     if profile is None:
         return None, None, None
@@ -161,12 +179,12 @@ def _profile_meta(profile: ModelProfile | None) -> tuple[str | None, str | None,
 
 
 def _audit_simple_node(audit: WorkflowAuditRecorder, node_key: str, output: Any = None, artifact_type: str | None = None) -> None:
-    audit.start_node(node_key)
-    audit.start_attempt()
-    if artifact_type and output is not None:
-        audit.record_artifact(artifact_type, output, artifact_key=f"{node_key}.output")
-    audit.finish_attempt()
-    audit.finish_node()
+    audit.executor.execute(
+        node_key,
+        lambda: output,
+        input_payload=output,
+        output_artifact_type=artifact_type,
+    )
 
 
 def _audit_required_json(
@@ -178,45 +196,44 @@ def _audit_required_json(
     instruction: str,
     phase_name: str,
 ) -> dict[str, Any]:
-    token = _LAST_STRUCTURED_RESULT.set(None)
-    audit.start_node(node_key)
-    provider, model, profile_id = _profile_meta(profile)
-    audit.start_attempt(provider=provider, model=model, model_profile_id=profile_id)
-    audit.record_artifact(
-        ArtifactType.RENDERED_PROMPT,
-        {"system": system, "instruction": instruction, "payload": payload},
-        artifact_key=f"{node_key}.prompt",
+    from ..analysis_workflow.context import compress_payload
+
+    def _call(context_mode: str = "full") -> dict[str, Any]:
+        token = _LAST_STRUCTURED_RESULT.set(None)
+        body = payload if context_mode == "full" else compress_payload(payload, context_mode)
+        audit.record_artifact(
+            ArtifactType.RENDERED_PROMPT,
+            {"system": system, "instruction": instruction, "payload": body, "context_mode": context_mode},
+            artifact_key=f"{node_key}.prompt",
+        )
+        try:
+            data = _required_call_json(profile, system, body, instruction, phase_name)
+            meta = _LAST_STRUCTURED_RESULT.get()
+            if meta is not None:
+                if meta.raw_text:
+                    raw = audit.record_artifact(ArtifactType.MODEL_RAW_OUTPUT, meta.raw_text, artifact_key=f"{node_key}.raw")
+                    attempt = audit._attempt()
+                    if attempt is not None:
+                        attempt.raw_output_artifact_id = raw.id
+                        attempt.input_tokens = meta.input_tokens
+                        attempt.output_tokens = meta.output_tokens
+                        if meta.request_id:
+                            attempt.request_id = meta.request_id
+                        attempt.transport_retry_count = int(meta.transport_retry_count or 0)
+                        attempt.structured_retry_count = int(meta.retry_count or 0)
+                        attempt.latency_ms = meta.latency_ms
+            return data
+        finally:
+            _LAST_STRUCTURED_RESULT.reset(token)
+
+    result = audit.executor.execute(
+        node_key,
+        _call,
+        input_payload=payload,
+        profile=profile,
+        fail_closed=True,
     )
-    try:
-        data = _required_call_json(profile, system, payload, instruction, phase_name)
-        meta = _LAST_STRUCTURED_RESULT.get()
-        structured = audit.record_artifact(ArtifactType.STRUCTURED_OUTPUT, data, artifact_key=f"{node_key}.structured")
-        if meta is not None and meta.raw_text:
-            raw = audit.record_artifact(ArtifactType.MODEL_RAW_OUTPUT, meta.raw_text, artifact_key=f"{node_key}.raw")
-            attempt = audit._attempt()
-            if attempt is not None:
-                attempt.raw_output_artifact_id = raw.id
-                attempt.structured_output_artifact_id = structured.id
-        audit.finish_attempt(
-            transport_retry_count=None if meta is None else meta.transport_retry_count,
-            structured_retry_count=None if meta is None else meta.retry_count,
-            latency_ms=None if meta is None else meta.latency_ms,
-            output_hash=structured.sha256,
-        )
-        audit.finish_node()
-        return data
-    except Exception as exc:
-        meta = _LAST_STRUCTURED_RESULT.get()
-        audit.fail_attempt(
-            exc,
-            retryable=True,
-            transport_retry_count=None if meta is None else meta.transport_retry_count,
-            structured_retry_count=None if meta is None else getattr(exc, "retry_count", meta.retry_count),
-        )
-        audit.fail_node(exc)
-        raise
-    finally:
-        _LAST_STRUCTURED_RESULT.reset(token)
+    return result.output if isinstance(result.output, dict) else {}
 
 
 def _audit_optional_json(
@@ -227,24 +244,22 @@ def _audit_optional_json(
     payload: dict[str, Any],
     instruction: str,
 ) -> dict[str, Any]:
-    audit.start_node(node_key)
-    provider, model, profile_id = _profile_meta(profile)
-    audit.start_attempt(provider=provider, model=model, model_profile_id=profile_id)
-    audit.record_artifact(
-        ArtifactType.RENDERED_PROMPT,
-        {"system": system, "instruction": instruction, "payload": payload},
-        artifact_key=f"{node_key}.prompt",
-    )
-    try:
-        data = _call_json(profile, system, payload, instruction)
-        structured = audit.record_artifact(ArtifactType.STRUCTURED_OUTPUT, data, artifact_key=f"{node_key}.structured")
-        audit.finish_attempt(output_hash=structured.sha256)
-        audit.finish_node()
+    def _call(context_mode: str = "full") -> dict[str, Any]:
+        from ..analysis_workflow.context import compress_payload
+
+        body = payload if context_mode == "full" else compress_payload(payload, context_mode)
+        audit.record_artifact(
+            ArtifactType.RENDERED_PROMPT,
+            {"system": system, "instruction": instruction, "payload": body, "context_mode": context_mode},
+            artifact_key=f"{node_key}.prompt",
+        )
+        data = _call_json(profile, system, body, instruction)
         return data if isinstance(data, dict) else {}
-    except Exception as exc:
-        audit.fail_attempt(exc, retryable=True)
-        audit.fail_node(exc)
-        raise
+
+    result = audit.executor.execute(node_key, _call, input_payload=payload, profile=profile)
+    if result.skipped or result.degraded:
+        return result.output if isinstance(result.output, dict) else {}
+    return result.output if isinstance(result.output, dict) else {}
 
 
 def _profile(db: Session, user_id: int, purpose: str) -> ModelProfile | None:
@@ -1452,38 +1467,55 @@ def run_analysis_job(job_id: int) -> None:
         }
 
         analysis_mode = canonicalize_analysis_mode(job.mode)
-        audit = WorkflowAuditRecorder(db)
+        job_context = dict(job.context_json or {})
+        force_restart = bool(job_context.get("force_restart"))
+        audit = WorkflowAuditRecorder(business_db=db)
+        existing_run = audit.db.query(AnalysisRun).filter(AnalysisRun.job_id == job.id).first()
+        resume = bool(existing_run is not None and not force_restart and is_run_resumable(existing_run))
+        if existing_run is not None and existing_run.status == RunStatus.RUNNING and not force_restart:
+            resume = bool(existing_run.last_checkpoint)
         audit.start_run(
             job,
             analysis_mode=analysis_mode,
             skill_version=str(runtime_metadata().get("version") or ""),
             parameter_lineage=parameter_lineage,
+            resume=resume,
+            force_restart=force_restart,
         )
+        if force_restart:
+            job_context.pop("force_restart", None)
+            job.context_json = job_context
+            db.commit()
 
         audit.start_stage("context_loading")
-        _job_stage(db, job, "context_loading", 8)
         history = _history(db, job)
         quick_profile = _profile(db, job.user_id, "analysis")
         deep_profile = _profile(db, job.user_id, "deep_analysis") or quick_profile
         codes = [item["code"] for item in snapshot["holdings"] if item.get("code")]
-        audit.record_artifact(ArtifactType.PORTFOLIO_SNAPSHOT, snapshot, artifact_key="portfolio_snapshot")
-        _audit_simple_node(audit, "context_loader", output={"snapshot_id": snapshot["id"], "history_count": len(history)}, artifact_type=ArtifactType.INPUT)
-        audit.finish_stage()
+        if not audit.stage_skipped:
+            _job_stage(db, job, "context_loading", 8)
+            audit.bind_input_hash("portfolio_snapshot", snapshot)
+            audit.record_artifact(ArtifactType.PORTFOLIO_SNAPSHOT, snapshot, artifact_key="portfolio_snapshot")
+            _audit_simple_node(audit, "context_loader", output={"snapshot_id": snapshot["id"], "history_count": len(history)}, artifact_type=ArtifactType.INPUT)
+            audit.finish_stage()
+        elif audit.resume_mode:
+            validate_resume_inputs(audit.input_hashes(), {"portfolio_snapshot": hash_input(snapshot)})
 
         audit.start_stage("market_collecting")
-        _job_stage(db, job, "market_collecting", 20)
-        market = collect_market_snapshot(codes)
-        audit.record_artifact(ArtifactType.MARKET_SNAPSHOT, market, artifact_key="market_snapshot")
-        _audit_simple_node(audit, "market_snapshot_collector", output=market, artifact_type=ArtifactType.MARKET_SNAPSHOT)
-        captured_at = market.get("captured_at") if isinstance(market, dict) else None
-        if captured_at:
-            run_row = audit._run()
-            try:
-                run_row.market_snapshot_at = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
-            except ValueError:
-                run_row.market_snapshot_at = utc_now()
-            db.commit()
-        audit.finish_stage()
+        if audit.stage_skipped:
+            market = audit.load_node_output("market_snapshot_collector") or {}
+        else:
+            _job_stage(db, job, "market_collecting", 20)
+            market = collect_market_snapshot(codes)
+            audit.record_artifact(ArtifactType.MARKET_SNAPSHOT, market, artifact_key="market_snapshot")
+            _audit_simple_node(audit, "market_snapshot_collector", output=market, artifact_type=ArtifactType.MARKET_SNAPSHOT)
+            captured_at = market.get("captured_at") if isinstance(market, dict) else None
+            if captured_at:
+                try:
+                    audit.set_market_snapshot_at(datetime.fromisoformat(str(captured_at).replace("Z", "+00:00")))
+                except ValueError:
+                    audit.set_market_snapshot_at(utc_now())
+            audit.finish_stage()
         # A realtime Trigger may have attached context after this job began.
         # Refresh before model prompts so a reused active job sees that reason.
         db.refresh(job)
@@ -1533,6 +1565,15 @@ def run_analysis_job(job_id: int) -> None:
         workflow["memory_context"] = memory_context
 
         run_blocked = False
+        investment: dict[str, Any] = {}
+        research: dict[str, Any] = {}
+        trader: dict[str, Any] = {}
+        risk_revision: dict[str, Any] = {}
+        risk_debate: dict[str, Any] = {}
+        candidates: list[dict[str, Any]] = []
+        candidate_raw: dict[str, Any] = {}
+        final: dict[str, Any] = {}
+        db.commit()
         if quality_gate["status"] == "blocked":
             audit.start_stage("quality_gate")
             _job_stage(db, job, "quality_gate", 38)
@@ -1574,31 +1615,44 @@ def run_analysis_job(job_id: int) -> None:
                 "memory_context": memory_context,
             }
 
-            audit.start_stage("analysts_running")
-            _job_stage(db, job, "analysts_running", 30)
-            evidence = _audit_required_json(
-                audit,
-                "analyst_team_legacy",
-                analyst_profile,
-                system_prompt,
-                input_payload,
-                "Phase 1 分析师团队：从行情、技术、VPA、主力资金、近期公告、市场情绪、板块热度、"
-                "资金可用性、组合集中度和历史一致性形成证据包。输出 JSON："
-                '{"market_read":"", "intent":{}, "analyst_reports":[], "holding_evidence":[], '
-                '"portfolio_risks":[], "data_gaps":[], "quality_grade":"A-F"}。证据必须引用输入来源。',
-                "analyst_evidence",
-            )
-            audit.record_artifact(ArtifactType.EVIDENCE, evidence, artifact_key="evidence_pack")
-            audit.finish_stage(output=evidence, quality_grade=evidence.get("quality_grade") if isinstance(evidence, dict) else None)
+            if _phase_skipped(audit, db, job, "analysts_running", 30):
+                evidence = _restore_output(audit, "analyst_team_legacy", "evidence_pack", "analysts_running.output")
+            else:
+                evidence = _audit_required_json(
+                    audit,
+                    "analyst_team_legacy",
+                    analyst_profile,
+                    system_prompt,
+                    input_payload,
+                    "Phase 1 分析师团队：从行情、技术、VPA、主力资金、近期公告、市场情绪、板块热度、"
+                    "资金可用性、组合集中度和历史一致性形成证据包。输出 JSON："
+                    '{"market_read":"", "intent":{}, "analyst_reports":[], "holding_evidence":[], '
+                    '"portfolio_risks":[], "data_gaps":[], "quality_grade":"A-F"}。证据必须引用输入来源。',
+                    "analyst_evidence",
+                )
+                audit.bind_input_hash("evidence_pack", evidence)
+                audit.record_artifact(ArtifactType.EVIDENCE, evidence, artifact_key="evidence_pack")
+                audit.finish_stage(output=evidence, quality_grade=evidence.get("quality_grade") if isinstance(evidence, dict) else None)
+            if audit.resume_mode:
+                validate_resume_inputs(
+                    audit.input_hashes(),
+                    {
+                        "portfolio_snapshot": hash_input(snapshot),
+                        "evidence_pack": hash_input(evidence),
+                    },
+                )
 
-            audit.start_stage("quality_gate")
-            _job_stage(db, job, "quality_gate", 38)
-            quality_gate = _quality_gate(snapshot, market, evidence)
+            if _phase_skipped(audit, db, job, "quality_gate", 38):
+                quality_gate = _restore_output(audit, "quality_gate", "quality_gate")
+                if not quality_gate:
+                    quality_gate = _quality_gate(snapshot, market, evidence)
+            else:
+                quality_gate = _quality_gate(snapshot, market, evidence)
+                audit.record_artifact(ArtifactType.QUALITY_GATE, quality_gate, artifact_key="quality_gate")
+                _audit_simple_node(audit, "quality_gate", output=quality_gate, artifact_type=ArtifactType.QUALITY_GATE)
+                audit.finish_stage(output=quality_gate, quality_grade=quality_gate.get("grade"))
             workflow["evidence_pack"] = evidence
             workflow["quality_gate"] = quality_gate
-            audit.record_artifact(ArtifactType.QUALITY_GATE, quality_gate, artifact_key="quality_gate")
-            _audit_simple_node(audit, "quality_gate", output=quality_gate, artifact_type=ArtifactType.QUALITY_GATE)
-            audit.finish_stage(output=quality_gate, quality_grade=quality_gate.get("grade"))
 
             if quality_gate["status"] == "blocked":
                 final = _blocked_result(snapshot, market)
@@ -1620,319 +1674,361 @@ def run_analysis_job(job_id: int) -> None:
                 final_profile = None
                 run_blocked = True
             else:
-                audit.start_stage("investment_debate")
-                _job_stage(db, job, "investment_debate", 47)
-                debate_raw = _audit_required_json(
-                    audit,
-                    "investment_debate_legacy",
-                    analyst_profile,
-                    system_prompt,
-                    {"input": input_payload, "evidence_pack": evidence, "quality_gate": quality_gate, "claim_schema": CLAIM_SCHEMA},
-                    "Phase 3 进行两轮 Claim 驱动的多空辩论。投资论点必须使用 INV- Claim ID，"
-                    "包含 speaker、stance、claim、最多三条 evidence、confidence、status、target_claim_ids。"
-                    "输出 investment_debate_state，其中包含 bull_claims、bear_claims、unresolved_claim_ids、"
-                    "round_summaries、judge_decision；同时输出 bull_case、bear_case、unresolved_claims。",
-                    "investment_debate",
-                )
-                investment = _normalise_investment_debate(debate_raw, evidence, snapshot["holdings"])
-                workflow["investment_debate_state"] = investment
-                audit.record_claims(
-                    list(investment.get("bull_claims") or []) + list(investment.get("bear_claims") or []),
-                    debate_type=DebateType.INVESTMENT,
-                )
-                audit.finish_stage(output=investment)
-
-                audit.start_stage("research_verdict")
-                _job_stage(db, job, "research_verdict", 55)
-                research = _audit_required_json(
-                    audit,
-                    "research_manager",
-                    manager_profile,
-                    system_prompt,
-                    {"input": input_payload, "evidence_pack": evidence, "quality_gate": quality_gate, "investment_debate_state": investment},
-                    "Phase 4 研究总监裁决：逐项处理 unresolved_claim_ids，输出 JSON："
-                    '{"rating":"Buy/Overweight/Hold/Underweight/Sell", "winner":"bull/bear/balanced", '
-                    '"unresolved_claim_treatment":[], "strategic_action":"", "confidence":"high/medium/low", "reasoning":""}。',
-                    "research_verdict",
-                )
-                research.setdefault("rating", "Hold")
-                research.setdefault("winner", "balanced")
-                research.setdefault("unresolved_claim_treatment", investment.get("unresolved_claim_ids", []))
-                research.setdefault("strategic_action", investment.get("judge_decision") or "保持观察")
-                research.setdefault("confidence", "low" if quality_gate["grade"] == "C" else "medium")
-                workflow["research_manager_verdict"] = research
-                audit.finish_stage(output=research)
-
-                audit.start_stage("trader_proposal")
-                _job_stage(db, job, "trader_proposal", 62)
-                trader_raw = _audit_required_json(
-                    audit,
-                    "trader",
-                    analyst_profile,
-                    system_prompt,
-                    {"input": input_payload, "research_manager_verdict": research, "quality_gate": quality_gate},
-                    "Phase 4 交易员方案：把研究裁决转为每个持仓可执行的今日动作。严格遵守 available_qty、T+1、"
-                    "100 股/份整手和当前检查点。输出 JSON："
-                    '{"orders":[{"code":"", "name":"", "action":"add/conditional_add/hold/reduce/sell/watch", '
-                    '"trigger":"", "quantity":"", "take_profit":"", "stop_loss":"", "invalidating_condition":"", '
-                    '"checkpoint_rule":""}], "checkpoint_rule":"", "cancel_all_buys_when":""}。',
-                    "trader_proposal",
-                )
-                trader = {
-                    "orders": trader_raw.get("orders") or trader_raw.get("proposals") or trader_raw.get("holdings") or [],
-                    "checkpoint_rule": trader_raw.get("checkpoint_rule") or "执行前复核最终行情与可用数量。",
-                    "cancel_all_buys_when": trader_raw.get("cancel_all_buys_when") or "指数、板块或主力资金转弱。",
-                    "original_proposal": trader_raw,
-                }
-                workflow["trader_proposal"] = trader
-                audit.finish_stage(output=trader)
-
-                audit.start_stage("risk_revision")
-                _job_stage(db, job, "risk_revision", 69)
-                risk_review_raw = _audit_required_json(
-                    audit,
-                    "risk_manager",
-                    manager_profile,
-                    system_prompt,
-                    {"input": input_payload, "quality_gate": quality_gate, "trader_proposal": trader, "investment_debate_state": investment},
-                    "Phase 4 风控经理审查交易员方案。输出 JSON："
-                    '{"decision":"pass/revise/reject", "reason":"", "hard_constraints":[], "soft_constraints":[], '
-                    '"de_risk_triggers":[], "execution_prerequisites":[]}。若违反 available_qty、T+1、集中度或数据门控必须 revise/reject。',
-                    "risk_revision",
-                )
-                decision = str(risk_review_raw.get("decision") or risk_review_raw.get("risk_decision") or "pass").lower()
-                if decision not in {"pass", "revise", "reject"}:
-                    decision = "pass"
-                risk_revision = {
-                    "decision": decision,
-                    "reason": risk_review_raw.get("reason") or risk_review_raw.get("reasons"),
-                    "hard_constraints": risk_review_raw.get("hard_constraints") or [],
-                    "soft_constraints": risk_review_raw.get("soft_constraints") or [],
-                    "de_risk_triggers": risk_review_raw.get("de_risk_triggers") or [],
-                    "execution_prerequisites": risk_review_raw.get("execution_prerequisites") or [],
-                    "revision_count": 0,
-                    "original_proposal": trader.get("orders", []),
-                }
-                if decision == "revise":
-                    revised_raw = _audit_required_json(
+                if _phase_skipped(audit, db, job, "investment_debate", 47):
+                    investment = _restore_output(audit, "investment_debate_legacy", "investment_debate.output")
+                    workflow["investment_debate_state"] = investment
+                else:
+                    debate_raw = _audit_required_json(
                         audit,
-                        "trader_revision",
+                        "investment_debate_legacy",
                         analyst_profile,
                         system_prompt,
-                        {"input": input_payload, "trader_proposal": trader, "risk_revision": risk_revision},
-                        "Phase 4 交易员按风控硬性约束进行第 1 次且唯一一次修正。输出与 trader_proposal 相同的 orders JSON，"
-                        "并说明每项变化；不得突破 available_qty。",
-                        "trader_revision",
+                        {"input": input_payload, "evidence_pack": evidence, "quality_gate": quality_gate, "claim_schema": CLAIM_SCHEMA},
+                        "Phase 3 进行两轮 Claim 驱动的多空辩论。投资论点必须使用 INV- Claim ID，"
+                        "包含 speaker、stance、claim、最多三条 evidence、confidence、status、target_claim_ids。"
+                        "输出 investment_debate_state，其中包含 bull_claims、bear_claims、unresolved_claim_ids、"
+                        "round_summaries、judge_decision；同时输出 bull_case、bear_case、unresolved_claims。",
+                        "investment_debate",
                     )
-                    revised_orders = revised_raw.get("orders") or revised_raw.get("proposals") or revised_raw.get("holdings") or []
-                    if revised_orders:
-                        trader["orders"] = revised_orders
-                        trader["revised_proposal"] = revised_raw
-                        risk_revision["revision_count"] = 1
-                        risk_revision["revised_proposal"] = revised_orders
-                    else:
-                        risk_revision["decision"] = "reject"
-                        risk_revision["reason"] = "修正后仍未返回可验证交易方案"
-                workflow["trader_proposal"] = trader
-                workflow["risk_revision"] = risk_revision
-                audit.finish_stage(output=risk_revision)
+                    investment = _normalise_investment_debate(debate_raw, evidence, snapshot["holdings"])
+                    workflow["investment_debate_state"] = investment
+                    audit.record_claims(
+                        list(investment.get("bull_claims") or []) + list(investment.get("bear_claims") or []),
+                        debate_type=DebateType.INVESTMENT,
+                    )
+                    audit.finish_stage(output=investment)
 
-                audit.start_stage("risk_debate")
-                _job_stage(db, job, "risk_debate", 76)
-                risk_debate_raw = _audit_required_json(
-                    audit,
-                    "risk_debate_legacy",
-                    manager_profile,
-                    system_prompt,
-                    {"input": input_payload, "trader_proposal": trader, "risk_revision": risk_revision, "claim_schema": CLAIM_SCHEMA},
-                    "Phase 5 三方风控辩论：激进、中立、保守各给出一个核心 Claim。必须输出 claims，"
-                    "Claim ID 分别为 RISK-1/RISK-2/RISK-3，speaker 分别为 aggressive/neutral/conservative，"
-                    "并输出 unresolved_claim_ids、round_summaries、judge_decision。",
-                    "risk_debate",
-                )
-                risk_debate = _normalise_risk_debate(risk_debate_raw, snapshot["holdings"], quality_gate)
-                workflow["risk_debate_state"] = risk_debate
-                audit.record_claims(
-                    list(risk_debate.get("aggressive_claims") or [])
-                    + list(risk_debate.get("neutral_claims") or [])
-                    + list(risk_debate.get("conservative_claims") or []),
-                    debate_type=DebateType.RISK,
-                )
-                audit.finish_stage(output=risk_debate)
+                if _phase_skipped(audit, db, job, "research_verdict", 55):
+                    research = _restore_output(audit, "research_manager", "research_verdict.output")
+                    workflow["research_manager_verdict"] = research
+                else:
+                    research = _audit_required_json(
+                        audit,
+                        "research_manager",
+                        manager_profile,
+                        system_prompt,
+                        {"input": input_payload, "evidence_pack": evidence, "quality_gate": quality_gate, "investment_debate_state": investment},
+                        "Phase 4 研究总监裁决：逐项处理 unresolved_claim_ids，输出 JSON："
+                        '{"rating":"Buy/Overweight/Hold/Underweight/Sell", "winner":"bull/bear/balanced", '
+                        '"unresolved_claim_treatment":[], "strategic_action":"", "confidence":"high/medium/low", "reasoning":""}。',
+                        "research_verdict",
+                    )
+                    research.setdefault("rating", "Hold")
+                    research.setdefault("winner", "balanced")
+                    research.setdefault("unresolved_claim_treatment", investment.get("unresolved_claim_ids", []))
+                    research.setdefault("strategic_action", investment.get("judge_decision") or "保持观察")
+                    research.setdefault("confidence", "low" if quality_gate["grade"] == "C" else "medium")
+                    workflow["research_manager_verdict"] = research
+                    audit.finish_stage(output=research)
 
-                audit.start_stage("final_quote_refresh")
-                _job_stage(db, job, "final_quote_refresh", 82)
-                market = refresh_snapshot_quotes(market, codes)
-                input_payload["market"] = market
-                audit.record_artifact(ArtifactType.MARKET_SNAPSHOT, market, artifact_key="final_market_snapshot")
-                _audit_simple_node(audit, "final_quote_refresh", output=market, artifact_type=ArtifactType.MARKET_SNAPSHOT)
-                audit.finish_stage(output={"final_quote_refresh_status": market.get("final_quote_refresh_status") if isinstance(market, dict) else None})
+                if _phase_skipped(audit, db, job, "trader_proposal", 62):
+                    trader = _restore_output(audit, "trader", "trader_proposal.output")
+                    workflow["trader_proposal"] = trader
+                else:
+                    trader_raw = _audit_required_json(
+                        audit,
+                        "trader",
+                        analyst_profile,
+                        system_prompt,
+                        {"input": input_payload, "research_manager_verdict": research, "quality_gate": quality_gate},
+                        "Phase 4 交易员方案：把研究裁决转为每个持仓可执行的今日动作。严格遵守 available_qty、T+1、"
+                        "100 股/份整手和当前检查点。输出 JSON："
+                        '{"orders":[{"code":"", "name":"", "action":"add/conditional_add/hold/reduce/sell/watch", '
+                        '"trigger":"", "quantity":"", "take_profit":"", "stop_loss":"", "invalidating_condition":"", '
+                        '"checkpoint_rule":""}], "checkpoint_rule":"", "cancel_all_buys_when":""}。',
+                        "trader_proposal",
+                    )
+                    trader = {
+                        "orders": trader_raw.get("orders") or trader_raw.get("proposals") or trader_raw.get("holdings") or [],
+                        "checkpoint_rule": trader_raw.get("checkpoint_rule") or "执行前复核最终行情与可用数量。",
+                        "cancel_all_buys_when": trader_raw.get("cancel_all_buys_when") or "指数、板块或主力资金转弱。",
+                        "original_proposal": trader_raw,
+                    }
+                    workflow["trader_proposal"] = trader
+                    audit.finish_stage(output=trader)
 
-                audit.start_stage("candidate_screening")
-                _job_stage(db, job, "candidate_screening", 87)
-                _audit_simple_node(audit, "deterministic_candidate_gate", output=candidate_context, artifact_type=ArtifactType.INPUT)
-                deterministic_candidates = [
-                    dict(item)
-                    for item in candidate_context.get("action") or []
-                    if isinstance(item, dict) and str(item.get("stage") or "").upper() == "ACTION"
-                ]
-                candidate_raw: dict[str, Any] = {
-                    "deterministic_candidates": deterministic_candidates,
-                    "candidates": deterministic_candidates,
-                    "accepted_codes": [item.get("code") for item in deterministic_candidates],
-                    "review_status": "not_needed" if not deterministic_candidates else "pending",
-                }
-                if deterministic_candidates:
-                    try:
-                        review_raw = _audit_optional_json(
+                if _phase_skipped(audit, db, job, "risk_revision", 69):
+                    risk_revision = audit.load_artifact_content("risk_revision.output") or _restore_output(
+                        audit, "risk_manager", "risk_revision.output"
+                    )
+                    restored_trader = audit.restore_output("trader", "trader_proposal.output")
+                    if isinstance(restored_trader, dict) and restored_trader:
+                        trader = restored_trader
+                    if isinstance(risk_revision, dict) and risk_revision.get("revised_proposal"):
+                        trader["orders"] = risk_revision.get("revised_proposal") or trader.get("orders")
+                    workflow["trader_proposal"] = trader
+                    workflow["risk_revision"] = risk_revision
+                else:
+                    risk_review_raw = _audit_required_json(
+                        audit,
+                        "risk_manager",
+                        manager_profile,
+                        system_prompt,
+                        {"input": input_payload, "quality_gate": quality_gate, "trader_proposal": trader, "investment_debate_state": investment},
+                        "Phase 4 风控经理审查交易员方案。输出 JSON："
+                        '{"decision":"pass/revise/reject", "reason":"", "hard_constraints":[], "soft_constraints":[], '
+                        '"de_risk_triggers":[], "execution_prerequisites":[]}。若违反 available_qty、T+1、集中度或数据门控必须 revise/reject。',
+                        "risk_revision",
+                    )
+                    decision = str(risk_review_raw.get("decision") or risk_review_raw.get("risk_decision") or "pass").lower()
+                    if decision not in {"pass", "revise", "reject"}:
+                        decision = "pass"
+                    risk_revision = {
+                        "decision": decision,
+                        "reason": risk_review_raw.get("reason") or risk_review_raw.get("reasons"),
+                        "hard_constraints": risk_review_raw.get("hard_constraints") or [],
+                        "soft_constraints": risk_review_raw.get("soft_constraints") or [],
+                        "de_risk_triggers": risk_review_raw.get("de_risk_triggers") or [],
+                        "execution_prerequisites": risk_review_raw.get("execution_prerequisites") or [],
+                        "revision_count": 0,
+                        "original_proposal": trader.get("orders", []),
+                    }
+                    if decision == "revise":
+                        revised_raw = _audit_required_json(
                             audit,
-                            "candidate_llm_review",
+                            "trader_revision",
                             analyst_profile,
                             system_prompt,
-                            {
-                                "input": input_payload,
-                                "candidate_context": candidate_context,
-                                "deterministic_action_candidates": deterministic_candidates,
-                                "quality_gate": quality_gate,
-                                "trader_proposal": trader,
-                                "risk_revision": risk_revision,
-                            },
-                            "只审查后端 deterministic_action_candidates。你可以解释、补充风险，或明确否决某个候选；"
-                            "不得新增代码、不得把 READY/WATCHLIST 提升为 ACTION、不得修改任何分数、coverage、confidence、"
-                            "decision_edge、risk_reward_ratio 或 stage。若没有需要否决的候选，原样返回 accepted_codes。"
-                            "输出 JSON：{accepted_codes:[], veto_codes:[], explanations:{code:{reason_detail:{},risk:[]}}, "
-                            "hot_sectors:[], candidate_blocked_reason:\"\"}。",
+                            {"input": input_payload, "trader_proposal": trader, "risk_revision": risk_revision},
+                            "Phase 4 交易员按风控硬性约束进行第 1 次且唯一一次修正。输出与 trader_proposal 相同的 orders JSON，"
+                            "并说明每项变化；不得突破 available_qty。",
+                            "trader_revision",
                         )
-                    except Exception as exc:  # noqa: BLE001
-                        review_raw = {
-                            "review_status": "unavailable",
-                            "review_error": str(exc)[:300],
-                        }
-                        phase_errors.append("candidate_llm_review_unavailable")
-                    candidate_raw.update(review_raw if isinstance(review_raw, dict) else {})
-                    all_codes = {
-                        normalize_code(str(item.get("code") or ""))
-                        for item in deterministic_candidates
-                    }
-                    if "accepted_codes" in candidate_raw:
-                        accepted_codes = {
-                            normalize_code(str(code))
-                            for code in candidate_raw.get("accepted_codes") or []
-                        }
-                    elif "candidates" in candidate_raw or "buy_candidates" in candidate_raw:
-                        returned = candidate_raw.get("candidates")
-                        if returned is None:
-                            returned = candidate_raw.get("buy_candidates")
-                        accepted_codes = {
-                            normalize_code(str(item.get("code") or ""))
-                            for item in returned or []
-                            if isinstance(item, dict)
-                        }
-                    else:
-                        accepted_codes = all_codes
-                    veto_codes = {
-                        normalize_code(str(code))
-                        for code in candidate_raw.get("veto_codes") or candidate_raw.get("rejected_codes") or []
-                    }
-                    accepted_codes -= veto_codes
-                    explanations = candidate_raw.get("explanations") if isinstance(candidate_raw.get("explanations"), dict) else {}
-                    candidates = []
-                    for item in deterministic_candidates:
-                        code = normalize_code(str(item.get("code") or ""))
-                        if code not in accepted_codes or code in veto_codes:
-                            continue
-                        explanation = explanations.get(code) if isinstance(explanations.get(code), dict) else {}
-                        candidates.append({**item, **explanation})
-                    candidate_raw["accepted_codes"] = [item.get("code") for item in candidates]
-                    candidate_raw["review_status"] = candidate_raw.get("review_status") or "completed"
-                else:
-                    candidates = []
-                diagnostics = candidate_context.get("diagnostics") if isinstance(candidate_context.get("diagnostics"), dict) else {}
-                action_zero_reasons = diagnostics.get("action_zero_reasons") or {}
-                deterministic_blocked_reason = candidate_context.get("reason")
-                if not deterministic_blocked_reason and action_zero_reasons:
-                    deterministic_blocked_reason = "确定性候选未通过门控：" + "、".join(
-                        f"{key}={value}" for key, value in sorted(action_zero_reasons.items())
-                    )
-                workflow["candidates"] = candidates
-                workflow["candidate_review"] = candidate_raw
-                workflow["hot_sectors"] = candidate_raw.get("hot_sectors") or market.get("sector_heat") or []
-                workflow["candidate_status"] = (
-                    candidate_raw.get("market_buy_mode")
-                    or ("ready" if candidates else "llm_veto" if deterministic_candidates else candidate_context.get("status") or "none")
-                )
-                workflow["candidate_blocked_reason"] = (
-                    candidate_raw.get("candidate_blocked_reason")
-                    or deterministic_blocked_reason
-                    or ("LLM 否决了全部 deterministic ACTION 候选。" if deterministic_candidates and not candidates else None)
-                )
-                audit.finish_stage(output=candidate_raw)
+                        revised_orders = revised_raw.get("orders") or revised_raw.get("proposals") or revised_raw.get("holdings") or []
+                        if revised_orders:
+                            trader["orders"] = revised_orders
+                            trader["revised_proposal"] = revised_raw
+                            risk_revision["revision_count"] = 1
+                            risk_revision["revised_proposal"] = revised_orders
+                        else:
+                            risk_revision["decision"] = "reject"
+                            risk_revision["reason"] = "修正后仍未返回可验证交易方案"
+                    workflow["trader_proposal"] = trader
+                    workflow["risk_revision"] = risk_revision
+                    audit.finish_stage(output=risk_revision)
 
-                audit.start_stage("portfolio_synthesis")
-                _job_stage(db, job, "portfolio_synthesis", 92)
-                final = _audit_required_json(
-                    audit,
-                    "portfolio_manager",
-                    manager_profile,
-                    system_prompt,
-                    {
-                        "input": input_payload,
-                        "evidence_pack": evidence,
-                        "quality_gate": quality_gate,
-                        "investment_debate_state": investment,
-                        "research_manager_verdict": research,
-                        "trader_proposal": trader,
-                        "risk_revision": risk_revision,
-                        "risk_debate_state": risk_debate,
-                        "buy_candidate_plan": candidate_raw,
-                        "required_schema": FINAL_SCHEMA,
-                    },
-                    "Phase 5 组合经理最终决策：基于最终刷新行情综合全部阶段，严格按 required_schema 返回 JSON。"
-                    "每个当前持仓都必须出现，today_actions 与 holdings 一致，buy_candidates 与 candidates 一致，"
-                    "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。trigger 保留报告用自然语言；"
-                    "trigger_plan 仅在存在明确机器可读阈值时输出对象，否则必须为 null。",
-                    "portfolio_synthesis",
-                )
-                if not final:
-                    final = {
-                        "data_quality_grade": quality_gate["grade"],
-                        "market_read": evidence.get("market_read") or "市场证据已采集，最终模型阶段降级。",
-                        "portfolio_conclusion": research.get("strategic_action") or "保持观察。",
-                        "final_rating": DEFAULT_PORTFOLIO_ACTION,
-                        "cash_target": "保持现状",
-                        "confidence": "low",
-                        "holdings": trader.get("orders", []),
-                        "candidates": candidates,
-                        "history_consistency": "沿用本次研究总监和风控结论。",
+                if _phase_skipped(audit, db, job, "risk_debate", 76):
+                    risk_debate = _restore_output(audit, "risk_debate_legacy", "risk_debate.output")
+                    workflow["risk_debate_state"] = risk_debate
+                else:
+                    risk_debate_raw = _audit_required_json(
+                        audit,
+                        "risk_debate_legacy",
+                        manager_profile,
+                        system_prompt,
+                        {"input": input_payload, "trader_proposal": trader, "risk_revision": risk_revision, "claim_schema": CLAIM_SCHEMA},
+                        "Phase 5 三方风控辩论：激进、中立、保守各给出一个核心 Claim。必须输出 claims，"
+                        "Claim ID 分别为 RISK-1/RISK-2/RISK-3，speaker 分别为 aggressive/neutral/conservative，"
+                        "并输出 unresolved_claim_ids、round_summaries、judge_decision。",
+                        "risk_debate",
+                    )
+                    risk_debate = _normalise_risk_debate(risk_debate_raw, snapshot["holdings"], quality_gate)
+                    workflow["risk_debate_state"] = risk_debate
+                    audit.record_claims(
+                        list(risk_debate.get("aggressive_claims") or [])
+                        + list(risk_debate.get("neutral_claims") or [])
+                        + list(risk_debate.get("conservative_claims") or []),
+                        debate_type=DebateType.RISK,
+                    )
+                    audit.finish_stage(output=risk_debate)
+
+                if _phase_skipped(audit, db, job, "final_quote_refresh", 82):
+                    restored_market = audit.restore_output("final_quote_refresh", "final_market_snapshot")
+                    if isinstance(restored_market, dict) and restored_market:
+                        market = restored_market
+                    input_payload["market"] = market
+                else:
+                    market = refresh_snapshot_quotes(market, codes)
+                    input_payload["market"] = market
+                    audit.record_artifact(ArtifactType.MARKET_SNAPSHOT, market, artifact_key="final_market_snapshot")
+                    _audit_simple_node(audit, "final_quote_refresh", output=market, artifact_type=ArtifactType.MARKET_SNAPSHOT)
+                    audit.finish_stage(output={"final_quote_refresh_status": market.get("final_quote_refresh_status") if isinstance(market, dict) else None})
+
+                if _phase_skipped(audit, db, job, "candidate_screening", 87):
+                    candidate_raw = audit.load_artifact_content("candidate_screening.output") or _restore_output(
+                        audit, "deterministic_candidate_gate", "candidate_screening.output"
+                    )
+                    candidates = [
+                        dict(item)
+                        for item in (candidate_raw.get("candidates") or candidate_raw.get("deterministic_candidates") or [])
+                        if isinstance(item, dict)
+                    ]
+                    workflow["candidates"] = candidates
+                    workflow["candidate_review"] = candidate_raw
+                    workflow["hot_sectors"] = candidate_raw.get("hot_sectors") or market.get("sector_heat") or []
+                    workflow["candidate_status"] = candidate_raw.get("review_status") or candidate_context.get("status") or "none"
+                    workflow["candidate_blocked_reason"] = candidate_raw.get("candidate_blocked_reason")
+                else:
+                    _audit_simple_node(audit, "deterministic_candidate_gate", output=candidate_context, artifact_type=ArtifactType.INPUT)
+                    deterministic_candidates = [
+                        dict(item)
+                        for item in candidate_context.get("action") or []
+                        if isinstance(item, dict) and str(item.get("stage") or "").upper() == "ACTION"
+                    ]
+                    candidate_raw: dict[str, Any] = {
+                        "deterministic_candidates": deterministic_candidates,
+                        "candidates": deterministic_candidates,
+                        "accepted_codes": [item.get("code") for item in deterministic_candidates],
+                        "review_status": "not_needed" if not deterministic_candidates else "pending",
                     }
-                audit.finish_stage(output=final)
+                    if deterministic_candidates:
+                        try:
+                            review_raw = _audit_optional_json(
+                                audit,
+                                "candidate_llm_review",
+                                analyst_profile,
+                                system_prompt,
+                                {
+                                    "input": input_payload,
+                                    "candidate_context": candidate_context,
+                                    "deterministic_action_candidates": deterministic_candidates,
+                                    "quality_gate": quality_gate,
+                                    "trader_proposal": trader,
+                                    "risk_revision": risk_revision,
+                                },
+                                "只审查后端 deterministic_action_candidates。你可以解释、补充风险，或明确否决某个候选；"
+                                "不得新增代码、不得把 READY/WATCHLIST 提升为 ACTION、不得修改任何分数、coverage、confidence、"
+                                "decision_edge、risk_reward_ratio 或 stage。若没有需要否决的候选，原样返回 accepted_codes。"
+                                "输出 JSON：{accepted_codes:[], veto_codes:[], explanations:{code:{reason_detail:{},risk:[]}}, "
+                                "hot_sectors:[], candidate_blocked_reason:\"\"}。",
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            review_raw = {
+                                "review_status": "unavailable",
+                                "review_error": str(exc)[:300],
+                            }
+                            phase_errors.append("candidate_llm_review_unavailable")
+                        candidate_raw.update(review_raw if isinstance(review_raw, dict) else {})
+                        all_codes = {
+                            normalize_code(str(item.get("code") or ""))
+                            for item in deterministic_candidates
+                        }
+                        if "accepted_codes" in candidate_raw:
+                            accepted_codes = {
+                                normalize_code(str(code))
+                                for code in candidate_raw.get("accepted_codes") or []
+                            }
+                        elif "candidates" in candidate_raw or "buy_candidates" in candidate_raw:
+                            returned = candidate_raw.get("candidates")
+                            if returned is None:
+                                returned = candidate_raw.get("buy_candidates")
+                            accepted_codes = {
+                                normalize_code(str(item.get("code") or ""))
+                                for item in returned or []
+                                if isinstance(item, dict)
+                            }
+                        else:
+                            accepted_codes = all_codes
+                        veto_codes = {
+                            normalize_code(str(code))
+                            for code in candidate_raw.get("veto_codes") or candidate_raw.get("rejected_codes") or []
+                        }
+                        accepted_codes -= veto_codes
+                        explanations = candidate_raw.get("explanations") if isinstance(candidate_raw.get("explanations"), dict) else {}
+                        candidates = []
+                        for item in deterministic_candidates:
+                            code = normalize_code(str(item.get("code") or ""))
+                            if code not in accepted_codes or code in veto_codes:
+                                continue
+                            explanation = explanations.get(code) if isinstance(explanations.get(code), dict) else {}
+                            candidates.append({**item, **explanation})
+                        candidate_raw["accepted_codes"] = [item.get("code") for item in candidates]
+                        candidate_raw["review_status"] = candidate_raw.get("review_status") or "completed"
+                    else:
+                        candidates = []
+                    diagnostics = candidate_context.get("diagnostics") if isinstance(candidate_context.get("diagnostics"), dict) else {}
+                    action_zero_reasons = diagnostics.get("action_zero_reasons") or {}
+                    deterministic_blocked_reason = candidate_context.get("reason")
+                    if not deterministic_blocked_reason and action_zero_reasons:
+                        deterministic_blocked_reason = "确定性候选未通过门控：" + "、".join(
+                            f"{key}={value}" for key, value in sorted(action_zero_reasons.items())
+                        )
+                    workflow["candidates"] = candidates
+                    workflow["candidate_review"] = candidate_raw
+                    workflow["hot_sectors"] = candidate_raw.get("hot_sectors") or market.get("sector_heat") or []
+                    workflow["candidate_status"] = (
+                        candidate_raw.get("market_buy_mode")
+                        or ("ready" if candidates else "llm_veto" if deterministic_candidates else candidate_context.get("status") or "none")
+                    )
+                    workflow["candidate_blocked_reason"] = (
+                        candidate_raw.get("candidate_blocked_reason")
+                        or deterministic_blocked_reason
+                        or ("LLM 否决了全部 deterministic ACTION 候选。" if deterministic_candidates and not candidates else None)
+                    )
+                    audit.finish_stage(output=candidate_raw)
+
+                if _phase_skipped(audit, db, job, "portfolio_synthesis", 92):
+                    final = _restore_output(audit, "portfolio_manager", "portfolio_synthesis.output")
+                else:
+                    final = _audit_required_json(
+                        audit,
+                        "portfolio_manager",
+                        manager_profile,
+                        system_prompt,
+                        {
+                            "input": input_payload,
+                            "evidence_pack": evidence,
+                            "quality_gate": quality_gate,
+                            "investment_debate_state": investment,
+                            "research_manager_verdict": research,
+                            "trader_proposal": trader,
+                            "risk_revision": risk_revision,
+                            "risk_debate_state": risk_debate,
+                            "buy_candidate_plan": candidate_raw,
+                            "required_schema": FINAL_SCHEMA,
+                        },
+                        "Phase 5 组合经理最终决策：基于最终刷新行情综合全部阶段，严格按 required_schema 返回 JSON。"
+                        "每个当前持仓都必须出现，today_actions 与 holdings 一致，buy_candidates 与 candidates 一致，"
+                        "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。trigger 保留报告用自然语言；"
+                        "trigger_plan 仅在存在明确机器可读阈值时输出对象，否则必须为 null。",
+                        "portfolio_synthesis",
+                    )
+                    if not final:
+                        final = {
+                            "data_quality_grade": quality_gate["grade"],
+                            "market_read": evidence.get("market_read") or "市场证据已采集，最终模型阶段降级。",
+                            "portfolio_conclusion": research.get("strategic_action") or "保持观察。",
+                            "final_rating": DEFAULT_PORTFOLIO_ACTION,
+                            "cash_target": "保持现状",
+                            "confidence": "low",
+                            "holdings": trader.get("orders", []),
+                            "candidates": candidates,
+                            "history_consistency": "沿用本次研究总监和风控结论。",
+                        }
+                    audit.finish_stage(output=final)
 
         workflow["phase_errors"] = phase_errors
         if final_profile is not None:
             final = _normalize_final(final, snapshot["holdings"], quality_gate.get("grade", market.get("quality_grade", "C")), workflow)
         else:
             final = _normalize_final(final, snapshot["holdings"], final.get("data_quality_grade", "F"), workflow)
-        audit.start_stage("portfolio_decision_gate")
-        audit.start_node("portfolio_decision_gate")
-        audit.start_attempt()
-        try:
-            # Rebuild from the final quote refresh so the Gate sees the same
-            # server-owned price facts as the persisted visible decision.
-            portfolio_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
-            workflow["portfolio_context"] = portfolio_context
-            final = apply_portfolio_decision_gate(final, portfolio_context=portfolio_context)
-            audit.record_artifact(ArtifactType.QUALITY_GATE, final.get("decision_gate") or {}, artifact_key="portfolio_decision_gate")
-            audit.finish_attempt()
-            audit.finish_node()
-            audit.finish_stage(output=final.get("decision_gate"))
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Portfolio Decision Gate failed for analysis job %s", job.id)
-            workflow["phase_errors"].append("portfolio_decision_gate_unavailable")
-            final = _fail_closed_portfolio_gate_result(final, exc)
-            audit.record_artifact(ArtifactType.ERROR, {"error": str(exc)[:300], "fail_closed": True}, artifact_key="portfolio_decision_gate.error")
-            audit.finish_attempt()
-            audit.finish_node()
-            audit.finish_stage(output=final.get("decision_gate"))
+        if _phase_skipped(audit, db, job, "portfolio_decision_gate", None):
+            restored_final = audit.restore_output("portfolio_decision_gate")
+            if isinstance(restored_final, dict) and restored_final:
+                final = restored_final
+        else:
+            current_final = final
+
+            def _apply_portfolio_gate() -> dict[str, Any]:
+                try:
+                    # Rebuild from the final quote refresh so the Gate sees the same
+                    # server-owned price facts as the persisted visible decision.
+                    gated_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
+                    workflow["portfolio_context"] = gated_context
+                    return apply_portfolio_decision_gate(current_final, portfolio_context=gated_context)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Portfolio Decision Gate failed for analysis job %s", job.id)
+                    workflow["phase_errors"].append("portfolio_decision_gate_unavailable")
+                    return _fail_closed_portfolio_gate_result(current_final, exc)
+
+            gate_result = audit.executor.execute(
+                "portfolio_decision_gate",
+                _apply_portfolio_gate,
+                output_artifact_type=ArtifactType.QUALITY_GATE,
+            )
+            if isinstance(gate_result.output, dict) and gate_result.output:
+                final = gate_result.output
+            audit.finish_stage(output=final.get("decision_gate") if isinstance(final, dict) else None)
         final["portfolio_engine"] = {
             **(final.get("portfolio_engine") if isinstance(final.get("portfolio_engine"), dict) else {}),
             "portfolio_context": workflow.get("portfolio_context"),
@@ -1970,9 +2066,12 @@ def run_analysis_job(job_id: int) -> None:
             if risk_claims:
                 audit.record_claims(risk_claims, debate_type=DebateType.RISK)
 
-        audit.start_stage("report_rendering")
-        _job_stage(db, job, "report_rendering", 96)
-        markdown = render_markdown(final, market, snapshot, job)
+        if _phase_skipped(audit, db, job, "report_rendering", 96):
+            markdown = str(getattr(audit._run(), "markdown_text", "") or "")
+            if not markdown:
+                markdown = render_markdown(final, market, snapshot, job)
+        else:
+            markdown = render_markdown(final, market, snapshot, job)
         structured_payload = {
             "result": final,
             "market_snapshot": market,
@@ -2009,9 +2108,10 @@ def run_analysis_job(job_id: int) -> None:
                 "phase_errors": phase_errors,
             },
         }
-        audit.record_artifact(ArtifactType.FINAL_DECISION, final, artifact_key="final_decision")
-        _audit_simple_node(audit, "report_renderer", output={"markdown_bytes": len(markdown.encode("utf-8"))}, artifact_type=ArtifactType.STRUCTURED_OUTPUT)
-        audit.finish_stage()
+        if not audit.stage_skipped:
+            audit.record_artifact(ArtifactType.FINAL_DECISION, final, artifact_key="final_decision")
+            _audit_simple_node(audit, "report_renderer", output={"markdown_bytes": len(markdown.encode("utf-8"))}, artifact_type=ArtifactType.STRUCTURED_OUTPUT)
+            audit.finish_stage()
         run = audit.finish_run(
             RunStatus.BLOCKED if run_blocked else RunStatus.COMPLETED,
             summary=final.get("portfolio_conclusion"),
@@ -2029,7 +2129,7 @@ def run_analysis_job(job_id: int) -> None:
         job.progress_percent = 100
         job.finished_at = utc_now()
         db.commit()
-        db.refresh(run)
+        run = db.query(AnalysisRun).filter(AnalysisRun.id == audit.run_id).one()
 
         # Memory is a derived maintenance fact. Capture it after the successful
         # AnalysisRun commit so a capture failure cannot roll back the report.
@@ -2151,4 +2251,9 @@ def run_analysis_job(job_id: int) -> None:
         if heartbeat is not None:
             heartbeat.stop()
         unregister_worker("analysis", job_id)
+        if audit is not None:
+            try:
+                audit.close()
+            except Exception:
+                logger.exception("Workflow audit session close failed for analysis job %s", job_id)
         db.close()

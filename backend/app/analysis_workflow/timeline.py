@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..v2_models import AnalysisRun
 from .models import AnalysisArtifact, AnalysisClaim, AnalysisNode, AnalysisNodeAttempt, AnalysisStage
+from .constants import NodeStatus
 
 _TYPE_ORDER = {
     "run_started": 0,
@@ -20,6 +21,8 @@ _TYPE_ORDER = {
     "attempt_failed": 51,
     "node_completed": 60,
     "node_failed": 61,
+    "node_skipped": 62,
+    "node_retry_waiting": 63,
     "stage_completed": 70,
     "stage_failed": 71,
     "checkpoint": 80,
@@ -70,7 +73,16 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
         item = _event(node.started_at, "node_started", stage=stage_key.get(node.stage_id), node=node.node_key, status=node.status)
         if item:
             events.append(item)
-        done_type = "node_completed" if node.status == "completed" else "node_failed" if node.status in {"failed", "blocked", "cancelled"} else None
+        if node.status in NodeStatus.SUCCESS:
+            done_type = "node_completed"
+        elif node.status == NodeStatus.SKIPPED:
+            done_type = "node_skipped"
+        elif node.status == NodeStatus.RETRY_WAITING:
+            done_type = "node_retry_waiting"
+        elif node.status in {"failed", "blocked", "cancelled"}:
+            done_type = "node_failed"
+        else:
+            done_type = None
         if done_type:
             item = _event(node.completed_at, done_type, stage=stage_key.get(node.stage_id), node=node.node_key, status=node.status, error_code=node.error_code)
             if item:

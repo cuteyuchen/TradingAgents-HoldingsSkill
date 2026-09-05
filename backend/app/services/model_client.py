@@ -88,6 +88,30 @@ class StructuredModelResult:
     transport_retry_count: int = 0
     raw_text: str | None = None
     latency_ms: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    request_id: str | None = None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_from_result(result: ModelResult) -> tuple[int | None, int | None, str | None]:
+    raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
+    usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+    meta = raw.get("usageMetadata") if isinstance(raw.get("usageMetadata"), dict) else {}
+    prompt = _int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens") or meta.get("promptTokenCount"))
+    completion = _int_or_none(
+        usage.get("completion_tokens") or usage.get("output_tokens") or meta.get("candidatesTokenCount")
+    )
+    request_id = raw.get("id") or raw.get("request_id") or raw.get("requestId")
+    return prompt, completion, str(request_id) if request_id else None
 
 
 def _api_key(provider: ModelProvider) -> str | None:
@@ -312,12 +336,16 @@ def call_model_json(
                             retry_count=attempt,
                         )
                     else:
+                        prompt_tokens, completion_tokens, request_id = _usage_from_result(result)
                         return StructuredModelResult(
                             data=parsed,
                             retry_count=attempt,
                             transport_retry_count=int(getattr(result, "retries", 0) or 0),
                             raw_text=getattr(result, "text", None),
                             latency_ms=getattr(result, "latency_ms", None),
+                            input_tokens=prompt_tokens,
+                            output_tokens=completion_tokens,
+                            request_id=request_id,
                         )
         if attempt >= attempts - 1:
             break

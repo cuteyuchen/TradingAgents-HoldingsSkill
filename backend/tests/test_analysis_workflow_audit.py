@@ -90,23 +90,21 @@ def test_analysis_run_lifecycle_fields_and_uniqueness():
         recorder.finish_attempt()
         recorder.finish_node()
         recorder.finish_stage()
-        with pytest.raises(IntegrityError):
-            recorder.start_stage("context_loading")
-        db.rollback()
-        recorder.stage_id = None
+        first_stage = recorder.start_stage("context_loading")
+        reused_stage = recorder.start_stage("context_loading")
+        assert first_stage.id == reused_stage.id
+        recorder.finish_stage()
         recorder.start_stage("market_collecting")
         recorder.start_node("market_snapshot_collector")
         recorder.start_attempt()
         recorder.finish_attempt()
-        with pytest.raises(IntegrityError):
-            recorder.start_node("market_snapshot_collector")
-        db.rollback()
-        recorder.node_id = None
-        node = db.query(AnalysisNode).filter(AnalysisNode.node_key == "market_snapshot_collector").one()
-        recorder.node_id = node.id
+        first_node = recorder.start_node("market_snapshot_collector")
+        reused_node = recorder.start_node("market_snapshot_collector")
+        assert first_node.id == reused_node.id
         recorder.start_attempt()
         first_attempt = recorder._attempt()
         assert first_attempt is not None
+        node = db.query(AnalysisNode).filter_by(analysis_run_id=run.id, node_key="market_snapshot_collector").one()
         with pytest.raises(IntegrityError):
             dup = AnalysisNodeAttempt(
                 analysis_run_id=run.id,
@@ -116,6 +114,18 @@ def test_analysis_run_lifecycle_fields_and_uniqueness():
                 status="running",
             )
             db.add(dup)
+            db.commit()
+        db.rollback()
+        with pytest.raises(IntegrityError):
+            db.add(
+                AnalysisStage(
+                    analysis_run_id=run.id,
+                    phase_key="market_collecting",
+                    phase_order=20,
+                    display_name="dup",
+                    status="pending",
+                )
+            )
             db.commit()
         db.rollback()
     finally:
@@ -293,6 +303,8 @@ def test_workflow_audit_migration_upgrade_and_downgrade(tmp_path):
         } <= tables
         columns = {row[1] for row in connection.execute("PRAGMA table_info(analysis_runs)")}
         assert {"status", "workflow_version", "last_checkpoint", "resumable"} <= columns
+        attempt_columns = {row[1] for row in connection.execute("PRAGMA table_info(analysis_node_attempts)")}
+        assert "failure_class" in attempt_columns
 
     _downgrade(backend_dir, database_path, "20260829_0020")
     with sqlite3.connect(database_path) as connection:

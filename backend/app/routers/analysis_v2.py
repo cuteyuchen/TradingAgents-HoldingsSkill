@@ -192,6 +192,7 @@ def retry_job(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    force_restart: bool = Query(False),
 ) -> AnalysisJobResponse:
     _require_ready(db)
     row = _get_job(db, current_user.id, job_id)
@@ -213,6 +214,12 @@ def retry_job(
     row.error_code = None
     row.error_message = None
     row.retry_count += 1
+    context = dict(row.context_json or {})
+    if force_restart:
+        context["force_restart"] = True
+    else:
+        context.pop("force_restart", None)
+    row.context_json = context
     db.commit()
     db.refresh(row)
     background_tasks.add_task(run_analysis_job, row.id)

@@ -54,6 +54,10 @@ class AttemptSummary(BaseModel):
     latency_ms: int | None = None
     transport_retry_count: int = 0
     structured_retry_count: int = 0
+    failure_class: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    request_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None

@@ -1,14 +1,17 @@
-"""Checkpoint / resume data contract. CORE-1 does not execute resume."""
+"""Checkpoint / resume contract used by NodeExecutor and job retry."""
 from __future__ import annotations
 
 from typing import Any
 
 from ..v2_models import AnalysisRun
-from .constants import CheckpointName, RunStatus
+from .constants import CheckpointName, NodeStatus, RunStatus
+from .failures import ResumeRejected
+from .hashing import sha256_content
 from .models import AnalysisArtifact, AnalysisNode
+from .serializers import redact_payload
 
 
-RESUMABLE_STATUSES = {RunStatus.FAILED, RunStatus.INTERRUPTED}
+RESUMABLE_STATUSES = {RunStatus.FAILED, RunStatus.INTERRUPTED, RunStatus.CANCELLED}
 
 
 def is_run_resumable(run: AnalysisRun) -> bool:
@@ -27,7 +30,7 @@ def is_run_resumable(run: AnalysisRun) -> bool:
 
 
 def resume_from_checkpoint(run: AnalysisRun, db=None) -> dict[str, Any]:
-    """Describe how CORE-2 should resume. This does not restart the runner."""
+    """Return the skip plan CORE-2 uses to resume a failed/interrupted run."""
 
     checkpoint = str(getattr(run, "last_checkpoint", "") or "")
     completed_nodes: list[str] = []
@@ -36,7 +39,7 @@ def resume_from_checkpoint(run: AnalysisRun, db=None) -> dict[str, Any]:
         completed_nodes = [
             row.node_key
             for row in db.query(AnalysisNode)
-            .filter(AnalysisNode.analysis_run_id == run.id, AnalysisNode.status == "completed")
+            .filter(AnalysisNode.analysis_run_id == run.id, AnalysisNode.status.in_(list(NodeStatus.SUCCESS)))
             .order_by(AnalysisNode.id.asc())
             .all()
         ]
@@ -62,6 +65,30 @@ def resume_from_checkpoint(run: AnalysisRun, db=None) -> dict[str, Any]:
         "completed_nodes": payload.get("completed_nodes") or completed_nodes,
         "input_hashes": payload.get("input_hashes") or {},
         "output_hashes": payload.get("output_hashes") or {},
-        "executor": None,
-        "note": "V3-CORE-1 defines the resume contract only; CORE-2 will attach a node executor.",
+        "executor": "NodeExecutor",
+        "note": "Skip completed nodes, keep historical attempts, and continue the failed node with a new Attempt.",
     }
+
+
+def hash_input(content: Any) -> str:
+    return sha256_content(redact_payload(content))
+
+
+def validate_resume_inputs(stored_hashes: dict[str, Any] | None, current_hashes: dict[str, str]) -> None:
+    """Refuse resume when a previously recorded critical input hash changed."""
+
+    mismatches: dict[str, dict[str, str]] = {}
+    for key, current in current_hashes.items():
+        previous = (stored_hashes or {}).get(key)
+        if not previous:
+            continue
+        if str(previous) != str(current):
+            mismatches[key] = {"stored": str(previous), "current": str(current)}
+    if mismatches:
+        raise ResumeRejected("resume_input_hash_mismatch", mismatches=mismatches)
+
+
+def should_skip_node(node_key: str, completed_nodes: list[str], *, force_restart: bool = False) -> bool:
+    if force_restart:
+        return False
+    return node_key in set(completed_nodes or [])

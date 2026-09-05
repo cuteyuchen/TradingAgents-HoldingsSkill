@@ -180,6 +180,12 @@ def _apply_lightweight_migrations() -> None:
                 if column_name not in run_columns:
                     conn.execute(text(statement))
 
+    if inspector.has_table("analysis_node_attempts"):
+        attempt_columns = {c["name"] for c in inspector.get_columns("analysis_node_attempts")}
+        if "failure_class" not in attempt_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE analysis_node_attempts ADD COLUMN failure_class VARCHAR(32)"))
+
     if inspector.has_table("daily_review_runs"):
         review_columns = {c["name"] for c in inspector.get_columns("daily_review_runs")}
         with engine.begin() as conn:

@@ -1,9 +1,4 @@
-"""V3-CORE-1 analysis workflow audit foundation.
-
-This package persists AnalysisRun/Stage/Node/Attempt/Artifact/Claim records so
-later CORE-2 work can add a real node executor, retry policy, and resume.
-It does not replace the legacy sequential Skill runner.
-"""
+"""V3 analysis workflow audit and durable node executor."""
 
 from . import models as models
 from .constants import (
@@ -12,11 +7,15 @@ from .constants import (
     CheckpointName,
     ClaimStatus,
     Criticality,
+    FailureClass,
     NodeStatus,
     RunStatus,
     StageStatus,
 )
-from .resume import is_run_resumable, resume_from_checkpoint
+from .executor import NodeExecuteResult, NodeExecutor
+from .failures import ResumeRejected, classify_failure
+from .policy import NodeRetryPolicy
+from .resume import is_run_resumable, resume_from_checkpoint, validate_resume_inputs
 from .timeline import build_analysis_timeline
 
 __all__ = [
@@ -25,10 +24,17 @@ __all__ = [
     "CheckpointName",
     "ClaimStatus",
     "Criticality",
+    "FailureClass",
+    "NodeExecuteResult",
+    "NodeExecutor",
+    "NodeRetryPolicy",
     "NodeStatus",
+    "ResumeRejected",
     "RunStatus",
     "StageStatus",
     "build_analysis_timeline",
+    "classify_failure",
     "is_run_resumable",
     "resume_from_checkpoint",
+    "validate_resume_inputs",
 ]

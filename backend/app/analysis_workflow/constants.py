@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-WORKFLOW_VERSION = "v3-core-1"
+WORKFLOW_VERSION = "v3-core-2"
+DEFAULT_NODE_MAX_ATTEMPTS = 3
 
 
 class RunStatus:
@@ -37,11 +38,15 @@ class StageStatus:
 class NodeStatus:
     PENDING = "pending"
     RUNNING = "running"
+    SUCCEEDED = "succeeded"
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
+    RETRY_WAITING = "retry_waiting"
+
+    SUCCESS = (SUCCEEDED, COMPLETED)
 
 
 class AttemptStatus:
@@ -49,6 +54,17 @@ class AttemptStatus:
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    RETRY_WAITING = "retry_waiting"
+
+
+class FailureClass:
+    TRANSIENT = "transient"
+    STRUCTURED_OUTPUT = "structured_output"
+    CONTEXT_OVERFLOW = "context_overflow"
+    NON_RETRYABLE = "non_retryable"
+
+    RETRYABLE = (TRANSIENT, STRUCTURED_OUTPUT, CONTEXT_OVERFLOW)
+    CONTEXT_MODES = ("full", "compressed", "minimal")
 
 
 class Criticality:
@@ -143,6 +159,7 @@ def _node(
         retryable=retryable,
         resumable=resumable,
         llm=llm,
+        max_attempts=DEFAULT_NODE_MAX_ATTEMPTS if retryable else 1,
     )
 
 

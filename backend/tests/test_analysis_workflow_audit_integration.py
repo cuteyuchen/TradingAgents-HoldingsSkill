@@ -349,3 +349,88 @@ def test_user_cannot_read_another_users_workflow(monkeypatch):
     ):
         response = client.get(path, headers=headers_b)
         assert response.status_code == 404, path
+
+
+def test_job_retry_resumes_same_run_without_replaying_completed_nodes(monkeypatch):
+    monkeypatch.setattr(analysis_engine, "collect_market_snapshot", _market_ok)
+    monkeypatch.setattr(analysis_engine, "refresh_snapshot_quotes", lambda market, codes: market)
+    calls: list[str] = []
+
+    def fake(_profile, _system, _payload, _instruction, phase_name):
+        calls.append(phase_name)
+        if phase_name == "research_verdict" and calls.count("research_verdict") == 1:
+            raise RuntimeError("research_manager_failed")
+        return _phase_payload(phase_name)
+
+    monkeypatch.setattr(analysis_engine, "_structured_call_json", fake)
+    client = TestClient(app)
+    headers, snapshot_id = _register_and_seed(client)
+    created = client.post(
+        "/api/v2/analysis/jobs",
+        headers=headers,
+        json={"snapshot_id": snapshot_id, "mode": "deep", "notify": False},
+    )
+    assert created.status_code == 202, created.text
+    job_id = created.json()["id"]
+    failed = client.get(f"/api/v2/analysis/jobs/{job_id}", headers=headers)
+    assert failed.json()["status"] == "failed"
+    with SessionLocal() as db:
+        run = db.query(AnalysisRun).filter(AnalysisRun.job_id == job_id).one()
+        run_id = run.id
+        first_attempts = db.query(AnalysisNodeAttempt).filter_by(analysis_run_id=run_id, node_id=db.query(AnalysisNode).filter_by(analysis_run_id=run_id, node_key="research_manager").one().id).count()
+        analyst_attempts = db.query(AnalysisNodeAttempt).filter_by(node_id=db.query(AnalysisNode).filter_by(analysis_run_id=run_id, node_key="analyst_team_legacy").one().id).count()
+    retried = client.post(f"/api/v2/analysis/jobs/{job_id}/retry", headers=headers)
+    assert retried.status_code == 202, retried.text
+    job = client.get(f"/api/v2/analysis/jobs/{job_id}", headers=headers)
+    assert job.json()["status"] == "succeeded"
+    assert job.json()["run_id"] == run_id
+    assert calls.count("analyst_evidence") == 1
+    assert calls.count("research_verdict") == 2
+    with SessionLocal() as db:
+        run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).one()
+        assert run.status == RunStatus.COMPLETED
+        research = db.query(AnalysisNode).filter_by(analysis_run_id=run_id, node_key="research_manager").one()
+        attempts = db.query(AnalysisNodeAttempt).filter_by(node_id=research.id).order_by(AnalysisNodeAttempt.attempt_no.asc()).all()
+        assert [item.attempt_no for item in attempts] == [1, 2]
+        assert attempts[0].status == "failed"
+        assert attempts[1].status == "completed"
+        assert first_attempts == 1
+        analyst = db.query(AnalysisNode).filter_by(analysis_run_id=run_id, node_key="analyst_team_legacy").one()
+        assert db.query(AnalysisNodeAttempt).filter_by(node_id=analyst.id).count() == analyst_attempts
+        assert db.query(AnalysisStage).filter_by(analysis_run_id=run_id, phase_key="analysts_running").count() == 1
+
+
+def test_job_force_restart_replays_from_start_on_same_run(monkeypatch):
+    monkeypatch.setattr(analysis_engine, "collect_market_snapshot", _market_ok)
+    monkeypatch.setattr(analysis_engine, "refresh_snapshot_quotes", lambda market, codes: market)
+    calls: list[str] = []
+
+    def fake(_profile, _system, _payload, _instruction, phase_name):
+        calls.append(phase_name)
+        if phase_name == "research_verdict" and calls.count("research_verdict") == 1:
+            raise RuntimeError("research_manager_failed")
+        return _phase_payload(phase_name)
+
+    monkeypatch.setattr(analysis_engine, "_structured_call_json", fake)
+    client = TestClient(app)
+    headers, snapshot_id = _register_and_seed(client)
+    created = client.post(
+        "/api/v2/analysis/jobs",
+        headers=headers,
+        json={"snapshot_id": snapshot_id, "mode": "deep", "notify": False},
+    )
+    job_id = created.json()["id"]
+    assert client.get(f"/api/v2/analysis/jobs/{job_id}", headers=headers).json()["status"] == "failed"
+    with SessionLocal() as db:
+        run_id = db.query(AnalysisRun).filter(AnalysisRun.job_id == job_id).one().id
+    retried = client.post(f"/api/v2/analysis/jobs/{job_id}/retry?force_restart=true", headers=headers)
+    assert retried.status_code == 202, retried.text
+    job = client.get(f"/api/v2/analysis/jobs/{job_id}", headers=headers)
+    assert job.json()["status"] == "succeeded"
+    assert job.json()["run_id"] == run_id
+    assert calls.count("analyst_evidence") == 2
+    assert calls.count("research_verdict") == 2
+    with SessionLocal() as db:
+        analyst = db.query(AnalysisNode).filter_by(analysis_run_id=run_id, node_key="analyst_team_legacy").one()
+        assert analyst.attempt_count == 2
+        assert db.query(AnalysisNodeAttempt).filter_by(node_id=analyst.id).count() == 2

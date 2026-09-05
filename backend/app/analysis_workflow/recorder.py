@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..clock import utc_now
@@ -63,8 +64,30 @@ def _claim_status(value: Any, default: str = ClaimStatus.OPEN) -> str:
 class WorkflowAuditRecorder:
     """Commit-on-write audit adapter. Rollback of later work cannot erase it."""
 
-    def __init__(self, db: Session) -> None:
-        self.db = db
+    def __init__(
+        self,
+        db: Session | None = None,
+        *,
+        isolated: bool | None = None,
+        business_db: Session | None = None,
+    ) -> None:
+        from .session import open_audit_session
+
+        if db is None or isolated is True:
+            self.db = open_audit_session()
+            self._owns_session = True
+            self.isolated = True
+            self._business_db = business_db
+            try:
+                self.db.execute(text("PRAGMA busy_timeout=15000"))
+                self.db.commit()
+            except Exception:
+                pass
+        else:
+            self.db = db
+            self._owns_session = False
+            self.isolated = False
+            self._business_db = None
         self.run_id: int | None = None
         self.stage_id: int | None = None
         self.node_id: int | None = None
@@ -73,8 +96,43 @@ class WorkflowAuditRecorder:
         self._completed_nodes: list[str] = []
         self._input_hashes: dict[str, str] = {}
         self._output_hashes: dict[str, str] = {}
+        self.resume_mode = False
+        self.force_restart = False
+        self.stage_skipped = False
+        self.node_skipped = False
+
+    def close(self) -> None:
+        if self._owns_session:
+            self.db.close()
+            self._owns_session = False
+
+    @property
+    def executor(self):
+        if getattr(self, "_executor", None) is None:
+            from .executor import NodeExecutor
+
+            self._executor = NodeExecutor(self)
+        return self._executor
+
+    def _prepare_write(self) -> None:
+        """Release a read-only business transaction so SQLite can commit audit rows.
+
+        Never commits business objects. Dirty business work is left for the
+        caller so audit writes cannot accidentally persist analysis job state.
+        """
+
+        if not self.isolated:
+            return
+        business = self._business_db
+        if business is None or business is self.db:
+            return
+        if business.dirty or business.new or business.deleted:
+            return
+        if business.in_transaction():
+            business.rollback()
 
     def _commit(self) -> None:
+        self._prepare_write()
         self.db.commit()
 
     def _run(self) -> AnalysisRun:
@@ -101,11 +159,7 @@ class WorkflowAuditRecorder:
         return self.db.query(AnalysisNodeAttempt).filter(AnalysisNodeAttempt.id == self.attempt_id).first()
 
     def _purge_children(self, run_id: int) -> None:
-        self.db.query(AnalysisClaim).filter(AnalysisClaim.analysis_run_id == run_id).delete(synchronize_session=False)
-        self.db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_run_id == run_id).delete(synchronize_session=False)
-        self.db.query(AnalysisNodeAttempt).filter(AnalysisNodeAttempt.analysis_run_id == run_id).delete(synchronize_session=False)
-        self.db.query(AnalysisNode).filter(AnalysisNode.analysis_run_id == run_id).delete(synchronize_session=False)
-        self.db.query(AnalysisStage).filter(AnalysisStage.analysis_run_id == run_id).delete(synchronize_session=False)
+        raise RuntimeError("v3-core-2 forbids purging workflow audit history")
 
     def start_run(
         self,
@@ -116,34 +170,36 @@ class WorkflowAuditRecorder:
         parameter_lineage: dict[str, Any] | None = None,
         model_profile_id: int | None = None,
         market_snapshot_at=None,
+        resume: bool = False,
+        force_restart: bool = False,
     ) -> AnalysisRun:
         lineage = parameter_lineage or {}
         existing = self.db.query(AnalysisRun).filter(AnalysisRun.job_id == job.id).first()
         now = _now()
+        self.resume_mode = bool(resume) and not force_restart
+        self.force_restart = bool(force_restart)
         if existing is not None:
-            self._purge_children(existing.id)
+            if existing.status == RunStatus.RUNNING:
+                existing.status = RunStatus.INTERRUPTED
+                existing.interrupted_at = now
+                existing.resumable = bool(existing.last_checkpoint)
             existing.status = RunStatus.RUNNING
-            existing.started_at = now
+            if self.resume_mode:
+                existing.started_at = existing.started_at or now
+            else:
+                existing.started_at = now
             existing.completed_at = None
-            existing.interrupted_at = None
-            existing.last_checkpoint = None
-            existing.resumable = False
+            if not self.resume_mode:
+                existing.interrupted_at = None
             existing.workflow_version = WORKFLOW_VERSION
             existing.skill_version = skill_version
             existing.analysis_mode = analysis_mode
             existing.market_snapshot_at = market_snapshot_at
-            existing.failed_stage = None
-            existing.failed_node = None
             existing.error_code = None
             existing.error_message = None
-            existing.last_artifact_id = None
-            existing.summary = None
-            existing.final_rating = None
-            existing.cash_target = None
-            existing.confidence = None
-            existing.data_quality_grade = None
-            existing.structured_result_json = {}
-            existing.markdown_text = ""
+            if not self.resume_mode:
+                existing.failed_stage = None
+                existing.failed_node = None
             existing.model_profile_id = model_profile_id
             if lineage:
                 existing.parameter_set_version_id = lineage.get("parameter_set_version_id")
@@ -172,6 +228,7 @@ class WorkflowAuditRecorder:
                 governance_lineage_json=lineage.get("governance_lineage_json"),
             )
             self.db.add(run)
+            self.resume_mode = False
         self._commit()
         self.db.refresh(run)
         self.run_id = run.id
@@ -182,10 +239,62 @@ class WorkflowAuditRecorder:
         self._completed_nodes = []
         self._input_hashes = {}
         self._output_hashes = {}
+        if self.resume_mode:
+            self._restore_checkpoint_state(run)
         return run
+
+    def _restore_checkpoint_state(self, run: AnalysisRun) -> None:
+        checkpoint = str(getattr(run, "last_checkpoint", "") or "")
+        if not checkpoint:
+            return
+        artifact = (
+            self.db.query(AnalysisArtifact)
+            .filter(
+                AnalysisArtifact.analysis_run_id == run.id,
+                AnalysisArtifact.artifact_type == ArtifactType.CHECKPOINT,
+                AnalysisArtifact.artifact_key == f"checkpoint.{checkpoint}",
+            )
+            .order_by(AnalysisArtifact.id.desc())
+            .first()
+        )
+        payload = artifact.content_json if artifact is not None and isinstance(artifact.content_json, dict) else {}
+        self._completed_nodes = list(payload.get("completed_nodes") or [])
+        self._input_hashes = dict(payload.get("input_hashes") or {})
+        self._output_hashes = dict(payload.get("output_hashes") or {})
+        if not self._completed_nodes:
+            completed = (
+                self.db.query(AnalysisNode)
+                .filter(AnalysisNode.analysis_run_id == run.id, AnalysisNode.status.in_(list(NodeStatus.SUCCESS)))
+                .order_by(AnalysisNode.id.asc())
+                .all()
+            )
+            self._completed_nodes = [row.node_key for row in completed]
 
     def start_stage(self, phase_key: str, *, metadata: dict[str, Any] | None = None) -> AnalysisStage:
         spec = phase_spec(phase_key)
+        self.stage_skipped = False
+        existing = (
+            self.db.query(AnalysisStage)
+            .filter(AnalysisStage.analysis_run_id == self._run().id, AnalysisStage.phase_key == spec.phase_key)
+            .first()
+        )
+        if existing is not None:
+            if self.resume_mode and existing.status == StageStatus.COMPLETED and not self.force_restart:
+                self.stage_id = existing.id
+                self.stage_skipped = True
+                return existing
+            existing.status = StageStatus.RUNNING
+            existing.started_at = existing.started_at or _now()
+            existing.completed_at = None
+            existing.error_code = None
+            existing.error_message = None
+            if metadata:
+                current = dict(existing.metadata_json or {})
+                current.update(redact_payload(metadata))
+                existing.metadata_json = current
+            self._commit()
+            self.stage_id = existing.id
+            return existing
         stage = AnalysisStage(
             analysis_run_id=self._run().id,
             phase_key=spec.phase_key,
@@ -206,6 +315,9 @@ class WorkflowAuditRecorder:
         stage = self._stage()
         if stage is None:
             return None
+        if self.stage_skipped and stage.status == StageStatus.COMPLETED:
+            self.stage_id = None
+            return stage
         if output is not None:
             artifact = self.record_artifact(ArtifactType.STRUCTURED_OUTPUT, output, artifact_key=f"{stage.phase_key}.output")
             stage.output_hash = artifact.sha256
@@ -247,6 +359,32 @@ class WorkflowAuditRecorder:
         if self.stage_id is None:
             raise RuntimeError("workflow_stage_not_started")
         spec = node_spec(node_key)
+        self.node_skipped = False
+        existing = (
+            self.db.query(AnalysisNode)
+            .filter(AnalysisNode.analysis_run_id == self._run().id, AnalysisNode.node_key == spec.node_key)
+            .first()
+        )
+        if existing is not None:
+            if self.resume_mode and existing.status in NodeStatus.SUCCESS and not self.force_restart:
+                self.node_id = existing.id
+                self.node_skipped = True
+                return existing
+            existing.stage_id = self.stage_id
+            existing.status = NodeStatus.RUNNING
+            existing.started_at = existing.started_at or _now()
+            existing.completed_at = None
+            existing.error_code = None
+            existing.error_message = None
+            existing.max_attempts = spec.max_attempts
+            existing.retryable = spec.retryable
+            if metadata:
+                current = dict(existing.metadata_json or {})
+                current.update(redact_payload(metadata))
+                existing.metadata_json = current
+            self._commit()
+            self.node_id = existing.id
+            return existing
         node = AnalysisNode(
             analysis_run_id=self._run().id,
             stage_id=self.stage_id,
@@ -272,13 +410,17 @@ class WorkflowAuditRecorder:
         node = self._node()
         if node is None:
             return None
+        if self.node_skipped and node.status in NodeStatus.SUCCESS:
+            self.node_id = None
+            return node
         if output is not None:
             artifact = self.record_artifact(ArtifactType.STRUCTURED_OUTPUT, output, artifact_key=f"{node.node_key}.output")
             node.output_artifact_id = artifact.id
             self._output_hashes[node.node_key] = artifact.sha256
-        node.status = NodeStatus.COMPLETED
+        node.status = NodeStatus.SUCCEEDED
         node.completed_at = _now()
-        self._completed_nodes.append(node.node_key)
+        if node.node_key not in self._completed_nodes:
+            self._completed_nodes.append(node.node_key)
         self._commit()
         self.node_id = None
         return node
@@ -345,6 +487,9 @@ class WorkflowAuditRecorder:
         latency_ms: int | None = None,
         input_hash: str | None = None,
         output_hash: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        request_id: str | None = None,
     ) -> AnalysisNodeAttempt | None:
         attempt = self._attempt()
         if attempt is None:
@@ -362,6 +507,12 @@ class WorkflowAuditRecorder:
         if structured_retry_count is not None:
             attempt.structured_retry_count = int(structured_retry_count)
         attempt.latency_ms = latency_ms
+        if input_tokens is not None:
+            attempt.input_tokens = int(input_tokens)
+        if output_tokens is not None:
+            attempt.output_tokens = int(output_tokens)
+        if request_id:
+            attempt.request_id = str(request_id)[:128]
         attempt.status = AttemptStatus.COMPLETED
         attempt.completed_at = _now()
         started = _as_unaware(attempt.started_at)
@@ -379,6 +530,8 @@ class WorkflowAuditRecorder:
         retryable: bool = False,
         transport_retry_count: int | None = None,
         structured_retry_count: int | None = None,
+        failure_class: str | None = None,
+        waiting_retry: bool = False,
     ) -> AnalysisNodeAttempt | None:
         attempt = self._attempt()
         if attempt is None:
@@ -389,15 +542,26 @@ class WorkflowAuditRecorder:
         attempt.error_code = _error_code(exc)
         attempt.error_message = _error_message(exc)
         attempt.retryable = retryable
+        if failure_class:
+            attempt.failure_class = failure_class
         if transport_retry_count is not None:
             attempt.transport_retry_count = int(transport_retry_count)
         if structured_retry_count is not None:
             attempt.structured_retry_count = int(structured_retry_count)
         self.record_artifact(
             ArtifactType.ERROR,
-            {"error_type": attempt.error_type, "error_code": attempt.error_code, "error_message": attempt.error_message},
+            {
+                "error_type": attempt.error_type,
+                "error_code": attempt.error_code,
+                "error_message": attempt.error_message,
+                "failure_class": failure_class,
+            },
             artifact_key=f"attempt.{attempt.attempt_no}.error",
         )
+        if waiting_retry:
+            node = self._node()
+            if node is not None:
+                node.status = NodeStatus.RETRY_WAITING
         self._commit()
         self.attempt_id = None
         return attempt
@@ -547,8 +711,8 @@ class WorkflowAuditRecorder:
             run.model_profile_id = model_profile_id
         if status in {RunStatus.COMPLETED, RunStatus.BLOCKED}:
             run.resumable = False
-        elif status in {RunStatus.FAILED, RunStatus.INTERRUPTED}:
-            run.resumable = bool(run.last_checkpoint)
+        elif status in {RunStatus.FAILED, RunStatus.INTERRUPTED, RunStatus.CANCELLED}:
+            run.resumable = bool(run.last_checkpoint) and run.last_checkpoint != CheckpointName.FINALIZED
         else:
             run.resumable = False
         if error is not None:
@@ -596,3 +760,56 @@ class WorkflowAuditRecorder:
             self._commit()
             return artifact.sha256
         return digest
+
+    def node_by_key(self, node_key: str) -> AnalysisNode | None:
+        if self.run_id is None:
+            return None
+        return (
+            self.db.query(AnalysisNode)
+            .filter(AnalysisNode.analysis_run_id == self.run_id, AnalysisNode.node_key == node_key)
+            .first()
+        )
+
+    def load_node_output(self, node_key: str) -> Any:
+        node = self.node_by_key(node_key)
+        if node is None or node.output_artifact_id is None:
+            return None
+        artifact = self.db.query(AnalysisArtifact).filter(AnalysisArtifact.id == node.output_artifact_id).first()
+        if artifact is None:
+            return None
+        if artifact.content_json is not None:
+            return artifact.content_json
+        return artifact.content_text
+
+    def load_artifact_content(self, artifact_key: str) -> Any:
+        if self.run_id is None:
+            return None
+        artifact = (
+            self.db.query(AnalysisArtifact)
+            .filter(AnalysisArtifact.analysis_run_id == self.run_id, AnalysisArtifact.artifact_key == artifact_key)
+            .order_by(AnalysisArtifact.id.desc())
+            .first()
+        )
+        if artifact is None:
+            return None
+        if artifact.content_json is not None:
+            return artifact.content_json
+        return artifact.content_text
+
+    def restore_output(self, node_key: str, *artifact_keys: str) -> Any:
+        output = self.load_node_output(node_key)
+        if output is not None:
+            return output
+        for key in artifact_keys:
+            output = self.load_artifact_content(key)
+            if output is not None:
+                return output
+        return None
+
+    def set_market_snapshot_at(self, value) -> None:
+        run = self._run()
+        run.market_snapshot_at = value
+        self._commit()
+
+    def input_hashes(self) -> dict[str, str]:
+        return dict(self._input_hashes)

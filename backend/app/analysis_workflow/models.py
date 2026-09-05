@@ -106,6 +106,7 @@ class AnalysisNodeAttempt(Base):
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
     retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    failure_class: Mapped[str | None] = mapped_column(String(32))
     raw_output_artifact_id: Mapped[int | None] = mapped_column(Integer, index=True)
     structured_output_artifact_id: Mapped[int | None] = mapped_column(Integer, index=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSON)
