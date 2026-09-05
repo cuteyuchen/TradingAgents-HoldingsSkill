@@ -1,0 +1,815 @@
+"""Incremental workflow audit persistence used by the legacy analysis runner."""
+from __future__ import annotations
+
+from typing import Any, Iterable
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from ..clock import utc_now
+from ..system.logging import redact_text
+from ..v2_models import AnalysisJob, AnalysisRun
+from .artifacts import build_artifact
+from .constants import (
+    WORKFLOW_VERSION,
+    ArtifactType,
+    AttemptStatus,
+    CheckpointName,
+    ClaimStatus,
+    DebateType,
+    NodeStatus,
+    RunStatus,
+    StageStatus,
+    node_spec,
+    phase_spec,
+)
+from .hashing import sha256_content
+from .models import AnalysisArtifact, AnalysisClaim, AnalysisNode, AnalysisNodeAttempt, AnalysisStage
+from .serializers import redact_payload
+
+
+def _now():
+    value = utc_now()
+    return value.replace(tzinfo=None) if value.tzinfo is not None else value
+
+
+def _as_unaware(value):
+    if value is None:
+        return None
+    return value.replace(tzinfo=None) if getattr(value, "tzinfo", None) is not None else value
+
+
+def _error_code(exc: BaseException) -> str:
+    return str(getattr(exc, "code", None) or type(exc).__name__)[:64]
+
+
+def _error_message(exc: BaseException) -> str:
+    return redact_text(str(exc)[:3000])
+
+
+def _claim_status(value: Any, default: str = ClaimStatus.OPEN) -> str:
+    status = str(value or default).lower()
+    allowed = {
+        ClaimStatus.OPEN,
+        ClaimStatus.ADDRESSED,
+        ClaimStatus.RESOLVED,
+        ClaimStatus.UNRESOLVED,
+        ClaimStatus.ACCEPTED,
+        ClaimStatus.REJECTED,
+        ClaimStatus.PARTIALLY_ACCEPTED,
+    }
+    return status if status in allowed else default
+
+
+class WorkflowAuditRecorder:
+    """Commit-on-write audit adapter. Rollback of later work cannot erase it."""
+
+    def __init__(
+        self,
+        db: Session | None = None,
+        *,
+        isolated: bool | None = None,
+        business_db: Session | None = None,
+    ) -> None:
+        from .session import open_audit_session
+
+        if db is None or isolated is True:
+            self.db = open_audit_session()
+            self._owns_session = True
+            self.isolated = True
+            self._business_db = business_db
+            try:
+                self.db.execute(text("PRAGMA busy_timeout=15000"))
+                self.db.commit()
+            except Exception:
+                pass
+        else:
+            self.db = db
+            self._owns_session = False
+            self.isolated = False
+            self._business_db = None
+        self.run_id: int | None = None
+        self.stage_id: int | None = None
+        self.node_id: int | None = None
+        self.attempt_id: int | None = None
+        self.last_artifact_id: int | None = None
+        self._completed_nodes: list[str] = []
+        self._input_hashes: dict[str, str] = {}
+        self._output_hashes: dict[str, str] = {}
+        self.resume_mode = False
+        self.force_restart = False
+        self.stage_skipped = False
+        self.node_skipped = False
+
+    def close(self) -> None:
+        if self._owns_session:
+            self.db.close()
+            self._owns_session = False
+
+    @property
+    def executor(self):
+        if getattr(self, "_executor", None) is None:
+            from .executor import NodeExecutor
+
+            self._executor = NodeExecutor(self)
+        return self._executor
+
+    def _prepare_write(self) -> None:
+        """Release a read-only business transaction so SQLite can commit audit rows.
+
+        Never commits business objects. Dirty business work is left for the
+        caller so audit writes cannot accidentally persist analysis job state.
+        """
+
+        if not self.isolated:
+            return
+        business = self._business_db
+        if business is None or business is self.db:
+            return
+        if business.dirty or business.new or business.deleted:
+            return
+        if business.in_transaction():
+            business.rollback()
+
+    def _commit(self) -> None:
+        self._prepare_write()
+        self.db.commit()
+
+    def _run(self) -> AnalysisRun:
+        if self.run_id is None:
+            raise RuntimeError("workflow_run_not_started")
+        run = self.db.query(AnalysisRun).filter(AnalysisRun.id == self.run_id).first()
+        if run is None:
+            raise RuntimeError("workflow_run_missing")
+        return run
+
+    def _stage(self) -> AnalysisStage | None:
+        if self.stage_id is None:
+            return None
+        return self.db.query(AnalysisStage).filter(AnalysisStage.id == self.stage_id).first()
+
+    def _node(self) -> AnalysisNode | None:
+        if self.node_id is None:
+            return None
+        return self.db.query(AnalysisNode).filter(AnalysisNode.id == self.node_id).first()
+
+    def _attempt(self) -> AnalysisNodeAttempt | None:
+        if self.attempt_id is None:
+            return None
+        return self.db.query(AnalysisNodeAttempt).filter(AnalysisNodeAttempt.id == self.attempt_id).first()
+
+    def _purge_children(self, run_id: int) -> None:
+        raise RuntimeError("v3-core-2 forbids purging workflow audit history")
+
+    def start_run(
+        self,
+        job: AnalysisJob,
+        *,
+        analysis_mode: str,
+        skill_version: str | None = None,
+        parameter_lineage: dict[str, Any] | None = None,
+        model_profile_id: int | None = None,
+        market_snapshot_at=None,
+        resume: bool = False,
+        force_restart: bool = False,
+    ) -> AnalysisRun:
+        lineage = parameter_lineage or {}
+        existing = self.db.query(AnalysisRun).filter(AnalysisRun.job_id == job.id).first()
+        now = _now()
+        self.resume_mode = bool(resume) and not force_restart
+        self.force_restart = bool(force_restart)
+        if existing is not None:
+            if existing.status == RunStatus.RUNNING:
+                existing.status = RunStatus.INTERRUPTED
+                existing.interrupted_at = now
+                existing.resumable = bool(existing.last_checkpoint)
+            existing.status = RunStatus.RUNNING
+            if self.resume_mode:
+                existing.started_at = existing.started_at or now
+            else:
+                existing.started_at = now
+            existing.completed_at = None
+            if not self.resume_mode:
+                existing.interrupted_at = None
+            existing.workflow_version = WORKFLOW_VERSION
+            existing.skill_version = skill_version
+            existing.analysis_mode = analysis_mode
+            existing.market_snapshot_at = market_snapshot_at
+            existing.error_code = None
+            existing.error_message = None
+            if not self.resume_mode:
+                existing.failed_stage = None
+                existing.failed_node = None
+            existing.model_profile_id = model_profile_id
+            if lineage:
+                existing.parameter_set_version_id = lineage.get("parameter_set_version_id")
+                existing.parameter_set_version = lineage.get("parameter_set_version")
+                existing.parameter_set_hash = lineage.get("parameter_set_hash")
+                existing.governance_lineage_json = lineage.get("governance_lineage_json")
+            run = existing
+        else:
+            run = AnalysisRun(
+                job_id=job.id,
+                user_id=job.user_id,
+                portfolio_snapshot_id=job.snapshot_id,
+                model_profile_id=model_profile_id,
+                markdown_text="",
+                structured_result_json={},
+                status=RunStatus.RUNNING,
+                started_at=now,
+                workflow_version=WORKFLOW_VERSION,
+                skill_version=skill_version,
+                analysis_mode=analysis_mode,
+                market_snapshot_at=market_snapshot_at,
+                resumable=False,
+                parameter_set_version_id=lineage.get("parameter_set_version_id"),
+                parameter_set_version=lineage.get("parameter_set_version"),
+                parameter_set_hash=lineage.get("parameter_set_hash"),
+                governance_lineage_json=lineage.get("governance_lineage_json"),
+            )
+            self.db.add(run)
+            self.resume_mode = False
+        self._commit()
+        self.db.refresh(run)
+        self.run_id = run.id
+        self.stage_id = None
+        self.node_id = None
+        self.attempt_id = None
+        self.last_artifact_id = None
+        self._completed_nodes = []
+        self._input_hashes = {}
+        self._output_hashes = {}
+        if self.resume_mode:
+            self._restore_checkpoint_state(run)
+        return run
+
+    def _restore_checkpoint_state(self, run: AnalysisRun) -> None:
+        checkpoint = str(getattr(run, "last_checkpoint", "") or "")
+        if not checkpoint:
+            return
+        artifact = (
+            self.db.query(AnalysisArtifact)
+            .filter(
+                AnalysisArtifact.analysis_run_id == run.id,
+                AnalysisArtifact.artifact_type == ArtifactType.CHECKPOINT,
+                AnalysisArtifact.artifact_key == f"checkpoint.{checkpoint}",
+            )
+            .order_by(AnalysisArtifact.id.desc())
+            .first()
+        )
+        payload = artifact.content_json if artifact is not None and isinstance(artifact.content_json, dict) else {}
+        self._completed_nodes = list(payload.get("completed_nodes") or [])
+        self._input_hashes = dict(payload.get("input_hashes") or {})
+        self._output_hashes = dict(payload.get("output_hashes") or {})
+        if not self._completed_nodes:
+            completed = (
+                self.db.query(AnalysisNode)
+                .filter(AnalysisNode.analysis_run_id == run.id, AnalysisNode.status.in_(list(NodeStatus.SUCCESS)))
+                .order_by(AnalysisNode.id.asc())
+                .all()
+            )
+            self._completed_nodes = [row.node_key for row in completed]
+
+    def start_stage(self, phase_key: str, *, metadata: dict[str, Any] | None = None) -> AnalysisStage:
+        spec = phase_spec(phase_key)
+        self.stage_skipped = False
+        existing = (
+            self.db.query(AnalysisStage)
+            .filter(AnalysisStage.analysis_run_id == self._run().id, AnalysisStage.phase_key == spec.phase_key)
+            .first()
+        )
+        if existing is not None:
+            if self.resume_mode and existing.status == StageStatus.COMPLETED and not self.force_restart:
+                self.stage_id = existing.id
+                self.stage_skipped = True
+                return existing
+            existing.status = StageStatus.RUNNING
+            existing.started_at = existing.started_at or _now()
+            existing.completed_at = None
+            existing.error_code = None
+            existing.error_message = None
+            if metadata:
+                current = dict(existing.metadata_json or {})
+                current.update(redact_payload(metadata))
+                existing.metadata_json = current
+            self._commit()
+            self.stage_id = existing.id
+            return existing
+        stage = AnalysisStage(
+            analysis_run_id=self._run().id,
+            phase_key=spec.phase_key,
+            phase_order=spec.phase_order,
+            display_name=spec.display_name,
+            status=StageStatus.RUNNING,
+            criticality=spec.criticality,
+            started_at=_now(),
+            metadata_json=redact_payload(metadata) if metadata else None,
+        )
+        self.db.add(stage)
+        self._commit()
+        self.db.refresh(stage)
+        self.stage_id = stage.id
+        return stage
+
+    def finish_stage(self, *, output: Any = None, quality_grade: str | None = None, metadata: dict[str, Any] | None = None) -> AnalysisStage | None:
+        stage = self._stage()
+        if stage is None:
+            return None
+        if self.stage_skipped and stage.status == StageStatus.COMPLETED:
+            self.stage_id = None
+            return stage
+        if output is not None:
+            artifact = self.record_artifact(ArtifactType.STRUCTURED_OUTPUT, output, artifact_key=f"{stage.phase_key}.output")
+            stage.output_hash = artifact.sha256
+            self._output_hashes[stage.phase_key] = artifact.sha256
+        stage.status = StageStatus.COMPLETED
+        stage.completed_at = _now()
+        stage.quality_grade = quality_grade
+        if metadata:
+            current = dict(stage.metadata_json or {})
+            current.update(redact_payload(metadata))
+            stage.metadata_json = current
+        self._commit()
+        spec = phase_spec(stage.phase_key)
+        self.stage_id = None
+        if spec.checkpoint:
+            self.checkpoint(spec.checkpoint)
+        return stage
+
+    def fail_stage(self, exc: BaseException, *, blocked: bool = False, cancelled: bool = False) -> AnalysisStage | None:
+        stage = self._stage()
+        if stage is None:
+            return None
+        if cancelled:
+            stage.status = StageStatus.CANCELLED
+        elif blocked:
+            stage.status = StageStatus.BLOCKED
+        else:
+            stage.status = StageStatus.FAILED
+        stage.completed_at = _now()
+        stage.error_code = _error_code(exc)
+        stage.error_message = _error_message(exc)
+        run = self._run()
+        run.failed_stage = stage.phase_key
+        self._commit()
+        self.stage_id = None
+        return stage
+
+    def start_node(self, node_key: str, *, metadata: dict[str, Any] | None = None) -> AnalysisNode:
+        if self.stage_id is None:
+            raise RuntimeError("workflow_stage_not_started")
+        spec = node_spec(node_key)
+        self.node_skipped = False
+        existing = (
+            self.db.query(AnalysisNode)
+            .filter(AnalysisNode.analysis_run_id == self._run().id, AnalysisNode.node_key == spec.node_key)
+            .first()
+        )
+        if existing is not None:
+            if self.resume_mode and existing.status in NodeStatus.SUCCESS and not self.force_restart:
+                self.node_id = existing.id
+                self.node_skipped = True
+                return existing
+            existing.stage_id = self.stage_id
+            existing.status = NodeStatus.RUNNING
+            existing.started_at = existing.started_at or _now()
+            existing.completed_at = None
+            existing.error_code = None
+            existing.error_message = None
+            existing.max_attempts = spec.max_attempts
+            existing.retryable = spec.retryable
+            if metadata:
+                current = dict(existing.metadata_json or {})
+                current.update(redact_payload(metadata))
+                existing.metadata_json = current
+            self._commit()
+            self.node_id = existing.id
+            return existing
+        node = AnalysisNode(
+            analysis_run_id=self._run().id,
+            stage_id=self.stage_id,
+            node_key=spec.node_key,
+            node_type=spec.node_type,
+            agent_role=spec.agent_role,
+            status=NodeStatus.RUNNING,
+            criticality=spec.criticality,
+            attempt_count=0,
+            max_attempts=spec.max_attempts,
+            started_at=_now(),
+            retryable=spec.retryable,
+            resumable=spec.resumable,
+            metadata_json=redact_payload(metadata) if metadata else None,
+        )
+        self.db.add(node)
+        self._commit()
+        self.db.refresh(node)
+        self.node_id = node.id
+        return node
+
+    def finish_node(self, *, output: Any = None) -> AnalysisNode | None:
+        node = self._node()
+        if node is None:
+            return None
+        if self.node_skipped and node.status in NodeStatus.SUCCESS:
+            self.node_id = None
+            return node
+        if output is not None:
+            artifact = self.record_artifact(ArtifactType.STRUCTURED_OUTPUT, output, artifact_key=f"{node.node_key}.output")
+            node.output_artifact_id = artifact.id
+            self._output_hashes[node.node_key] = artifact.sha256
+        node.status = NodeStatus.SUCCEEDED
+        node.completed_at = _now()
+        if node.node_key not in self._completed_nodes:
+            self._completed_nodes.append(node.node_key)
+        self._commit()
+        self.node_id = None
+        return node
+
+    def fail_node(self, exc: BaseException, *, blocked: bool = False, cancelled: bool = False) -> AnalysisNode | None:
+        node = self._node()
+        if node is None:
+            return None
+        if cancelled:
+            node.status = NodeStatus.CANCELLED
+        elif blocked:
+            node.status = NodeStatus.BLOCKED
+        else:
+            node.status = NodeStatus.FAILED
+        node.completed_at = _now()
+        node.error_code = _error_code(exc)
+        node.error_message = _error_message(exc)
+        run = self._run()
+        if node.criticality != "optional":
+            run.failed_node = node.node_key
+            run.failed_stage = run.failed_stage or (self._stage().phase_key if self._stage() is not None else None)
+        self._commit()
+        self.node_id = None
+        return node
+
+    def start_attempt(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        model_profile_id: int | None = None,
+        request_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AnalysisNodeAttempt:
+        node = self._node()
+        if node is None:
+            raise RuntimeError("workflow_node_not_started")
+        node.attempt_count = int(node.attempt_count or 0) + 1
+        attempt = AnalysisNodeAttempt(
+            analysis_run_id=self._run().id,
+            stage_id=node.stage_id,
+            node_id=node.id,
+            attempt_no=node.attempt_count,
+            status=AttemptStatus.RUNNING,
+            started_at=_now(),
+            provider=provider,
+            model=model,
+            model_profile_id=model_profile_id,
+            request_id=request_id,
+            metadata_json=redact_payload(metadata) if metadata else None,
+        )
+        self.db.add(attempt)
+        self._commit()
+        self.db.refresh(attempt)
+        self.attempt_id = attempt.id
+        return attempt
+
+    def finish_attempt(
+        self,
+        *,
+        output: Any = None,
+        transport_retry_count: int | None = None,
+        structured_retry_count: int | None = None,
+        latency_ms: int | None = None,
+        input_hash: str | None = None,
+        output_hash: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        request_id: str | None = None,
+    ) -> AnalysisNodeAttempt | None:
+        attempt = self._attempt()
+        if attempt is None:
+            return None
+        if output is not None:
+            artifact = self.record_artifact(ArtifactType.STRUCTURED_OUTPUT, output, artifact_key=f"attempt.{attempt.attempt_no}.output")
+            attempt.structured_output_artifact_id = artifact.id
+            attempt.output_hash = artifact.sha256
+        if output_hash:
+            attempt.output_hash = output_hash
+        if input_hash:
+            attempt.input_hash = input_hash
+        if transport_retry_count is not None:
+            attempt.transport_retry_count = int(transport_retry_count)
+        if structured_retry_count is not None:
+            attempt.structured_retry_count = int(structured_retry_count)
+        attempt.latency_ms = latency_ms
+        if input_tokens is not None:
+            attempt.input_tokens = int(input_tokens)
+        if output_tokens is not None:
+            attempt.output_tokens = int(output_tokens)
+        if request_id:
+            attempt.request_id = str(request_id)[:128]
+        attempt.status = AttemptStatus.COMPLETED
+        attempt.completed_at = _now()
+        started = _as_unaware(attempt.started_at)
+        completed = _as_unaware(attempt.completed_at)
+        if started is not None and completed is not None and attempt.latency_ms is None:
+            attempt.latency_ms = max(0, int((completed - started).total_seconds() * 1000))
+        self._commit()
+        self.attempt_id = None
+        return attempt
+
+    def fail_attempt(
+        self,
+        exc: BaseException,
+        *,
+        retryable: bool = False,
+        transport_retry_count: int | None = None,
+        structured_retry_count: int | None = None,
+        failure_class: str | None = None,
+        waiting_retry: bool = False,
+    ) -> AnalysisNodeAttempt | None:
+        attempt = self._attempt()
+        if attempt is None:
+            return None
+        attempt.status = AttemptStatus.FAILED
+        attempt.completed_at = _now()
+        attempt.error_type = type(exc).__name__
+        attempt.error_code = _error_code(exc)
+        attempt.error_message = _error_message(exc)
+        attempt.retryable = retryable
+        if failure_class:
+            attempt.failure_class = failure_class
+        if transport_retry_count is not None:
+            attempt.transport_retry_count = int(transport_retry_count)
+        if structured_retry_count is not None:
+            attempt.structured_retry_count = int(structured_retry_count)
+        self.record_artifact(
+            ArtifactType.ERROR,
+            {
+                "error_type": attempt.error_type,
+                "error_code": attempt.error_code,
+                "error_message": attempt.error_message,
+                "failure_class": failure_class,
+            },
+            artifact_key=f"attempt.{attempt.attempt_no}.error",
+        )
+        if waiting_retry:
+            node = self._node()
+            if node is not None:
+                node.status = NodeStatus.RETRY_WAITING
+        self._commit()
+        self.attempt_id = None
+        return attempt
+
+    def record_artifact(
+        self,
+        artifact_type: str,
+        content: Any,
+        *,
+        artifact_key: str | None = None,
+        stage_id: int | None = None,
+        node_id: int | None = None,
+        attempt_id: int | None = None,
+    ) -> AnalysisArtifact:
+        run = self._run()
+        key = artifact_key or f"{artifact_type.lower()}.{_now().strftime('%Y%m%d%H%M%S%f')}"
+        artifact = build_artifact(
+            analysis_run_id=run.id,
+            artifact_type=artifact_type,
+            artifact_key=key,
+            content=content,
+            stage_id=stage_id if stage_id is not None else self.stage_id,
+            node_id=node_id if node_id is not None else self.node_id,
+            attempt_id=attempt_id if attempt_id is not None else self.attempt_id,
+        )
+        self.db.add(artifact)
+        self._commit()
+        self.db.refresh(artifact)
+        self.last_artifact_id = artifact.id
+        run.last_artifact_id = artifact.id
+        self._commit()
+        return artifact
+
+    def record_claims(
+        self,
+        claims: Iterable[dict[str, Any]],
+        *,
+        debate_type: str = DebateType.INVESTMENT,
+    ) -> list[AnalysisClaim]:
+        run = self._run()
+        stored: list[AnalysisClaim] = []
+        for raw in claims:
+            if not isinstance(raw, dict):
+                continue
+            claim_id = str(raw.get("claim_id") or "").strip()
+            if not claim_id:
+                continue
+            row = (
+                self.db.query(AnalysisClaim)
+                .filter(AnalysisClaim.analysis_run_id == run.id, AnalysisClaim.claim_id == claim_id)
+                .first()
+            )
+            evidence = raw.get("evidence") if isinstance(raw.get("evidence"), list) else raw.get("evidence_refs")
+            payload = {
+                "debate_type": str(raw.get("debate_type") or debate_type),
+                "speaker": raw.get("speaker"),
+                "stance": raw.get("stance"),
+                "statement": str(raw.get("statement") or raw.get("claim") or ""),
+                "evidence_refs_json": redact_payload(evidence) if evidence is not None else [],
+                "confidence": raw.get("confidence"),
+                "status": _claim_status(raw.get("status")),
+                "parent_claim_id": raw.get("parent_claim_id"),
+                "target_claim_ids_json": list(raw.get("target_claim_ids") or []),
+                "stage_id": self.stage_id,
+                "node_id": self.node_id,
+            }
+            try:
+                payload["confidence"] = None if payload["confidence"] is None else float(payload["confidence"])
+            except (TypeError, ValueError):
+                payload["confidence"] = None
+            if row is None:
+                row = AnalysisClaim(analysis_run_id=run.id, claim_id=claim_id, **payload)
+                self.db.add(row)
+            else:
+                for key, value in payload.items():
+                    setattr(row, key, value)
+                row.updated_at = _now()
+            stored.append(row)
+        self._commit()
+        if stored:
+            self.record_artifact(
+                ArtifactType.CLAIMS,
+                [
+                    {
+                        "claim_id": item.claim_id,
+                        "speaker": item.speaker,
+                        "stance": item.stance,
+                        "statement": item.statement,
+                        "status": item.status,
+                    }
+                    for item in stored
+                ],
+                artifact_key=f"claims.{debate_type}",
+            )
+        return stored
+
+    def checkpoint(self, name: str, *, extra: dict[str, Any] | None = None) -> AnalysisArtifact:
+        run = self._run()
+        payload = {
+            "run_id": run.id,
+            "checkpoint": name,
+            "completed_nodes": list(self._completed_nodes),
+            "input_hashes": dict(self._input_hashes),
+            "output_hashes": dict(self._output_hashes),
+            "created_at": _now().isoformat(),
+        }
+        if extra:
+            payload.update(redact_payload(extra))
+        artifact = self.record_artifact(ArtifactType.CHECKPOINT, payload, artifact_key=f"checkpoint.{name}")
+        run.last_checkpoint = name
+        run.resumable = name != CheckpointName.FINALIZED
+        self._commit()
+        return artifact
+
+    def finish_run(
+        self,
+        status: str,
+        *,
+        summary: str | None = None,
+        final_rating: str | None = None,
+        cash_target: str | None = None,
+        confidence: str | None = None,
+        data_quality_grade: str | None = None,
+        markdown: str | None = None,
+        structured_payload: dict[str, Any] | None = None,
+        model_profile_id: int | None = None,
+        error: BaseException | None = None,
+        blocked: bool = False,
+    ) -> AnalysisRun:
+        run = self._run()
+        existing_payload = dict(run.structured_result_json or {})
+        if structured_payload is not None:
+            payload = dict(structured_payload)
+            if existing_payload.get("skill_runtime") and "skill_runtime" not in payload:
+                payload["skill_runtime"] = existing_payload["skill_runtime"]
+            run.structured_result_json = payload
+        run.status = status
+        run.completed_at = _now()
+        run.summary = summary
+        run.final_rating = final_rating
+        run.cash_target = cash_target
+        run.confidence = confidence
+        run.data_quality_grade = data_quality_grade
+        if markdown is not None:
+            run.markdown_text = markdown
+        if model_profile_id is not None:
+            run.model_profile_id = model_profile_id
+        if status in {RunStatus.COMPLETED, RunStatus.BLOCKED}:
+            run.resumable = False
+        elif status in {RunStatus.FAILED, RunStatus.INTERRUPTED, RunStatus.CANCELLED}:
+            run.resumable = bool(run.last_checkpoint) and run.last_checkpoint != CheckpointName.FINALIZED
+        else:
+            run.resumable = False
+        if error is not None:
+            run.error_code = _error_code(error)
+            run.error_message = _error_message(error)
+        if blocked:
+            run.status = RunStatus.BLOCKED
+        self._commit()
+        return run
+
+    def fail_open_work(self, exc: BaseException, *, cancelled: bool = False, blocked: bool = False) -> None:
+        if self.attempt_id is not None:
+            self.fail_attempt(exc, retryable=not cancelled and not blocked)
+        if self.node_id is not None:
+            self.fail_node(exc, cancelled=cancelled, blocked=blocked)
+        if self.stage_id is not None:
+            self.fail_stage(exc, cancelled=cancelled, blocked=blocked)
+
+    def fail_run(self, exc: BaseException, *, cancelled: bool = False, blocked: bool = False) -> AnalysisRun | None:
+        if self.run_id is None:
+            return None
+        self.fail_open_work(exc, cancelled=cancelled, blocked=blocked)
+        if cancelled:
+            status = RunStatus.CANCELLED
+        elif blocked:
+            status = RunStatus.BLOCKED
+        else:
+            status = RunStatus.FAILED
+        return self.finish_run(status, error=exc, blocked=blocked)
+
+    def bind_input_hash(self, key: str, content: Any) -> str:
+        digest = sha256_content(redact_payload(content) if not isinstance(content, str) else redact_payload(content))
+        self._input_hashes[key] = digest
+        stage = self._stage()
+        if stage is not None and stage.input_hash is None:
+            stage.input_hash = digest
+            self._commit()
+        node = self._node()
+        if node is not None:
+            artifact = self.record_artifact(ArtifactType.INPUT, content, artifact_key=f"{key}.input")
+            node.input_artifact_id = artifact.id
+            attempt = self._attempt()
+            if attempt is not None and attempt.input_hash is None:
+                attempt.input_hash = artifact.sha256
+            self._commit()
+            return artifact.sha256
+        return digest
+
+    def node_by_key(self, node_key: str) -> AnalysisNode | None:
+        if self.run_id is None:
+            return None
+        return (
+            self.db.query(AnalysisNode)
+            .filter(AnalysisNode.analysis_run_id == self.run_id, AnalysisNode.node_key == node_key)
+            .first()
+        )
+
+    def load_node_output(self, node_key: str) -> Any:
+        node = self.node_by_key(node_key)
+        if node is None or node.output_artifact_id is None:
+            return None
+        artifact = self.db.query(AnalysisArtifact).filter(AnalysisArtifact.id == node.output_artifact_id).first()
+        if artifact is None:
+            return None
+        if artifact.content_json is not None:
+            return artifact.content_json
+        return artifact.content_text
+
+    def load_artifact_content(self, artifact_key: str) -> Any:
+        if self.run_id is None:
+            return None
+        artifact = (
+            self.db.query(AnalysisArtifact)
+            .filter(AnalysisArtifact.analysis_run_id == self.run_id, AnalysisArtifact.artifact_key == artifact_key)
+            .order_by(AnalysisArtifact.id.desc())
+            .first()
+        )
+        if artifact is None:
+            return None
+        if artifact.content_json is not None:
+            return artifact.content_json
+        return artifact.content_text
+
+    def restore_output(self, node_key: str, *artifact_keys: str) -> Any:
+        output = self.load_node_output(node_key)
+        if output is not None:
+            return output
+        for key in artifact_keys:
+            output = self.load_artifact_content(key)
+            if output is not None:
+                return output
+        return None
+
+    def set_market_snapshot_at(self, value) -> None:
+        run = self._run()
+        run.market_snapshot_at = value
+        self._commit()
+
+    def input_hashes(self) -> dict[str, str]:
+        return dict(self._input_hashes)
