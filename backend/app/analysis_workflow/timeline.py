@@ -19,6 +19,7 @@ _TYPE_ORDER = {
     "claim_recorded": 45,
     "attempt_completed": 50,
     "attempt_failed": 51,
+    "attempt_cancelled": 52,
     "node_completed": 60,
     "node_failed": 61,
     "node_skipped": 62,
@@ -99,7 +100,7 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
         )
         if item:
             events.append(item)
-        done_type = "attempt_completed" if attempt.status == "completed" else "attempt_failed" if attempt.status == "failed" else None
+        done_type = "attempt_completed" if attempt.status == "completed" else "attempt_failed" if attempt.status == "failed" else "attempt_cancelled" if attempt.status == "cancelled" else None
         if done_type:
             item = _event(
                 attempt.completed_at,

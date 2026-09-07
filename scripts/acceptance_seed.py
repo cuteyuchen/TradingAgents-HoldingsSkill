@@ -647,7 +647,7 @@ def _ensure_real_analysis_run(
         snapshot_id=snapshot.id,
         trigger_type="manual",
         checkpoint="10:30",
-        mode="fast",
+        mode="deep",
         status="queued",
         progress_percent=0,
         current_stage="queued",

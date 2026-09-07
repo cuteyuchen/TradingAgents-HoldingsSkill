@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover - import cycle guard
     ModelTimeoutError = tuple()  # type: ignore[misc, assignment]
     StructuredOutputError = tuple()  # type: ignore[misc, assignment]
 
-_TRANSIENT_STATUS = re.compile(r"\b(502|503|504)\b")
+_TRANSIENT_STATUS = re.compile(r"\b(429|502|503|504)\b")
 _AUTH_STATUS = re.compile(r"\b(401|403)\b")
 _CONTEXT = re.compile(
     r"context[_ ]?(?:length|window|overflow)|maximum context|too many tokens|prompt is too long",
@@ -31,6 +31,13 @@ class ResumeRejected(RuntimeError):
     def __init__(self, message: str, *, mismatches: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.mismatches = mismatches or {}
+
+
+class NodeCancelled(RuntimeError):
+    code = "job_cancelled"
+
+    def __init__(self) -> None:
+        super().__init__("job_cancelled")
 
 
 def _message(exc: BaseException) -> str:

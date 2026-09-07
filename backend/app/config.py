@@ -88,6 +88,8 @@ class Settings:
 
     # Analysis and scheduler.
     ANALYSIS_HISTORY_LIMIT: int = int(os.getenv("ANALYSIS_HISTORY_LIMIT", "5"))
+    TRUE_MULTI_AGENT_WORKFLOW_ENABLED: bool = _bool_env("TRUE_MULTI_AGENT_WORKFLOW_ENABLED", "true")
+    ANALYSIS_MAX_PARALLEL_AGENTS: int = max(1, min(int(os.getenv("ANALYSIS_MAX_PARALLEL_AGENTS", "3")), 8))
     SCHEDULER_ENABLED: bool = _bool_env("SCHEDULER_ENABLED", "true")
     SCHEDULER_INTERVAL_SECONDS: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
     CHECKPOINT_CATCHUP_MINUTES: int = max(0, int(os.getenv("CHECKPOINT_CATCHUP_MINUTES", "15")))

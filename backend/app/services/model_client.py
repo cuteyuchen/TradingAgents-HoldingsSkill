@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,6 +19,23 @@ from ..security import decrypt_secret
 from ..v2_models import ModelProfile, ModelProvider
 
 logger = logging.getLogger(__name__)
+_CANCEL_CHECK = contextvars.ContextVar("model_cancel_check", default=None)
+
+
+@contextmanager
+def model_cancellation(check):
+    token = _CANCEL_CHECK.set(check)
+    try:
+        yield
+    finally:
+        _CANCEL_CHECK.reset(token)
+
+
+def _check_cancelled() -> None:
+    check = _CANCEL_CHECK.get()
+    if check is not None and check():
+        from ..analysis_workflow.failures import NodeCancelled
+        raise NodeCancelled()
 
 
 DEFAULT_BASE_URLS = {
@@ -307,6 +326,7 @@ def call_model_json(
     current_messages = list(messages)
     last_error: StructuredOutputError | None = None
     for attempt in range(attempts):
+        _check_cancelled()
         result = transport_call(current_messages)
         if _truncated_finish(result):
             last_error = StructuredOutputError(
@@ -412,6 +432,7 @@ def _sse_payloads(response: requests.Response) -> Any:
     因此模型思考再久也不会被误判为超时。
     """
     for raw_line in response.iter_lines(decode_unicode=False):
+        _check_cancelled()
         if not raw_line:
             # SSE 的心跳空行同样能刷新读超时，直接跳过。
             continue
@@ -864,6 +885,76 @@ def _acceptance_phase_content(messages: list[dict[str, Any]]) -> str:
     return str(messages[-1].get("content") or "") if messages else ""
 
 
+def _acceptance_agent_output(key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from ..analysis_workflow.dag import ANALYST_ROLES, RISK_ROLES
+
+    reference = next(
+        (ref for ref in payload.get("evidence_refs", []) if ref.startswith("market.quotes.")),
+        "market",
+    )
+    if key in ANALYST_ROLES:
+        return {
+            "role": key,
+            "scope": "portfolio",
+            "summary": (
+                "这是独立角色的确定性验收结论，仅用于检查节点、持仓、行情与审计链路，"
+                "不代表真实盘中市场判断。输入来自所有角色共享的冻结证据快照，"
+                "证券身份、持仓数量、可卖数量和现金均由后端确认，本角色不重新抓取数据。"
+                "验收使用固定事实验证结构化结论的传递，不把缺失数据解释为零，"
+                "不为其他角色生成观点，也不产生可执行订单。短期条件变化需要重新复核，"
+                "中期持有理由仍需真实财务和事件证据支持。最终仓位与执行资格完全由"
+                "确定性的组合门控决定，当前流程允许没有新候选，也允许保持组合不动。"
+            ),
+            "findings": [{
+                "instrument": None,
+                "statement": "验收固定报价与输入快照一致，真实市场结论不在本 fixture 的验证范围。",
+                "direction": "neutral",
+                "importance": "medium",
+                "confidence": 0.8,
+                "evidence_refs": [reference],
+                "evidence_type": "provider_derived" if key == "capital_flow_analyst" else "fact",
+            }],
+            "portfolio_risks": ["验收事实不替代真实市场数据"],
+            "data_gaps": [],
+            "quality_grade": "A",
+            "data_table": [{"field": "fixture_quote", "evidence_ref": reference}],
+            "missing_checklist_fields": [],
+        }
+    if key in RISK_ROLES or "_round_" in key:
+        opponents = payload.get("opponent_claims") or []
+        target = opponents[0]["claim_id"] if opponents else None
+        return {
+            "role": key.split("_round_")[0],
+            "summary": f"{key} 的独立验收立场，读取真实前序输出。",
+            "claims": [{
+                "statement": f"{key} 根据固定证据提出公开结论，执行约束不可放宽。",
+                "evidence_refs": [reference],
+                "confidence": 0.8,
+                "target_claim_ids": [target] if target else [],
+                "parent_claim_id": target,
+            }],
+        }
+    if key == "claim_resolver":
+        return {
+            "resolutions": [{
+                "claim_id": claim["claim_id"],
+                "status": "PARTIALLY_ACCEPTED",
+                "rationale_summary": "验收事实支持流程验证，不支持真实投资收益判断。",
+            } for claim in payload.get("prior_claims") or []],
+            "summary": "仅归纳已持久化的真实论点，不生成订单。",
+        }
+    if key == "risk_synthesis":
+        return {
+            "consensus": ["遵守确定性 Portfolio Gate"],
+            "disagreements": [],
+            "hard_concerns": [],
+            "recommended_exposure": None,
+            "unresolved_risks": ["真实市场风险未验证"],
+            "summary": "汇总三个独立风险节点的固定验收结果。",
+        }
+    raise ModelCallError(f"Unknown acceptance agent: {key}")
+
+
 def _identity_fixture_holdings(
     image_bytes: bytes,
 ) -> dict[str, Any] | None:
@@ -985,7 +1076,9 @@ def _acceptance_result(
     input_value = _acceptance_input(messages)
     payload_input = input_value.get("input") if isinstance(input_value.get("input"), dict) else input_value
     checkpoint = str((payload_input or {}).get("checkpoint") or "").strip()
-    if "多空辩论" in content and checkpoint in {"retry-success", "retry-exhausted"}:
+    agent_key = content.splitlines()[0].split(": ", 1)[1] if content.startswith("Independent Agent Node: ") else None
+    retry_fixture = agent_key == "bull_round_1" or (agent_key is None and "多空辩论" in content)
+    if retry_fixture and checkpoint in {"retry-success", "retry-exhausted"}:
         repair_present = "上一响应未通过结构化 JSON 校验" in last_content or "请重新完成同一分析" in last_content
         if checkpoint == "retry-exhausted" or not repair_present:
             return ModelResult(
@@ -1044,6 +1137,8 @@ def _acceptance_result(
                 "notes": ["phase-o.1 deterministic vision fixture"],
             }
         raw = value
+    elif agent_key:
+        raw = _acceptance_agent_output(agent_key, input_value)
     elif "匹配六位证券代码" in content:
         input_value = _acceptance_input(messages)
         matches = []
@@ -1100,7 +1195,7 @@ def _acceptance_result(
                 "name": item.get("name"),
                 "action": "conditional_add" if item.get("code") == "510300" else ("reduce" if item.get("code") == "600519" else "hold"),
                 "trigger": "固定事实变化后重新复核",
-                "quantity": "20" if item.get("code") == "600519" else None,
+                "quantity": str(item.get("available_qty")) if item.get("code") == "600519" else None,
                 "take_profit": "达到预设目标后复核",
                 "stop_loss": "质量门控失效",
                 "invalidating_condition": "关键行情缺失",
@@ -1149,6 +1244,10 @@ def _acceptance_result(
         snapshot = payload_input.get("snapshot") or {}
         candidate_context = payload_input.get("candidate_context") or {}
         candidate_rows = candidate_context.get("action") or []
+        constraints = {
+            row.get("code"): row
+            for row in (payload_input.get("portfolio_context") or {}).get("position_constraints") or []
+        }
         vetoed_candidate = any(item.get("code") == "601318" for item in candidate_rows if isinstance(item, dict))
         action_holding = any(item.get("code") == "600519" for item in snapshot.get("holdings") or [])
         holdings = [
@@ -1158,8 +1257,11 @@ def _acceptance_result(
                 "action": "conditional_add" if not vetoed_candidate and item.get("code") == "510300" else ("hold" if vetoed_candidate or item.get("code") != "600519" else "reduce"),
                 "reason": "验收固定证据支持保持当前持仓。",
                 "trigger": "关键事实变化后复核",
-                "quantity": None if vetoed_candidate or item.get("code") != "600519" else "20",
-                "target_weight": "0.22" if not vetoed_candidate and item.get("code") == "510300" else None,
+                "quantity": None if vetoed_candidate or item.get("code") != "600519" else str(item.get("available_qty")),
+                "target_weight": (
+                    float(constraints.get("510300", {}).get("weight") or 0) + 0.02
+                    if not vetoed_candidate and item.get("code") == "510300" else None
+                ),
                 "stop_loss": "质量门控失效",
                 "take_profit": "达到目标后复核",
                 "risk": "验收环境不替代真实市场风险",
@@ -1204,6 +1306,7 @@ def call_model(
     image_mime: str | None = None,
     json_mode: bool = False,
 ) -> ModelResult:
+    _check_cancelled()
     provider = profile.provider
     if not provider.enabled:
         raise ModelCallError("模型供应商已停用")
@@ -1217,6 +1320,7 @@ def call_model(
     last_error: ModelCallError | None = None
 
     for attempt in range(attempts):
+        _check_cancelled()
         started = time.monotonic()
         try:
             if provider_name == "anthropic":

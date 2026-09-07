@@ -1,7 +1,7 @@
 import { test, expect, login, openPage, selectPortfolio } from './fixtures'
 
 test.describe('decision states', () => {
-  test('ACTION is visible on Dashboard and Reports with independent candidate evidence', async ({ acceptancePage: page, facts }) => {
+  test('ACTION permits a holding adjustment with zero new candidates', async ({ acceptancePage: page, facts }) => {
     await login(page, facts.users.a)
     const decisionCard = page.locator('.decision-card')
     await expect(decisionCard).toContainText('需要调整')
@@ -12,7 +12,8 @@ test.describe('decision states', () => {
     await expect(page.locator('.decision-hero')).toContainText('ACTION')
     await expect(page.locator('.action-table-panel')).toContainText('减仓')
     await expect(page.locator('.candidate-panel')).toContainText('候选机会')
-    await expect(page.locator('.candidate-panel')).toContainText('创业板ETF')
+    await expect(page.locator('.candidate-panel')).toContainText('当前没有明显的新机会')
+    await expect(page.locator('.candidate-panel')).not.toContainText('创业板ETF')
   })
 
   test('NO_ACTION, BLOCKED, DATA_GAP, and Candidate Veto remain explicit', async ({ acceptancePage: page, facts }) => {

@@ -39,6 +39,17 @@ def compress_payload(payload: Any, mode: str = "full") -> Any:
 
     if mode == "full" or payload is None:
         return payload
+    if isinstance(payload, dict) and "evidence_hash" in payload:
+        # Identity, holdings, hard constraints and the actual opponent's claims
+        # survive context reduction. Only ancillary frozen evidence is shortened.
+        result = dict(payload)
+        source = payload.get("input") or {}
+        reduced = _truncate(source, list_limit=8 if mode == "compressed" else 3, text_limit=400 if mode == "compressed" else 120)
+        for key in ("snapshot", "portfolio_context"):
+            if key in source:
+                reduced[key] = source[key]
+        result["input"] = reduced
+        return result
     if mode == "compressed":
         return _truncate(payload, list_limit=8, text_limit=400)
     if isinstance(payload, dict):
