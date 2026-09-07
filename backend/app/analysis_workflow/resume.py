@@ -62,7 +62,7 @@ def resume_from_checkpoint(run: AnalysisRun, db=None) -> dict[str, Any]:
         "status": getattr(run, "status", None),
         "failed_stage": getattr(run, "failed_stage", None),
         "failed_node": getattr(run, "failed_node", None),
-        "completed_nodes": payload.get("completed_nodes") or completed_nodes,
+        "completed_nodes": completed_nodes if db is not None else payload.get("completed_nodes") or [],
         "input_hashes": payload.get("input_hashes") or {},
         "output_hashes": payload.get("output_hashes") or {},
         "executor": "NodeExecutor",

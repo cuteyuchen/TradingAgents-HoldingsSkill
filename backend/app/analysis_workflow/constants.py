@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-WORKFLOW_VERSION = "v3-core-2"
+WORKFLOW_VERSION = "v3-core-3"
+LEGACY_WORKFLOW_VERSION = "v3-core-2"
 DEFAULT_NODE_MAX_ATTEMPTS = 3
 
 
@@ -128,6 +129,10 @@ class NodeSpec:
     resumable: bool = True
     llm: bool = False
     max_attempts: int = 1
+    dependencies: tuple[str, ...] = ()
+    parallel_group: str | None = None
+    analysis_modes: tuple[str, ...] = ("fast", "standard", "deep")
+    conditional: bool = False
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,7 @@ class PhaseSpec:
     nodes: tuple[NodeSpec, ...]
     checkpoint: str | None = None
     updates_job_stage: bool = True
+    dependencies: tuple[str, ...] = ()
 
 
 def _node(

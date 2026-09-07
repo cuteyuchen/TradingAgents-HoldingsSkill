@@ -16,6 +16,7 @@ from ..services.analysis_engine import run_analysis_job
 from ..services.analysis_admission import active_portfolio_analysis
 from ..services.holding_identity import snapshot_identity_issues
 from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk_work
+from ..system.workers import signal_worker, worker_active
 from ..v2_dependencies import get_current_user
 from ..analysis_workflow.constants import RunStatus
 from ..analysis_workflow.queries import (
@@ -182,6 +183,7 @@ def cancel_job(
     row.status = "cancelled"
     row.current_stage = "cancelled"
     db.commit()
+    signal_worker("analysis", row.id)
     db.refresh(row)
     return _job_response(row)
 
@@ -198,6 +200,8 @@ def retry_job(
     row = _get_job(db, current_user.id, job_id)
     if row.status not in {"failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Only failed or cancelled jobs can be retried.")
+    if worker_active("analysis", row.id):
+        raise HTTPException(status_code=409, detail="Wait for the cancelled worker to finish before resuming.")
     snapshot = (
         db.query(PortfolioSnapshot)
         .filter(PortfolioSnapshot.id == row.snapshot_id, PortfolioSnapshot.status == "confirmed")

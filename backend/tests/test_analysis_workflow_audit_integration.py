@@ -33,6 +33,9 @@ from app.v2_models import AnalysisJob, AnalysisRun  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_analysis_side_effects(monkeypatch):
+    # CORE-1/2 transcript fixtures intentionally exercise the explicit fallback.
+    # True CORE-3 topology has its own model-boundary integration suite.
+    monkeypatch.setattr(analysis_engine.settings, "TRUE_MULTI_AGENT_WORKFLOW_ENABLED", False)
     reset_runtime_provider_health_registry()
     monkeypatch.setattr(analysis_engine, "_candidate_context_for_analysis", _empty_candidates)
     yield

@@ -20,11 +20,15 @@ from .timeline import build_analysis_timeline
 
 
 def _run_summary(run: AnalysisRun) -> WorkflowRunSummary:
+    execution = (run.structured_result_json or {}).get("workflow_execution") or {}
     return WorkflowRunSummary(
         id=run.id,
         job_id=run.job_id,
         status=getattr(run, "status", None),
         workflow_version=getattr(run, "workflow_version", None),
+        legacy_fallback_used=bool(execution.get("legacy_fallback_used")),
+        evidence_snapshot_id=execution.get("evidence_snapshot_id"),
+        evidence_hash=execution.get("evidence_hash"),
         skill_version=getattr(run, "skill_version", None),
         analysis_mode=getattr(run, "analysis_mode", None),
         last_checkpoint=getattr(run, "last_checkpoint", None),
@@ -181,6 +185,7 @@ def load_claims(db: Session, run_id: int) -> list[ClaimSummary]:
             evidence_refs=list(row.evidence_refs_json or []),
             confidence=row.confidence,
             status=row.status,
+            parent_claim_id=row.parent_claim_id,
             target_claim_ids=list(row.target_claim_ids_json or []),
             created_at=row.created_at,
         )

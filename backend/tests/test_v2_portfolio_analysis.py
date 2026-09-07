@@ -41,6 +41,7 @@ def test_v2_portfolio_flow(monkeypatch):
     from app.services import analysis_engine
     from app.services.security_master import ETF, STOCK, upsert_security
 
+    monkeypatch.setattr(analysis_engine.settings, "TRUE_MULTI_AGENT_WORKFLOW_ENABLED", False)
     init_db()
     with SessionLocal() as db:
         upsert_security(db, {"code": "600519", "exchange": "SSE", "name": "贵州茅台", "security_type": STOCK})
