@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
+from copy import deepcopy
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from typing import Any, Callable
@@ -39,6 +42,8 @@ HEALTH_STATUSES = frozenset({"HEALTHY", "DEGRADED", "CIRCUIT_OPEN", "RECOVERING"
 DEFAULT_FAILURE_THRESHOLD = 3
 SnapshotProvider = Callable[[dict[str, Any]], Any]
 _snapshot_provider: SnapshotProvider | None = None
+_foundation_snapshot_cache_lock = threading.Lock()
+_foundation_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def set_snapshot_provider(provider: SnapshotProvider | None) -> None:
@@ -355,6 +360,67 @@ def get_all_a_share_quote_snapshot(
         requested_route=provider or "all_a",
         snapshot_key=snapshot_key,
     )
+
+
+def get_cached_all_a_share_quote_snapshot(
+    db: Session,
+    *,
+    provider: str | None = None,
+    trade_date: date | str | None = None,
+    include_bse: bool = True,
+    include_suspended: bool = True,
+    max_age_seconds: float = 5.0,
+    failure_ttl_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Return the canonical all-A batch snapshot through one shared TTL cache.
+
+    The cache stays in the existing snapshot service so provider selection,
+    identity filtering, quality, and provenance keep one authority. It is
+    intentionally process-local and short-lived; it does not persist quotes.
+    """
+
+    day = _date(trade_date)
+    key = ":".join(
+        (
+            str(provider or "all_a").lower(),
+            day.isoformat() if day else "latest",
+            "bse" if include_bse else "no-bse",
+            "suspended" if include_suspended else "active-only",
+        )
+    )
+    now = time.monotonic()
+    with _foundation_snapshot_cache_lock:
+        cached = _foundation_snapshot_cache.get(key)
+        if cached is not None and cached[0] > now:
+            result = deepcopy(cached[1])
+            metadata = dict(result.get("metadata") or {})
+            metadata["market_foundation_cache_hit"] = True
+            result["metadata"] = metadata
+            return result
+
+    snapshot = get_all_a_share_quote_snapshot(
+        db,
+        provider=provider,
+        trade_date=day,
+        include_bse=include_bse,
+        include_suspended=include_suspended,
+    )
+    quality = str(snapshot.get("quality_status") or "MISSING").upper()
+    ttl = max_age_seconds if quality in {"VALID", "DEGRADED", "STALE"} else failure_ttl_seconds
+    result = deepcopy(snapshot)
+    metadata = dict(result.get("metadata") or {})
+    metadata["market_foundation_cache_hit"] = False
+    result["metadata"] = metadata
+    with _foundation_snapshot_cache_lock:
+        _foundation_snapshot_cache[key] = (time.monotonic() + max(0.0, float(ttl)), result)
+    return deepcopy(result)
+
+
+def clear_market_foundation_snapshot_cache() -> None:
+    """Clear the short-lived canonical snapshot cache, primarily for tests."""
+
+    with _foundation_snapshot_cache_lock:
+        _foundation_snapshot_cache.clear()
 
 
 def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str | None = None, operation: str = "quote_snapshot") -> MarketSnapshot:

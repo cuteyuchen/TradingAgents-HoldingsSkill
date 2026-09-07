@@ -5,6 +5,148 @@ export type AnalysisMode = 'quick' | 'fast' | 'standard' | 'deep'
 export type WorkflowState = 'PRE_MARKET_MAINTENANCE' | 'PRE_MARKET_READY' | 'AUCTION' | 'MORNING_SESSION' | 'LUNCH_BREAK' | 'AFTERNOON_SESSION' | 'LATE_SESSION' | 'MARKET_CLOSED' | 'POST_CLOSE_ANALYSIS' | 'DAILY_REVIEW' | 'DAY_COMPLETE' | 'NON_TRADING_DAY'
 export type HealthSeverity = 'OK' | 'DEGRADED' | 'BLOCKED' | 'UNKNOWN'
 export type Freshness = 'FRESH' | 'STALE' | 'FROZEN' | 'MISSING'
+export type MarketSessionKind = 'PRE_OPEN' | 'OPEN_AUCTION' | 'MORNING' | 'LUNCH_BREAK' | 'AFTERNOON' | 'CLOSE_AUCTION' | 'CLOSED' | 'NON_TRADING_DAY' | 'DATA_ABNORMAL'
+
+export interface MarketSessionResponse {
+  market: string
+  timezone: 'Asia/Shanghai'
+  session: MarketSessionKind
+  scheduled_session?: MarketSessionKind | null
+  is_trading_day: boolean | null
+  is_market_open: boolean
+  trading_date: string
+  latest_valid_trading_date?: string | null
+  previous_trading_date?: string | null
+  next_trading_date?: string | null
+  resolved_at: string
+  data_status: string
+  data_basis: 'live' | 'session_close' | 'previous_session_close'
+  display_label: string
+}
+
+export interface MajorIndexQuote {
+  instrument_id?: string | null
+  code: string
+  name: string
+  last?: number | null
+  change?: number | null
+  change_pct?: number | null
+  open?: number | null
+  high?: number | null
+  low?: number | null
+  prev_close?: number | null
+  volume?: number | null
+  turnover?: number | null
+  as_of?: string | null
+  source?: string | null
+  quality: string
+  status: 'available' | 'unavailable'
+  fallback: boolean
+  missing_fields: string[]
+}
+
+export interface AllAMedianMetric {
+  status: 'available' | 'unavailable'
+  current_value?: number | null
+  daily_median_return?: number | null
+  trend_20d?: number | null
+  percentile_250d?: number | null
+  eligible_count: number
+  universe_total: number
+  excluded_count: number
+  suspended_count: number
+  as_of?: string | null
+  trading_date?: string | null
+  quality_grade: string
+  quality_flags: string[]
+  missing_fields: string[]
+  source_status: string
+  universe_version: string
+  calculation_version: string
+}
+
+export interface TurnoverConcentrationMetric {
+  status: 'available' | 'unavailable'
+  ratio?: number | null
+  avg_20d?: number | null
+  delta_vs_20d?: number | null
+  trend: 'rising' | 'falling' | 'flat' | 'unavailable'
+  percentile_250d?: number | null
+  top_n: number
+  eligible_count: number
+  total_turnover?: number | null
+  as_of?: string | null
+  trading_date?: string | null
+  quality_grade: string
+  quality_flags: string[]
+  missing_fields: string[]
+  source_status: string
+  calculation_version: string
+}
+
+export interface MarketBreadthMetric {
+  status: 'available' | 'unavailable'
+  advancers: number
+  decliners: number
+  unchanged: number
+  suspended: number
+  limit_up: number
+  limit_down: number
+  total: number
+  eligible_count: number
+  advance_decline_ratio?: number | null
+  as_of?: string | null
+  trading_date?: string | null
+  quality_grade: string
+  quality_flags: string[]
+  missing_fields: string[]
+  source_status: string
+  calculation_version: string
+}
+
+export interface TotalTurnoverMetric {
+  status: 'available' | 'unavailable'
+  value?: number | null
+  avg_20d?: number | null
+  delta_vs_20d?: number | null
+  unit: 'CNY'
+  as_of?: string | null
+  trading_date?: string | null
+  quality_grade: string
+  quality_flags: string[]
+  missing_fields: string[]
+  source_status: string
+  calculation_version: string
+}
+
+export interface SystemicRiskSnapshot {
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME' | 'UNKNOWN'
+  risk_score?: number | null
+  median_return: AllAMedianMetric
+  turnover_concentration: TurnoverConcentrationMetric
+  breadth: MarketBreadthMetric
+  total_turnover: TotalTurnoverMetric
+  major_indices: MajorIndexQuote[]
+  risk_factors: string[]
+  data_quality: string
+  quality_flags: string[]
+  missing_fields: string[]
+  source_status: string
+  as_of?: string | null
+  trading_date?: string | null
+  calculation_version: string
+}
+
+export interface MarketOverview {
+  session: MarketSessionResponse
+  major_indices: MajorIndexQuote[]
+  systemic_risk: SystemicRiskSnapshot
+  breadth: MarketBreadthMetric
+  all_a_median: AllAMedianMetric
+  turnover_concentration: TurnoverConcentrationMetric
+  total_turnover: TotalTurnoverMetric
+  quote_as_of?: string | null
+}
 
 export interface DashboardSection { status: string; [key: string]: any }
 export interface DashboardTimelineItem { key: string; time: string; label: string; kind: string; mode?: string | null; status?: string; scheduled_at: string; is_current: boolean; [key: string]: any }
@@ -49,6 +191,9 @@ export interface DailyDashboard {
   as_of: string
   trade_date: string
   market_open: boolean
+  market_session?: MarketSessionResponse
+  quote_as_of?: string | null
+  strategy_analysis_at?: string | null
   workflow_state: WorkflowState
   market: DashboardSection
   portfolio: DashboardSection

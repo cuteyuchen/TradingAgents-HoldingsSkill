@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..clock import china_now
 from ..market_models import TradingCalendar
 
 CN_MARKET = "CN"
@@ -190,23 +189,27 @@ class TradingCalendarService:
         ).scalar_one_or_none()
 
     def current_session(self, value: datetime | None = None) -> str:
-        moment = value or china_now()
-        if moment.tzinfo is not None:
-            moment = moment.astimezone(CHINA_TZ)
-        if not self.is_trading_day(moment.date()):
-            return CLOSED
-        current = moment.time()
-        if current < time(9, 15):
-            return PRE_MARKET
-        if current < time(9, 30):
-            return AUCTION
-        if current < time(11, 30):
-            return MORNING
-        if current < time(13, 0):
-            return LUNCH
-        if current < time(15, 0):
-            return AFTERNOON
-        return CLOSED
+        """Legacy session labels mapped from the canonical MARKET-1 contract.
+
+        Existing schedulers and monitors still consume the older compact label
+        set. Keeping the translation here prevents their 09:25-09:30 and close
+        auction semantics from drifting away from ``MarketSessionService``.
+        """
+
+        from ..market.session import MarketSession, MarketSessionService
+
+        resolved = MarketSessionService(self.db, market=self.market).resolve_session(value)
+        return {
+            MarketSession.PRE_OPEN.value: PRE_MARKET,
+            MarketSession.OPEN_AUCTION.value: AUCTION,
+            MarketSession.MORNING.value: MORNING,
+            MarketSession.LUNCH_BREAK.value: LUNCH,
+            MarketSession.AFTERNOON.value: AFTERNOON,
+            MarketSession.CLOSE_AUCTION.value: AFTERNOON,
+            MarketSession.CLOSED.value: CLOSED,
+            MarketSession.NON_TRADING_DAY.value: CLOSED,
+            MarketSession.DATA_ABNORMAL.value: CLOSED,
+        }[resolved.session]
 
     def is_market_session(self, value: datetime | None = None) -> bool:
         return self.current_session(value) in {AUCTION, MORNING, AFTERNOON}

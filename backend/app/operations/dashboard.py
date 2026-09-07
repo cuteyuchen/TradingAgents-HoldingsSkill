@@ -14,6 +14,7 @@ from ..candidates.service import latest_candidate_context
 from ..config import settings
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
+from ..market.session import MarketSessionService
 from ..market_runtime_models import ProviderHealth
 from ..memory.models import DailyReviewRun, DecisionMemory, DecisionOutcome
 from ..portfolio_models import PortfolioRiskSnapshot, TradeLedgerEntry
@@ -680,11 +681,12 @@ def _health_section(
     local = _local(cutoff)
     local_date = local.date()
     calendar_service = TradingCalendarService(db)
+    session_resolution = MarketSessionService(db).resolve_session(local)
     calendar_row = db.execute(select(TradingCalendar).where(
         TradingCalendar.market == "CN",
         TradingCalendar.trade_date == local_date,
     )).scalar_one_or_none()
-    market_open = bool(calendar_row and calendar_row.is_open and calendar_service.is_market_session(local))
+    market_open = session_resolution.is_market_open
     security_count = int(db.scalar(select(func.count(SecurityMaster.id))) or 0)
     securities_status = "OK" if security_count else "UNKNOWN"
     providers = db.execute(select(ProviderHealth).where(
@@ -747,6 +749,8 @@ def _health_section(
                 "market": "CN",
                 "trade_date": local_date,
                 "is_open": bool(calendar_row and calendar_row.is_open),
+                "session": session_resolution.session,
+                "data_basis": session_resolution.data_basis,
                 "previous_trading_day": calendar_service.previous_trading_day(local_date),
                 "next_trading_day": calendar_service.next_trading_day(local_date),
             },
@@ -794,7 +798,7 @@ def build_daily_dashboard(db: Session, *, user_id: int, portfolio_id: int, as_of
         raise ValueError("portfolio_not_found")
     cutoff = _cutoff(as_of)
     local = cutoff.replace(tzinfo=UTC).astimezone(CHINA_TZ)
-    calendar = TradingCalendarService(db)
+    market_session = MarketSessionService(db).resolve_session(local)
     current_review = db.execute(select(DailyReviewRun).where(
         DailyReviewRun.user_id == user_id,
         DailyReviewRun.portfolio_id == portfolio_id,
@@ -840,7 +844,10 @@ def build_daily_dashboard(db: Session, *, user_id: int, portfolio_id: int, as_of
     return _iso({
         "as_of": local,
         "trade_date": local.date(),
-        "market_open": bool(calendar.is_trading_day(local.date()) and calendar.is_market_session(local)),
+        "market_open": market_session.is_market_open,
+        "market_session": market_session.to_dict(),
+        "quote_as_of": market.get("captured_at"),
+        "strategy_analysis_at": (analysis.get("latest") or {}).get("finished_at"),
         "workflow_state": state.value,
         "market": market,
         "portfolio": portfolio,
