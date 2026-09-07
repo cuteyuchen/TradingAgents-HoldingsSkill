@@ -801,18 +801,16 @@ class MarketFoundationService:
         candidate = captured_at
         if candidate.tzinfo is not None:
             candidate = candidate.astimezone(UTC).replace(tzinfo=None)
-        if existing is not None:
-            return candidate
         for offset in range(0, 1000):
             value = candidate + timedelta(microseconds=offset)
-            collision = self.db.execute(
+            collision_id = self.db.execute(
                 select(MarketMetricSnapshot.id).where(
                     MarketMetricSnapshot.market == "CN",
                     MarketMetricSnapshot.trade_date == trade_date,
                     MarketMetricSnapshot.captured_at == value,
                 )
             ).scalar_one_or_none()
-            if collision is None:
+            if collision_id is None or (existing is not None and collision_id == existing.id):
                 return value
         raise RuntimeError("market_metric_capture_collision")
 

@@ -428,6 +428,47 @@ def test_history_metrics_expose_20d_trend_and_250d_percentiles() -> None:
         assert MarketOverviewResponse.model_validate(payload).quote_as_of == captured_at
 
 
+def test_daily_persistence_keeps_its_capture_distinct_from_other_metric_versions() -> None:
+    from app.market.foundation import MarketFoundationService, SYSTEMIC_MARKET_VERSION
+    from app.market_engine_models import MarketMetricSnapshot
+
+    SessionLocal = _session_factory()
+    captured_at = datetime(2026, 9, 7, 8, 5, tzinfo=UTC)
+    with SessionLocal() as db:
+        _calendar(db, (date(2026, 9, 7), True, date(2026, 9, 4), date(2026, 9, 8)))
+        _stock(db, "600001")
+        db.commit()
+        service = MarketFoundationService(db)
+        overview = service.build_from_snapshot(
+            _snapshot([
+                {"code": "600001", "price": 10.0, "prev_close": 10.0, "amount": 100.0, "quality_status": "VALID"}
+            ], captured_at=captured_at),
+            now=datetime(2026, 9, 7, 16, 0, tzinfo=CHINA_TZ),
+            major_index_rows=_indices(captured_at),
+        )
+        db.add(MarketMetricSnapshot(
+            snapshot_id="phase-c-same-capture",
+            market="CN",
+            trade_date=date(2026, 9, 7),
+            captured_at=captured_at.replace(tzinfo=None),
+            calculation_version="market-engine-v1",
+        ))
+        db.commit()
+
+        service.persist_daily_snapshot(overview, snapshot=_snapshot([], captured_at=captured_at))
+        db.commit()
+        service.persist_daily_snapshot(overview, snapshot=_snapshot([], captured_at=captured_at))
+        db.commit()
+
+        rows = list(db.execute(
+            select(MarketMetricSnapshot).where(
+                MarketMetricSnapshot.calculation_version == SYSTEMIC_MARKET_VERSION,
+            )
+        ).scalars())
+        assert len(rows) == 1
+        assert rows[0].captured_at != captured_at.replace(tzinfo=None)
+
+
 def test_market_foundation_api_requires_authentication() -> None:
     from fastapi.testclient import TestClient
 
