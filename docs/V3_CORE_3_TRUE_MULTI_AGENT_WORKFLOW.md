@@ -236,9 +236,22 @@ audit nodes, structured retries and absence of legacy nodes. The real Deep
 seed may legitimately produce zero candidates; tests do not force a candidate
 past the production thresholds.
 
-Final local and exact-head CI results are recorded in the delivery report.
-Local diagnostics under `output/core3-validation` and
-`output/playwright/acceptance` are ignored and must not be committed.
+Local validation on September 7, 2026:
+
+- `python -m pytest tests/test_true_multi_agent_workflow.py tests/test_true_multi_agent_safety.py tests/test_multi_agent_hard_gate.py -q`: 60 passed.
+- `python -m pytest tests`: 594 passed.
+- `npm run typecheck`: passed.
+- `npm run build`: passed; Vite reported the existing large-chunk warning.
+- `npm run e2e:acceptance`: 31 passed on the final run. An earlier run reached
+  30 passed and one visual-smoke failure caused by a transient authenticated
+  request returning 401; the unchanged rerun passed.
+- `docker compose build`: not completed locally because the Docker daemon was
+  unresponsive; `docker version` also did not return and both commands were
+  stopped after bounded waits.
+
+Exact-head CI is recorded in the delivery report after push. Local diagnostics
+under `output/core3-validation` and `output/playwright/acceptance` are ignored
+and must not be committed.
 
 ## Not Verified
 
