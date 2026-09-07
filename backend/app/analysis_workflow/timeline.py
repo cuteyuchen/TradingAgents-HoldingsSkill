@@ -47,8 +47,16 @@ def _event(timestamp: datetime | None, event_type: str, **fields: Any) -> dict[s
     return payload
 
 
-def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
-    run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).first()
+def build_analysis_timeline_from_records(
+    run: AnalysisRun | None,
+    stages: list[AnalysisStage],
+    nodes: list[AnalysisNode],
+    attempts: list[AnalysisNodeAttempt],
+    artifacts: list[AnalysisArtifact],
+    claims: list[AnalysisClaim],
+) -> list[dict[str, Any]]:
+    """Render the existing stable Timeline from already-loaded audit rows."""
+
     if run is None:
         return []
     events: list[dict[str, Any]] = []
@@ -56,7 +64,6 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
     if started:
         events.append(started)
 
-    stages = db.query(AnalysisStage).filter(AnalysisStage.analysis_run_id == run_id).all()
     stage_key = {row.id: row.phase_key for row in stages}
     for stage in stages:
         item = _event(stage.started_at, "stage_started", stage=stage.phase_key, status=stage.status)
@@ -68,7 +75,6 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
             if item:
                 events.append(item)
 
-    nodes = db.query(AnalysisNode).filter(AnalysisNode.analysis_run_id == run_id).all()
     node_key = {row.id: row.node_key for row in nodes}
     for node in nodes:
         item = _event(node.started_at, "node_started", stage=stage_key.get(node.stage_id), node=node.node_key, status=node.status)
@@ -89,7 +95,6 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
             if item:
                 events.append(item)
 
-    attempts = db.query(AnalysisNodeAttempt).filter(AnalysisNodeAttempt.analysis_run_id == run_id).all()
     for attempt in attempts:
         item = _event(
             attempt.started_at,
@@ -113,7 +118,6 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
             if item:
                 events.append(item)
 
-    artifacts = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_run_id == run_id).all()
     for artifact in artifacts:
         event_type = "checkpoint" if artifact.artifact_type == "CHECKPOINT" else "artifact_recorded"
         item = _event(
@@ -129,7 +133,6 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
         if item:
             events.append(item)
 
-    claims = db.query(AnalysisClaim).filter(AnalysisClaim.analysis_run_id == run_id).all()
     for claim in claims:
         item = _event(
             claim.created_at,
@@ -156,3 +159,15 @@ def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
 
     events.sort(key=lambda item: (item["timestamp"], _TYPE_ORDER.get(item["type"], 50), item.get("node") or "", item.get("attempt") or 0))
     return events
+
+
+def build_analysis_timeline(db: Session, run_id: int) -> list[dict[str, Any]]:
+    run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).first()
+    if run is None:
+        return []
+    stages = db.query(AnalysisStage).filter(AnalysisStage.analysis_run_id == run_id).all()
+    nodes = db.query(AnalysisNode).filter(AnalysisNode.analysis_run_id == run_id).all()
+    attempts = db.query(AnalysisNodeAttempt).filter(AnalysisNodeAttempt.analysis_run_id == run_id).all()
+    artifacts = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_run_id == run_id).all()
+    claims = db.query(AnalysisClaim).filter(AnalysisClaim.analysis_run_id == run_id).all()
+    return build_analysis_timeline_from_records(run, stages, nodes, attempts, artifacts, claims)

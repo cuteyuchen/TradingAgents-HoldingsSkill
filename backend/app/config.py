@@ -62,6 +62,14 @@ class Settings:
     )
     SQLITE_JOURNAL_MODE: str = os.getenv("ADVISOR_SQLITE_JOURNAL_MODE", "").upper()
     MAX_UPLOAD_BYTES: int = int(os.getenv("MAX_UPLOAD_BYTES", str(12 * 1024 * 1024)))
+    # AnalysisRun exports are generated on demand from persisted audit data.
+    # The limit applies to both staged package content and the final ZIP.
+    ANALYSIS_EXPORT_MAX_BYTES: int = max(
+        1, int(os.getenv("ANALYSIS_EXPORT_MAX_BYTES", str(50 * 1024 * 1024)))
+    )
+    # Empty uses the operating system temporary directory and never becomes a
+    # durable artifact store. A deployment may choose an isolated temp volume.
+    ANALYSIS_EXPORT_TEMP_DIR: str = os.getenv("ANALYSIS_EXPORT_TEMP_DIR", "").strip()
 
     # 模型调用超时与重试。
     # 推理型模型（如 o 系列、DeepSeek-R1、QwQ、GLM-Z1）在返回首个 token 之前

@@ -6,9 +6,10 @@ import json
 from typing import AsyncIterator
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from ..database import SessionLocal, get_db
 from ..decision_contract import canonicalize_analysis_mode
@@ -19,6 +20,11 @@ from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk
 from ..system.workers import signal_worker, worker_active
 from ..v2_dependencies import get_current_user
 from ..analysis_workflow.constants import RunStatus
+from ..analysis_workflow.exporter import (
+    AnalysisExportError,
+    AnalysisExportSizeLimitExceeded,
+    AnalysisRunExporter,
+)
 from ..analysis_workflow.queries import (
     load_artifact_detail,
     load_artifact_metadata,
@@ -285,6 +291,41 @@ def get_run(
     current_user: User = Depends(get_current_user),
 ) -> AnalysisRunDetail:
     return _run_detail(_get_run(db, current_user.id, run_id))
+
+
+@router.get("/runs/{run_id}/export")
+def export_run(
+    run_id: int,
+    mode: str = Query(default="standard"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a short-lived evidence package from historical audit rows."""
+
+    run = _get_run(db, current_user.id, run_id)
+    export_mode = str(mode or "").lower()
+    if export_mode not in {"standard", "debug"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Export mode must be standard or debug.")
+    if run.status and run.status not in RunStatus.TERMINAL:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only terminal analysis runs can be exported.")
+    package = None
+    try:
+        exporter = AnalysisRunExporter(db)
+        package = exporter.build_standard_package(run.id) if export_mode == "standard" else exporter.build_debug_package(run.id)
+        return FileResponse(
+            package.path,
+            media_type="application/zip",
+            filename=package.filename,
+            background=BackgroundTask(package.cleanup),
+        )
+    except AnalysisExportSizeLimitExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except AnalysisExportError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception:
+        if package is not None:
+            package.cleanup()
+        raise
 
 
 @router.get("/runs/{run_id}/markdown", response_class=PlainTextResponse)
