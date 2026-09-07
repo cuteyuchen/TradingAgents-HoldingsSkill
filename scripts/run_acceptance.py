@@ -112,6 +112,8 @@ def main() -> int:
             "ADVISOR_BACKUP_DIR": str(backup_path),
             "ADVISOR_STATIC_DIR": str(static_path),
             "ACCEPTANCE_MODE": "true",
+            "TRUE_MULTI_AGENT_WORKFLOW_ENABLED": "true",
+            "ANALYSIS_MAX_PARALLEL_AGENTS": "3",
             "ACCEPTANCE_TRADE_DATE": "2026-08-21",
             "ACCEPTANCE_NOW_UTC": "2026-08-21T06:00:00+00:00",
             "APP_ENV": "acceptance",

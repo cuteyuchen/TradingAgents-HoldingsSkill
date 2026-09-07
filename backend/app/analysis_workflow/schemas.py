@@ -12,6 +12,9 @@ class WorkflowRunSummary(BaseModel):
     job_id: int
     status: str | None = None
     workflow_version: str | None = None
+    legacy_fallback_used: bool = False
+    evidence_snapshot_id: int | None = None
+    evidence_hash: str | None = None
     skill_version: str | None = None
     analysis_mode: str | None = None
     last_checkpoint: str | None = None
@@ -107,6 +110,7 @@ class ClaimSummary(BaseModel):
     evidence_refs: list[Any] = Field(default_factory=list)
     confidence: float | None = None
     status: str
+    parent_claim_id: str | None = None
     target_claim_ids: list[Any] = Field(default_factory=list)
     created_at: datetime
 

@@ -378,9 +378,9 @@ def test_classified_broad_etf_without_v1_cap_can_add_up_to_cash_weight():
         _master(db, "510300", security_type="ETF", etf_category="BROAD_ETF")
         snapshot = _snapshot(
             db, user, portfolio, snapshot_time=moment, total_assets=100_000, cash=20_000,
-            holdings=[{"code": "510300", "qty": 100, "available_qty": 100, "market_value": 80_000, "name": "Broad"}],
+            holdings=[{"code": "510300", "qty": 16000, "available_qty": 16000, "market_value": 80_000, "name": "Broad"}],
         )
-        state = build_portfolio_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment, quote_rows=_quotes(("510300", 800, "VALID")))
+        state = build_portfolio_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment, quote_rows=_quotes(("510300", 5, "VALID")))
         constraints = build_portfolio_constraints(state, {"available": True, "is_frozen": False, "quality_status": "VALID"})
         position = constraints["positions"][0]
         assert position["hard_cap"] is None
@@ -390,6 +390,7 @@ def test_classified_broad_etf_without_v1_cap_can_add_up_to_cash_weight():
             {"final_rating": "add", "holdings": [{"code": "510300", "action": "add", "target_weight": 0.95}], "candidates": []},
             portfolio_context={
                 "cash_ratio": state["cash_ratio"], "portfolio_quality": "VALID", "market_state_frozen": False,
+                "current_estimated_total_assets": state["current_estimated_total_assets"], "spendable_cash": state["cash"],
                 "market_state_available": True, "market_quality_status": "VALID", "position_constraints": constraints["positions"],
             },
         )
@@ -509,9 +510,10 @@ def test_correlation_with_insufficient_overlap_is_unavailable_not_zero():
 def test_gate_adjusts_hard_cap_and_sellable_quantity_and_blocks_frozen_add():
     context = {
         "cash_ratio": 0.20, "gross_exposure": 0.80, "portfolio_quality": "VALID", "market_state_frozen": False,
+        "current_estimated_total_assets": 900_000, "spendable_cash": 180_000,
         "position_constraints": [{
             "code": "600519", "weight": 0.18, "current_price": 180, "hard_cap": 0.20,
-            "max_additional_weight": 0.02, "max_sellable_qty": 60, "quote_quality": "VALID", "blocking_reasons": [],
+            "max_additional_weight": 0.02, "max_sellable_qty": 60, "lot_size": 100, "quote_quality": "VALID", "blocking_reasons": [],
         }],
     }
     add_result = apply_portfolio_decision_gate({"final_rating": "add", "holdings": [{"code": "600519", "action": "add", "target_weight": 0.25}], "candidates": []}, portfolio_context=context)
