@@ -6,6 +6,7 @@ import sys
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -371,6 +372,36 @@ def test_single_missing_major_index_keeps_partial_contract_and_unknown_risk_when
         assert unavailable["systemic_risk"]["risk_score"] is None
         assert "CRITICAL_MARKET_DATA_UNAVAILABLE" in unavailable["systemic_risk"]["quality_flags"]
         assert {item["code"] for item in partial["major_indices"]} == {item["code"] for item in MAJOR_INDEX_DEFINITIONS}
+
+
+@pytest.mark.parametrize(
+    ("median_grade", "breadth_grade", "concentration_grade", "turnover_grade", "expected"),
+    [
+        ("A", "B", "F", "A", "F"),
+        ("A", "C", "B", "A", "C"),
+    ],
+)
+def test_systemic_risk_quality_uses_worst_metric_grade(
+    median_grade: str,
+    breadth_grade: str,
+    concentration_grade: str,
+    turnover_grade: str,
+    expected: str,
+) -> None:
+    from app.market.foundation import MarketFoundationService
+
+    SessionLocal = _session_factory()
+    with SessionLocal() as db:
+        risk = MarketFoundationService(db)._risk_snapshot(
+            all_a_median={"status": "available", "quality_grade": median_grade},
+            breadth={"status": "available", "quality_grade": breadth_grade},
+            concentration={"status": "available", "quality_grade": concentration_grade},
+            total_turnover={"status": "available", "quality_grade": turnover_grade},
+            major_indices=[],
+            trading_date=date(2026, 9, 7),
+            quality_flags=[],
+        )
+        assert risk["data_quality"] == expected
 
 
 def test_history_metrics_expose_20d_trend_and_250d_percentiles() -> None:

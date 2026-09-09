@@ -130,6 +130,14 @@ def _quality_grade(status: Any, *, fallback: bool = False, coverage: float | Non
     return grade
 
 
+def _worst_grade(*grades: str) -> str:
+    return max(
+        grades,
+        key=lambda value: {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}.get(value, 4),
+        default="F",
+    )
+
+
 def _metric_status(value: Any) -> str:
     return "available" if value is not None else "unavailable"
 
@@ -715,14 +723,11 @@ class MarketFoundationService:
             "total_turnover": total_turnover,
             "major_indices": major_indices,
             "risk_factors": sorted(set(risk_factors)),
-            "data_quality": min(
-                (
-                    str(all_a_median.get("quality_grade") or "F"),
-                    str(concentration.get("quality_grade") or "F"),
-                    str(breadth.get("quality_grade") or "F"),
-                    str(total_turnover.get("quality_grade") or "F"),
-                ),
-                key=lambda value: {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}.get(value, 4),
+            "data_quality": _worst_grade(
+                str(all_a_median.get("quality_grade") or "F"),
+                str(concentration.get("quality_grade") or "F"),
+                str(breadth.get("quality_grade") or "F"),
+                str(total_turnover.get("quality_grade") or "F"),
             ),
             "quality_flags": sorted(set(quality_flags)),
             "missing_fields": missing_fields,
