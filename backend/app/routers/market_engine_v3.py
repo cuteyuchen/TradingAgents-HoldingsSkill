@@ -12,7 +12,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
+from ..market.foundation import MarketFoundationService
 from ..market.providers.factory import build_kline_provider
+from ..market.schemas import (
+    MajorIndexQuote,
+    MarketOverviewResponse,
+    MarketSessionResponse,
+    SystemicRiskSnapshot,
+)
+from ..market.session import MarketSessionService
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
 from ..services.daily_bar_cache import sync_daily_bar_cache
@@ -46,6 +54,52 @@ class DailyBarSyncRequest(BaseModel):
     codes: list[str] = Field(default_factory=list, max_length=100_000)
     as_of: date | None = None
     limit: int = Field(default=260, ge=20, le=500)
+
+
+@router.get("/session", response_model=MarketSessionResponse)
+def get_market_session(
+    as_of: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the single Calendar-authoritative A-share session contract."""
+
+    return MarketSessionService(db).resolve_session(as_of).to_dict()
+
+
+@router.get("/major-indices", response_model=list[MajorIndexQuote])
+def get_major_indices(
+    as_of: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """Return the six canonical regime-reference indices as one batch result."""
+
+    return MarketFoundationService(db).major_indices(now=as_of)
+
+
+@router.get("/systemic-risk", response_model=SystemicRiskSnapshot)
+def get_systemic_risk(
+    as_of: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return deterministic market facts and the existing-score risk mapping."""
+
+    return MarketFoundationService(db).overview(now=as_of)["systemic_risk"]
+
+
+@router.get("/overview", response_model=MarketOverviewResponse)
+def get_market_overview(
+    as_of: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return session, all-A facts, major indices, and systemic risk coherently."""
+
+    result = MarketFoundationService(db).overview(now=as_of)
+    result.pop("_universe_counts", None)
+    return result
 
 
 def _server_now() -> datetime:
