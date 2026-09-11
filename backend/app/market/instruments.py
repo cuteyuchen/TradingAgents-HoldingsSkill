@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
+import math
 import re
 from typing import Any
 
@@ -33,7 +34,9 @@ _SOURCES = {
     "fuyao", "fuyao_historical", "tencent", "eastmoney", "eastmoney_batch",
     "eastmoney_daily_qfq", "acceptance", "inmemory", "fixture", "security_master",
 }
-_ADAPTER_FLAGS = {"INDEX_VOLUME_SEMANTICS_UNKNOWN", "VOLUME_UNIT_UNKNOWN"}
+_ADAPTER_FLAGS = {
+    "INDEX_VOLUME_SEMANTICS_UNKNOWN", "VOLUME_UNIT_UNKNOWN", "UNIT_SEMANTICS_UNKNOWN",
+}
 _PRIVATE_TEXT = re.compile(r"(api[_-]?key|authorization|cookie|secret|credential|://[^/\s]*@)", re.I)
 _FAILURE_TTL = 1.0
 
@@ -250,8 +253,14 @@ class InstrumentMarketService:
             if result.last is not None and result.prev_close is not None:
                 result.change = _coerce_float(result.last - result.prev_close)
                 if result.prev_close > 0:
-                    if result.change_pct is None:
-                        result.change_pct = _coerce_float((result.last / result.prev_close - 1) * 100)
+                    calculated_change_pct = _coerce_float((result.last / result.prev_close - 1) * 100)
+                    if result.change_pct is not None and calculated_change_pct is not None and not math.isclose(
+                        result.change_pct, calculated_change_pct, rel_tol=0.01, abs_tol=0.05,
+                    ):
+                        _mark(result, "QUOTE_CHANGE_CONFLICT", "C")
+                    # The facade contract is internally consistent even when a
+                    # provider's published percentage conflicts with its prices.
+                    result.change_pct = calculated_change_pct
                     if result.high is not None and result.low is not None:
                         result.amplitude_pct = _coerce_float((result.high - result.low) / result.prev_close * 100)
             if any(getattr(result, key) is None for key in ("prev_close", "open", "high", "low", "volume", "turnover")):
