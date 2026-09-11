@@ -12,6 +12,14 @@ DEFAULT_QUOTE_FRESHNESS_SECONDS = 90.0
 DEFAULT_CONFLICT_THRESHOLD_PCT = 0.5
 
 
+def _worst_grade(*grades: str) -> str:
+    return max(
+        grades,
+        key=lambda value: {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}.get(value, 4),
+        default="F",
+    )
+
+
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None

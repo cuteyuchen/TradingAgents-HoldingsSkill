@@ -6,7 +6,7 @@ import random
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,7 @@ import requests
 
 from ..clock import china_now, utc_now
 from ..config import settings
-from ..market.codes import normalize_security_code
+from ..market.codes import exchange_hint, normalize_security_code
 from ..market.providers.factory import create_quote_provider
 from ..market.providers.tencent import TencentQuoteProvider, parse_tencent_line as _normalized_parse_tencent_line
 
@@ -35,7 +35,10 @@ def tencent_symbol(code: str) -> str:
 
 
 def eastmoney_secid(code: str) -> str:
+    explicit = exchange_hint(code)
     code = normalize_code(code)
+    if explicit is not None:
+        return f"{'1' if explicit == 'SSE' else '0'}.{code}"
     return f"1.{code}" if code.startswith(("5", "6", "9")) else f"0.{code}"
 
 
@@ -147,17 +150,25 @@ def fetch_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     return results
 
 
-def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
+def fetch_kline(
+    code: str, limit: int = 30, *, start: date | None = None,
+    end: date | None = None, adjustment: str = "forward",
+) -> dict[str, Any]:
+    adjustments = {"none": "0", "forward": "1", "backward": "2"}
+    if adjustment not in adjustments:
+        raise ValueError("unsupported_adjustment")
     params = {
         "secid": eastmoney_secid(code),
         "klt": "101",
-        "fqt": "1",
+        "fqt": adjustments[adjustment],
         "lmt": str(limit),
-        "end": "20500101",
+        "end": end.strftime("%Y%m%d") if end else "20500101",
         "iscca": "1",
         "fields1": "f1,f2,f3,f4,f5,f6,f7,f8",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
     }
+    if start is not None:
+        params["beg"] = start.strftime("%Y%m%d")
     payload = _em_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", params=params).json()
     rows = ((payload.get("data") or {}).get("klines") or [])
     closes: list[float] = []
@@ -181,6 +192,7 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
                 "high": _float(fields[3]),
                 "low": _float(fields[4]),
                 "volume": volume,
+                "amount": _float(fields[6]) if len(fields) > 6 else None,
             }
         )
     latest = parsed_rows[-1] if parsed_rows else None
@@ -210,11 +222,11 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
     }
 
 
-def fetch_fund_flow(code: str) -> dict[str, Any]:
+def fetch_fund_flow(code: str, *, limit: int = 1, daily: bool = False) -> dict[str, Any]:
     """Fetch the latest main/small/medium/large/super-large net flow row."""
     params = {
-        "lmt": "1",
-        "klt": "1",
+        "lmt": str(limit),
+        "klt": "101" if daily else "1",
         "secid": eastmoney_secid(code),
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56",
@@ -232,6 +244,18 @@ def fetch_fund_flow(code: str) -> dict[str, Any]:
         "medium_net": _float(fields[3]) if len(fields) > 3 else None,
         "large_net": _float(fields[4]) if len(fields) > 4 else None,
         "super_large_net": _float(fields[5]) if len(fields) > 5 else None,
+        "history": [
+            {
+                "date": values[0],
+                "main_net": _float(values[1]),
+                "small_net": _float(values[2]),
+                "medium_net": _float(values[3]),
+                "large_net": _float(values[4]),
+                "super_large_net": _float(values[5]),
+            }
+            for row in rows
+            if len(values := str(row).split(",")) >= 6
+        ] if daily else [],
         "source": "Eastmoney push2his fund flow",
     }
 
@@ -545,18 +569,10 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
 
 
 def refresh_snapshot_quotes(snapshot: dict[str, Any], codes: list[str]) -> dict[str, Any]:
-    """Refresh quote-sensitive fields immediately before the visible decision."""
-    refreshed = dict(snapshot)
-    refreshed["final_quote_refresh_at"] = china_now().isoformat(timespec="seconds")
-    try:
-        quotes = fetch_quotes(codes)
-        refreshed["quotes"] = {normalize_code(code): quotes.get(normalize_code(code), {}) for code in codes}
-        refreshed["final_quote_refresh_status"] = "ok"
-    except Exception as exc:
-        refreshed["final_quote_refresh_status"] = "failed"
-        refreshed["final_quote_refresh_error"] = str(exc)
-        refreshed.setdefault("errors", []).append(f"final_quote_refresh: {exc}")
-    return refreshed
+    """Compatibility entry point; every final quote refresh uses MARKET-2."""
+    from .instrument_market_evidence import refresh_snapshot_quotes as refresh
+
+    return refresh(snapshot, codes)
 
 
 def is_a_share_trading_day(now: datetime | None = None) -> bool:

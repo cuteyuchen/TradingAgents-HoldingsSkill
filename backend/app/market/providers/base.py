@@ -7,7 +7,7 @@ from datetime import date, datetime
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from ..codes import normalize_security_code
+from ..codes import canonical_security_code, normalize_security_code
 from ..models import DataQualityStatus, NormalizedQuote, QuoteSnapshot
 from ..quality import DEFAULT_QUOTE_FRESHNESS_SECONDS, is_final_close_timestamp, validate_quote
 
@@ -90,6 +90,17 @@ class QuoteProvider(ABC):
     def get_all_a_share_quotes(self, universe: Iterable[str]) -> dict[str, NormalizedQuote]:
         """Batch contract; providers must not turn this into one HTTP call per code."""
         return self.get_quotes(universe)
+
+    def get_instrument_quotes(
+        self, codes: Iterable[str], *, instrument_types: Mapping[str, str] | None = None,
+    ) -> dict[str, NormalizedQuote]:
+        """Compatibility for batch adapters, rejecting cross-exchange aliases."""
+        requested = {canonical_security_code(code) for code in codes}
+        quotes = self.get_quotes(sorted(requested))
+        return {
+            quote.symbol: quote for quote in quotes.values()
+            if quote.symbol in requested
+        }
 
 
 def build_quote_snapshot(

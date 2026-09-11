@@ -6,7 +6,7 @@ from copy import deepcopy
 from datetime import datetime
 from time import monotonic
 
-from ..codes import exchange_for_code, normalize_security_code
+from ..codes import canonical_security_code, exchange_hint, exchange_for_code, normalize_security_code
 from ...clock import utc_now
 from ..models import DataQualityStatus, NormalizedQuote
 from .base import QuoteProvider, apply_quote_validation
@@ -15,6 +15,33 @@ from .health import ProviderHealthRegistry, get_runtime_provider_health_registry
 
 class ProviderCircuitOpen(RuntimeError):
     """Raised when a single provider is blocked by its runtime circuit."""
+
+
+def classify_provider_failure(error: BaseException) -> str:
+    """Map transport/provider failures to stable diagnostics without raw text."""
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    category = str(getattr(error, "category", "") or "").upper()
+    name = error.__class__.__name__.lower()
+    text = str(error).lower()
+    if status_code in {401, 403} or category in {"PERMISSION", "AUTH", "AUTH_FAILED"}:
+        return "PROVIDER_AUTH_FAILED"
+    if status_code == 429 or "rate_limit" in category.lower() or "rate limit" in text:
+        return "PROVIDER_RATE_LIMITED"
+    if status_code is not None and status_code >= 500:
+        return "PROVIDER_UNAVAILABLE"
+    if isinstance(error, TimeoutError) or "timeout" in name or "timed out" in text:
+        return "PROVIDER_TIMEOUT"
+    if "parse" in name or "json" in name or "malformed" in text:
+        return "PROVIDER_PARSE_FAILED"
+    if isinstance(error, (ConnectionError, OSError)) or "connection" in name or "connection" in text:
+        return "PROVIDER_UNAVAILABLE"
+    return "provider_failure"
 
 
 def _provider_name(provider: QuoteProvider) -> str:
@@ -38,6 +65,7 @@ def _normalized_batch(
     *,
     provider_name: str,
     now: datetime,
+    qualified: bool = False,
 ) -> dict[str, NormalizedQuote]:
     if not isinstance(batch, Mapping):
         raise TypeError("provider returned a non-mapping quote batch")
@@ -56,10 +84,10 @@ def _normalized_batch(
             continue
         quote.code = code
         quote.provider = provider_name
-        normalized[code] = apply_quote_validation(
+        normalized[quote.symbol if qualified else code] = apply_quote_validation(
             quote,
             now=now,
-            max_age_seconds=_quote_freshness_seconds(),
+            max_age_seconds=None if qualified else _quote_freshness_seconds(),
         )
     return normalized
 
@@ -91,13 +119,19 @@ class HealthTrackedQuoteProvider(QuoteProvider):
     def get_quotes(self, codes: Iterable[str]) -> dict[str, NormalizedQuote]:
         return self._get_quotes(codes, all_market=False)
 
+    def get_instrument_quotes(self, codes: Iterable[str], *, instrument_types=None) -> dict[str, NormalizedQuote]:
+        return self._get_quotes(codes, all_market=False, qualified=True, instrument_types=instrument_types)
+
     def _get_quotes(
         self,
         codes: Iterable[str],
         *,
         all_market: bool,
+        qualified: bool = False,
+        instrument_types: Mapping[str, str] | None = None,
     ) -> dict[str, NormalizedQuote]:
-        requested = list(dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)))
+        normalize = canonical_security_code if qualified else normalize_security_code
+        requested = list(dict.fromkeys(normalize(code) for code in codes if normalize(code)))
         self.last_errors = []
         self.last_provider_counts = {}
         self.last_provider_endpoints = {self.name: self.endpoint} if self.endpoint else {}
@@ -121,13 +155,14 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         started = monotonic()
         try:
             raw_result = (
-                self.provider.get_all_a_share_quotes(requested)
+                self.provider.get_instrument_quotes(requested, instrument_types=instrument_types)
+                if qualified else self.provider.get_all_a_share_quotes(requested)
                 if all_market
                 else self.provider.get_quotes(requested)
             ) or {}
             if not isinstance(raw_result, Mapping):
                 raise TypeError("provider returned a non-mapping quote batch")
-            result = _normalized_batch(raw_result, provider_name=self.name, now=utc_now())
+            result = _normalized_batch(raw_result, provider_name=self.name, now=utc_now(), qualified=qualified)
             requested_set = set(requested)
             for code in sorted(set(result) - requested_set):
                 result.pop(code, None)
@@ -142,7 +177,7 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         except Exception as exc:
             latency_ms = (monotonic() - started) * 1000
             self.health.record_failure(self.name, str(exc), latency_ms=latency_ms)
-            self.last_errors = [{"provider": self.name, "error_code": "provider_failure", "message": str(exc)}]
+            self.last_errors = [{"provider": self.name, "error_code": classify_provider_failure(exc), "message": str(exc)}]
             self.last_latency_ms = {self.name: latency_ms}
             self.last_provider_attempts = [
                 {
@@ -232,13 +267,19 @@ class FallbackQuoteProvider(QuoteProvider):
     def get_quotes(self, codes: Iterable[str]) -> dict[str, NormalizedQuote]:
         return self._get_quotes(codes, all_market=False)
 
+    def get_instrument_quotes(self, codes: Iterable[str], *, instrument_types=None) -> dict[str, NormalizedQuote]:
+        return self._get_quotes(codes, all_market=False, qualified=True, instrument_types=instrument_types)
+
     def _get_quotes(
         self,
         codes: Iterable[str],
         *,
         all_market: bool,
+        qualified: bool = False,
+        instrument_types: Mapping[str, str] | None = None,
     ) -> dict[str, NormalizedQuote]:
-        requested = list(dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)))
+        normalize = canonical_security_code if qualified else normalize_security_code
+        requested = list(dict.fromkeys(normalize(code) for code in codes if normalize(code)))
         remaining = requested[:]
         results: dict[str, NormalizedQuote] = {}
         errors: list[dict[str, object]] = []
@@ -275,7 +316,8 @@ class FallbackQuoteProvider(QuoteProvider):
             provider_endpoints[provider_name] = str(getattr(provider, "endpoint", "") or "")
             try:
                 batch = (
-                    provider.get_all_a_share_quotes(remaining)
+                    provider.get_instrument_quotes(remaining, instrument_types=instrument_types)
+                    if qualified else provider.get_all_a_share_quotes(remaining)
                     if all_market
                     else provider.get_quotes(remaining)
                 ) or {}
@@ -287,12 +329,13 @@ class FallbackQuoteProvider(QuoteProvider):
                     batch,
                     provider_name=provider_name,
                     now=utc_now(),
+                    qualified=qualified,
                 )
             except Exception as exc:
                 latency_ms = (monotonic() - started) * 1000
                 provider_latencies[provider_name] = latency_ms
                 self.health.record_failure(provider_name, str(exc), latency_ms=latency_ms)
-                errors.append({"provider": provider_name, "error_code": "provider_failure", "message": str(exc)})
+                errors.append({"provider": provider_name, "error_code": classify_provider_failure(exc), "message": str(exc)})
                 provider_attempts.append(
                     {
                         "provider": provider_name,
@@ -323,7 +366,7 @@ class FallbackQuoteProvider(QuoteProvider):
                     next_remaining.append(code)
                     continue
                 unusable = {DataQualityStatus.MISSING, DataQualityStatus.INVALID, DataQualityStatus.CONFLICT}
-                if not self.allow_stale:
+                if not self.allow_stale and not qualified:
                     unusable.add(DataQualityStatus.STALE)
                 if quote.quality_status in unusable:
                     # Preserve the provider diagnostic but let the next
@@ -341,7 +384,7 @@ class FallbackQuoteProvider(QuoteProvider):
                     next_remaining.append(code)
                     continue
                 quote = deepcopy(quote)
-                quote.code = code
+                quote.code = normalize_security_code(code)
                 quote.fallback_level = level
                 quote.provider = provider_name
                 results[code] = quote
@@ -370,7 +413,7 @@ class FallbackQuoteProvider(QuoteProvider):
             errors.append({"code": code, "error_code": "all_providers_failed", "message": "no compatible quote returned"})
             results[code] = NormalizedQuote(
                 code=code,
-                exchange=exchange_for_code(code),
+                exchange=exchange_hint(code) or exchange_for_code(code),
                 provider=self.name,
                 fallback_level=max(len(self.providers) - 1, 0),
                 quality_status=DataQualityStatus.MISSING,

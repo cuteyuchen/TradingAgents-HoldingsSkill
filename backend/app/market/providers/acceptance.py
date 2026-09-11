@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import deepcopy
 from datetime import date, datetime
 
-from ..codes import exchange_for_code, normalize_security_code
+from ..codes import canonical_security_code, exchange_hint, exchange_for_code, normalize_security_code
 from ...clock import utc_now
 from ...config import settings
 from ..models import NormalizedQuote
@@ -63,8 +64,28 @@ class AcceptanceQuoteProvider(QuoteProvider):
                 fetched_at=now,
                 provider=self.name,
                 raw_reference="acceptance://quote-fixture",
-                metadata={"fixture": "phase-o.1", "deterministic": True},
+                metadata={
+                    "fixture": "phase-o.1", "deterministic": True,
+                    "order_book": {
+                        "volume_unit": "shares",
+                        "bids": [{"price": round(price - level * 0.01, 2), "volume": 10000} for level in range(1, 6)],
+                        "asks": [{"price": round(price + level * 0.01, 2), "volume": 12000} for level in range(1, 6)],
+                    },
+                },
             )
+        return result
+
+    def get_instrument_quotes(self, codes: Iterable[str], *, instrument_types=None) -> dict[str, NormalizedQuote]:
+        requested = list(dict.fromkeys(canonical_security_code(code) for code in codes))
+        batch = self.get_quotes(requested)
+        result = {}
+        for code in requested:
+            quote = batch.get(normalize_security_code(code))
+            if quote is not None:
+                quote = deepcopy(quote)
+                quote.exchange = exchange_hint(code)
+                quote.security_type = (instrument_types or {}).get(code, quote.security_type)
+                result[code] = quote
         return result
 
 
