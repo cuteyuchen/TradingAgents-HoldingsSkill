@@ -40,6 +40,22 @@ def _shares(value: Any, unit: str, instrument: InstrumentIdentity) -> float | No
     return _scaled(value, multiplier)
 
 
+_UNIT_AWARE_PROVIDERS = {"tencent", "eastmoney_batch", "fuyao", "fuyao_historical"}
+
+
+def _unit(value: Any, *, field: str, provider: str) -> str | None:
+    """Return a verified provider unit; never guess a multiplier for wire data."""
+    allowed = {"shares", "lots"} if field == "volume" else {"CNY", "10k_CNY"}
+    if value in allowed:
+        return str(value)
+    # Custom/in-memory providers already return NormalizedQuote values. Their
+    # absent metadata is not a vendor wire-format claim, so retain the frozen
+    # normalized-unit contract for backwards compatibility.
+    if value is None and provider not in _UNIT_AWARE_PROVIDERS:
+        return "shares" if field == "volume" else "CNY"
+    return None
+
+
 class InstrumentDataAdapters:
     """Reuse the configured quote/history chains; Tencent book and Eastmoney flow."""
 
@@ -111,11 +127,20 @@ class InstrumentDataAdapters:
                     quote.volume = quote.amount = None
                     flags.append("INDEX_VOLUME_SEMANTICS_UNKNOWN")
                 else:
-                    quote.volume = _shares(quote.volume, metadata.get("volume_unit", "shares"), instrument)
-                    quote.amount = _scaled(
-                        quote.amount, {"CNY": 1, "10k_CNY": 10000}.get(metadata.get("turnover_unit", "CNY")),
-                    )
-                    if metadata.get("volume_unit") == "lots" and not instrument.lot_size:
+                    provider = str(quote.provider or "").lower()
+                    volume_unit = _unit(metadata.get("volume_unit"), field="volume", provider=provider)
+                    turnover_unit = _unit(metadata.get("turnover_unit"), field="turnover", provider=provider)
+                    if volume_unit is None:
+                        quote.volume = None
+                        flags.append("UNIT_SEMANTICS_UNKNOWN")
+                    else:
+                        quote.volume = _shares(quote.volume, volume_unit, instrument)
+                    if turnover_unit is None:
+                        quote.amount = None
+                        flags.append("UNIT_SEMANTICS_UNKNOWN")
+                    else:
+                        quote.amount = _scaled(quote.amount, {"CNY": 1, "10k_CNY": 10000}.get(turnover_unit))
+                    if volume_unit == "lots" and not instrument.lot_size:
                         flags.append("VOLUME_UNIT_UNKNOWN")
                 if metadata.get("observed_date_inferred"):
                     quote.source_timestamp = None
@@ -159,6 +184,9 @@ class InstrumentDataAdapters:
                 output = []
                 observed = []
                 fetched = []
+                provider_name = str(getattr(provider, "name", "")).lower()
+                volume_units: set[str] = set()
+                turnover_units: set[str] = set()
                 for row in rows:
                     actual_adjustment = str(row.get("adjustment", adjustment)).lower()
                     actual_adjustment = {"qfq": "forward", "hfq": "backward", "raw": "none"}.get(actual_adjustment, actual_adjustment)
@@ -167,6 +195,12 @@ class InstrumentDataAdapters:
                     if row.get("provider") not in (None, "", provider.name):
                         raise ValueError("mixed_bar_sources")
                     metadata = row.get("metadata") or {}
+                    row_volume_unit = _unit(metadata.get("volume_unit"), field="volume", provider=provider_name)
+                    row_turnover_unit = _unit(metadata.get("turnover_unit"), field="turnover", provider=provider_name)
+                    if row_volume_unit is not None:
+                        volume_units.add(row_volume_unit)
+                    if row_turnover_unit is not None:
+                        turnover_units.add(row_turnover_unit)
                     stamp = _coerce_datetime(metadata.get("source_timestamp"))
                     if stamp is not None:
                         observed.append(stamp)
@@ -176,16 +210,26 @@ class InstrumentDataAdapters:
                     output.append({
                         "time": row.get("trade_date", row.get("date")),
                         **{key: row.get(key) for key in ("open", "high", "low", "close")},
-                        "volume": _shares(row.get("volume"), metadata.get("volume_unit", "shares"), instrument)
-                        if instrument.instrument_type != "INDEX" else None,
-                        "turnover": _scaled(row.get("amount"), 1) if instrument.instrument_type != "INDEX" else None,
+                        "volume": (
+                            _shares(row.get("volume"), row_volume_unit, instrument)
+                            if instrument.instrument_type != "INDEX" and row_volume_unit is not None else None
+                        ),
+                        "turnover": (
+                            _scaled(row.get("amount"), {"CNY": 1, "10k_CNY": 10000}.get(row_turnover_unit))
+                            if instrument.instrument_type != "INDEX" and row_turnover_unit is not None else None
+                        ),
                     })
+                quality_flags = []
+                if instrument.instrument_type == "INDEX":
+                    quality_flags.append("INDEX_VOLUME_SEMANTICS_UNKNOWN")
+                if instrument.instrument_type != "INDEX" and (len(volume_units) != 1 or len(turnover_units) != 1):
+                    quality_flags.append("UNIT_SEMANTICS_UNKNOWN")
                 return InstrumentProviderResult(
                     data={"bars": output}, provider=str(provider.name),
                     observed_at=min(observed) if observed else None,
                     fetched_at=max(fetched) if fetched else utc_now(),
                     fallback=level > 0,
-                    quality_flags=["INDEX_VOLUME_SEMANTICS_UNKNOWN"] if instrument.instrument_type == "INDEX" else [],
+                    quality_flags=quality_flags,
                 )
             except Exception:
                 had_failure = True
@@ -204,7 +248,8 @@ class InstrumentDataAdapters:
         if quote is None or quote.price is None:
             return InstrumentProviderResult(status="unavailable", error_code="ORDER_BOOK_PROVIDER_FAILED", fetched_at=utc_now())
         book = quote.metadata.get("order_book") or {}
-        unit = book.get("volume_unit", "shares")
+        provider_name = str(quote.provider or "").lower()
+        unit = _unit(book.get("volume_unit"), field="volume", provider=provider_name)
         return InstrumentProviderResult(
             data={
                 side: [
@@ -221,7 +266,10 @@ class InstrumentDataAdapters:
             provider=quote.provider, observed_at=quote.source_timestamp,
             fetched_at=quote.fetched_at, trading_date=quote.trade_date,
             fallback=quote.fallback_level > 0,
-            quality_flags=["VOLUME_UNIT_UNKNOWN"] if unit == "lots" and not instrument.lot_size else [],
+            quality_flags=(
+                ["UNIT_SEMANTICS_UNKNOWN"] if unit is None else
+                ["VOLUME_UNIT_UNKNOWN"] if unit == "lots" and not instrument.lot_size else []
+            ),
         ) if not quote.metadata.get("observed_date_inferred") else InstrumentProviderResult(
             status="unavailable", provider=quote.provider, fetched_at=quote.fetched_at,
             error_code="ORDER_BOOK_OBSERVED_DATE_MISSING",

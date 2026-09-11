@@ -17,6 +17,33 @@ class ProviderCircuitOpen(RuntimeError):
     """Raised when a single provider is blocked by its runtime circuit."""
 
 
+def classify_provider_failure(error: BaseException) -> str:
+    """Map transport/provider failures to stable diagnostics without raw text."""
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    category = str(getattr(error, "category", "") or "").upper()
+    name = error.__class__.__name__.lower()
+    text = str(error).lower()
+    if status_code in {401, 403} or category in {"PERMISSION", "AUTH", "AUTH_FAILED"}:
+        return "PROVIDER_AUTH_FAILED"
+    if status_code == 429 or "rate_limit" in category.lower() or "rate limit" in text:
+        return "PROVIDER_RATE_LIMITED"
+    if status_code is not None and status_code >= 500:
+        return "PROVIDER_UNAVAILABLE"
+    if isinstance(error, TimeoutError) or "timeout" in name or "timed out" in text:
+        return "PROVIDER_TIMEOUT"
+    if "parse" in name or "json" in name or "malformed" in text:
+        return "PROVIDER_PARSE_FAILED"
+    if isinstance(error, (ConnectionError, OSError)) or "connection" in name or "connection" in text:
+        return "PROVIDER_UNAVAILABLE"
+    return "provider_failure"
+
+
 def _provider_name(provider: QuoteProvider) -> str:
     return str(
         getattr(provider, "name", provider.__class__.__name__)
@@ -150,7 +177,7 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         except Exception as exc:
             latency_ms = (monotonic() - started) * 1000
             self.health.record_failure(self.name, str(exc), latency_ms=latency_ms)
-            self.last_errors = [{"provider": self.name, "error_code": "provider_failure", "message": str(exc)}]
+            self.last_errors = [{"provider": self.name, "error_code": classify_provider_failure(exc), "message": str(exc)}]
             self.last_latency_ms = {self.name: latency_ms}
             self.last_provider_attempts = [
                 {
@@ -308,7 +335,7 @@ class FallbackQuoteProvider(QuoteProvider):
                 latency_ms = (monotonic() - started) * 1000
                 provider_latencies[provider_name] = latency_ms
                 self.health.record_failure(provider_name, str(exc), latency_ms=latency_ms)
-                errors.append({"provider": provider_name, "error_code": "provider_failure", "message": str(exc)})
+                errors.append({"provider": provider_name, "error_code": classify_provider_failure(exc), "message": str(exc)})
                 provider_attempts.append(
                     {
                         "provider": provider_name,

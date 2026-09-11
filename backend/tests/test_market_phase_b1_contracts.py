@@ -5,6 +5,7 @@ import os
 import sys
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -289,6 +290,30 @@ def test_snapshot_api_ignores_client_owned_derived_fields(monkeypatch):
         assert lineage.provider == "trusted"
         assert lineage.provider_endpoint == "https://trusted.example/quotes"
         assert "attacker.invalid" not in str(lineage.provider_endpoint)
+    finally:
+        db.close()
+
+
+def test_snapshot_api_masks_provider_exception_text(monkeypatch):
+    from fastapi import HTTPException
+    from app.routers import market_v3
+
+    def collect(_request):
+        raise RuntimeError("Authorization: LIVE_PROBE_SENTINEL")
+
+    monkeypatch.setattr(market_v3, "collect_snapshot_quotes", collect)
+    monkeypatch.setattr(market_v3, "sync_runtime_provider_health", lambda _db: [])
+    db = _runtime_session()
+    try:
+        with pytest.raises(HTTPException) as caught:
+            market_v3.create_quote_snapshot(
+                market_v3.MarketSnapshotRequest(codes=["600519.SH"], persist=False),
+                db=db,
+                _current_user=object(),
+            )
+        detail = str(caught.value.detail)
+        assert detail == "market_snapshot_failed:provider_failure"
+        assert "LIVE_PROBE_SENTINEL" not in detail
     finally:
         db.close()
 
