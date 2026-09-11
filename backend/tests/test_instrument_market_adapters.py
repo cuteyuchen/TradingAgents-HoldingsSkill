@@ -10,8 +10,8 @@ import pytest
 from test_instrument_market import Adapters, NOW, TZ, bar, market, quote
 from app.market.instruments import InstrumentMarketService
 from app.market.providers.base import QuoteProvider
-from app.market.providers.eastmoney import EastmoneyBatchQuoteProvider, EASTMONEY_INSTRUMENT_QUOTE_URL
-from app.market.providers.fallback import FallbackQuoteProvider
+from app.market.providers.eastmoney import EastmoneyBatchQuoteProvider, EASTMONEY_INSTRUMENT_QUOTE_URL, parse_eastmoney_row
+from app.market.providers.fallback import FallbackQuoteProvider, classify_provider_failure
 from app.market.providers.fuyao import FuyaoKLineProvider, FuyaoQuoteProvider, FallbackKLineProvider
 from app.market.providers.health import ProviderHealthRegistry, reset_runtime_provider_health_registry
 from app.market.providers.instruments import InstrumentDataAdapters
@@ -109,6 +109,54 @@ def test_time_only_canonical_parser_preserves_price_validation():
     assert canonical.source_timestamp is canonical.trade_date is None
     assert canonical.quality_status.value == "INVALID"
     assert canonical.errors == ["negative_price"]
+
+
+def test_eastmoney_time_only_timestamp_does_not_invent_observed_date():
+    quote = parse_eastmoney_row(
+        {"f12": "600519", "f43": 100, "f60": 99, "f86": "14:59:59"},
+        fetched_at=NOW,
+    )
+    assert quote is not None
+    assert quote.source_timestamp is None
+    assert quote.trade_date is None
+    assert quote.metadata["observed_date_inferred"] is True
+
+
+def test_known_provider_missing_units_returns_null_and_downgrades(market):
+    raw = market.adapters.quotes_fixture.values["600519.SH"]
+    raw.provider = "tencent"
+    raw.metadata = {}
+    result = market.service.quote("600519")
+    assert result.volume is None and result.turnover is None
+    assert result.quality == "B"
+    assert "UNIT_SEMANTICS_UNKNOWN" in result.quality_flags
+
+
+def test_quote_change_conflict_uses_price_derived_value(market):
+    market.adapters.quotes_fixture.values["600519.SH"].pct_change = 88
+    result = market.service.quote("600519")
+    assert result.change == 1
+    assert result.change_pct == pytest.approx(100 / 99)
+    assert result.quality == "C"
+    assert "QUOTE_CHANGE_CONFLICT" in result.quality_flags
+
+
+@pytest.mark.parametrize("status_code,message,code", [
+    (401, "denied", "PROVIDER_AUTH_FAILED"),
+    (403, "denied", "PROVIDER_AUTH_FAILED"),
+    (429, "limited", "PROVIDER_RATE_LIMITED"),
+    (503, "unavailable", "PROVIDER_UNAVAILABLE"),
+    (None, "malformed json", "PROVIDER_PARSE_FAILED"),
+])
+def test_provider_failure_classification(status_code, message, code):
+    error = RuntimeError(message)
+    error.status_code = status_code
+    assert classify_provider_failure(error) == code
+
+
+def test_timeout_and_connection_failure_classification():
+    assert classify_provider_failure(TimeoutError("private timeout")) == "PROVIDER_TIMEOUT"
+    assert classify_provider_failure(ConnectionError("private connection")) == "PROVIDER_UNAVAILABLE"
 
 
 def test_fuyao_native_batch_and_index_endpoint_keep_identity(market):

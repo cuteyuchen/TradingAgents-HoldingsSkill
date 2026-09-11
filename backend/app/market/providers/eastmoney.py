@@ -8,6 +8,7 @@ the analysis layer.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
@@ -132,11 +133,13 @@ def parse_eastmoney_row(
     code = normalize_security_code(row.get("f12") or row.get("code") or row.get("symbol"))
     if not code:
         return None
-    source_time = _source_timestamp(row.get("f86") or row.get("source_timestamp") or row.get("quote_time"))
+    raw_source_time = row.get("f86") or row.get("source_timestamp") or row.get("quote_time")
+    source_time = _source_timestamp(raw_source_time)
+    observed_date_inferred = isinstance(raw_source_time, str) and bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", raw_source_time.strip()))
     price = _scaled_price(row.get("f43", row.get("price")))
     quality = DataQualityStatus.VALID if price is not None else DataQualityStatus.MISSING
     errors = [] if price is not None else ["quote_missing"]
-    return NormalizedQuote(
+    quote = NormalizedQuote(
         market="CN",
         exchange=exchange_for_code(code),
         code=code,
@@ -157,8 +160,18 @@ def parse_eastmoney_row(
         raw_reference=EASTMONEY_QUOTE_URL,
         is_suspended=bool(row.get("is_suspended") or row.get("suspended")),
         errors=errors,
-        metadata={"volume_unit": "lots", "turnover_unit": "CNY"},
+        metadata={
+            "volume_unit": "lots", "turnover_unit": "CNY",
+            "observed_date_inferred": observed_date_inferred,
+            "timestamp_field": "f86" if row.get("f86") is not None else "source_timestamp" if row.get("source_timestamp") is not None else "quote_time",
+        },
     )
+    if observed_date_inferred:
+        # HH:MM:SS carries no observation date. Do not let NormalizedQuote's
+        # generic parser bind it to the host's current day.
+        quote.source_timestamp = None
+        quote.trade_date = None
+    return quote
 
 
 class EastmoneyBatchQuoteProvider(QuoteProvider):
