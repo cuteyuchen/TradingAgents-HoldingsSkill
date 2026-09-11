@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from ..codes import normalize_security_code, exchange_for_code, provider_symbol
+from ..codes import canonical_security_code, exchange_hint, normalize_security_code, exchange_for_code, provider_symbol
 from ..models import DataQualityStatus, NormalizedQuote
 from ..quality import validate_normalized_quote
 from .base import QuoteProvider
@@ -48,7 +48,9 @@ def tencent_symbol(code: str) -> str:
     return provider_symbol(code, "tencent")
 
 
-def parse_tencent_line(line: str, *, fetched_at: datetime | None = None) -> NormalizedQuote | None:
+def parse_tencent_line(
+    line: str, *, fetched_at: datetime | None = None, infer_observed_date: bool = True,
+) -> NormalizedQuote | None:
     if '="' not in line:
         return None
     raw = line.split('="', 1)[1].rstrip('";\r\n')
@@ -59,8 +61,9 @@ def parse_tencent_line(line: str, *, fetched_at: datetime | None = None) -> Norm
     if not code:
         return None
     quote_time = fields[30] or None
-    source_timestamp: datetime | str | None = quote_time
-    if quote_time and len(quote_time) == 8 and fetched_at is not None:
+    time_only = bool(quote_time and len(quote_time) == 8)
+    source_timestamp: datetime | str | None = None if time_only and not infer_observed_date else quote_time
+    if time_only and infer_observed_date and fetched_at is not None:
         try:
             source_timestamp = datetime.combine(
                 fetched_at.astimezone(CHINA_TZ).date(),
@@ -71,7 +74,7 @@ def parse_tencent_line(line: str, *, fetched_at: datetime | None = None) -> Norm
             source_timestamp = quote_time
     quote = NormalizedQuote(
         market="CN",
-        exchange=exchange_for_code(code),
+        exchange=exchange_hint(line.split('="', 1)[0].removeprefix("v_")) or exchange_for_code(code),
         code=code,
         name=fields[1] or None,
         price=_float(fields[3]),
@@ -87,6 +90,24 @@ def parse_tencent_line(line: str, *, fetched_at: datetime | None = None) -> Norm
         fetched_at=fetched_at or datetime.now().astimezone(),
         quality_status=DataQualityStatus.VALID,
         raw_reference=TENCENT_QUOTE_URL,
+        metadata={
+            "volume_unit": "lots",
+            "turnover_unit": "10k_CNY",
+            "observed_date_inferred": time_only,
+            "order_book": {
+                "bids": [
+                    {"price": _float(fields[index]), "volume": _float(fields[index + 1])}
+                    for index in range(9, 19, 2)
+                ],
+                "asks": [
+                    {"price": _float(fields[index]), "volume": _float(fields[index + 1])}
+                    for index in range(19, 29, 2)
+                ],
+                "inner_volume": _float(fields[8]),
+                "outer_volume": _float(fields[7]),
+                "volume_unit": "lots",
+            },
+        },
     )
     validation = validate_normalized_quote(quote, now=quote.fetched_at, max_age_seconds=None)
     quote.quality_status = validation.status
@@ -112,7 +133,14 @@ class TencentQuoteProvider(QuoteProvider):
         self.batch_size = max(1, int(batch_size))
 
     def get_quotes(self, codes: Iterable[str]) -> dict[str, NormalizedQuote]:
-        normalized = list(dict.fromkeys(normalize_security_code(code) for code in codes if normalize_security_code(code)))
+        return self._get_quotes(codes, qualified=False)
+
+    def get_instrument_quotes(self, codes: Iterable[str], *, instrument_types=None) -> dict[str, NormalizedQuote]:
+        return self._get_quotes(codes, qualified=True)
+
+    def _get_quotes(self, codes: Iterable[str], *, qualified: bool) -> dict[str, NormalizedQuote]:
+        normalize = canonical_security_code if qualified else normalize_security_code
+        normalized = list(dict.fromkeys(normalize(code) for code in codes if normalize(code)))
         if not normalized:
             return {}
         request = self._request or self.session.get
@@ -134,13 +162,15 @@ class TencentQuoteProvider(QuoteProvider):
                 line = record.strip()
                 if not line:
                     continue
-                quote = parse_tencent_line(line + '";', fetched_at=fetched_at)
+                quote = parse_tencent_line(
+                    line + '";', fetched_at=fetched_at, infer_observed_date=not qualified,
+                )
                 if quote:
-                    results[quote.code] = quote
+                    results[quote.symbol if qualified else quote.code] = quote
         for code in set(normalized) - set(results):
             results[code] = NormalizedQuote(
                 code=code,
-                exchange=exchange_for_code(code),
+                exchange=exchange_hint(code) or exchange_for_code(code),
                 provider=self.name,
                 fetched_at=fetched_at,
                 quality_status=DataQualityStatus.MISSING,

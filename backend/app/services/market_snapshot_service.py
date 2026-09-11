@@ -44,6 +44,28 @@ SnapshotProvider = Callable[[dict[str, Any]], Any]
 _snapshot_provider: SnapshotProvider | None = None
 _foundation_snapshot_cache_lock = threading.Lock()
 _foundation_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_MARKET_CACHE_MAX_ENTRIES = 2048
+
+
+def get_market_data_cache(key: str) -> dict[str, Any] | None:
+    """Shared, bounded runtime cache for market and instrument facts."""
+
+    with _foundation_snapshot_cache_lock:
+        cached = _foundation_snapshot_cache.get(key)
+        if cached is not None and cached[0] > time.monotonic():
+            return deepcopy(cached[1])
+        _foundation_snapshot_cache.pop(key, None)
+    return None
+
+
+def put_market_data_cache(key: str, payload: Mapping[str, Any], *, ttl: float) -> None:
+    now = time.monotonic()
+    with _foundation_snapshot_cache_lock:
+        for expired in [name for name, (expiry, _) in _foundation_snapshot_cache.items() if expiry <= now]:
+            _foundation_snapshot_cache.pop(expired, None)
+        if key not in _foundation_snapshot_cache and len(_foundation_snapshot_cache) >= _MARKET_CACHE_MAX_ENTRIES:
+            _foundation_snapshot_cache.pop(next(iter(_foundation_snapshot_cache)))
+        _foundation_snapshot_cache[key] = (now + max(0.0, ttl), deepcopy(dict(payload)))
 
 
 def set_snapshot_provider(provider: SnapshotProvider | None) -> None:
@@ -388,15 +410,12 @@ def get_cached_all_a_share_quote_snapshot(
             "suspended" if include_suspended else "active-only",
         )
     )
-    now = time.monotonic()
-    with _foundation_snapshot_cache_lock:
-        cached = _foundation_snapshot_cache.get(key)
-        if cached is not None and cached[0] > now:
-            result = deepcopy(cached[1])
-            metadata = dict(result.get("metadata") or {})
-            metadata["market_foundation_cache_hit"] = True
-            result["metadata"] = metadata
-            return result
+    cached = get_market_data_cache(key)
+    if cached is not None:
+        metadata = dict(cached.get("metadata") or {})
+        metadata["market_foundation_cache_hit"] = True
+        cached["metadata"] = metadata
+        return cached
 
     snapshot = get_all_a_share_quote_snapshot(
         db,
@@ -411,8 +430,7 @@ def get_cached_all_a_share_quote_snapshot(
     metadata = dict(result.get("metadata") or {})
     metadata["market_foundation_cache_hit"] = False
     result["metadata"] = metadata
-    with _foundation_snapshot_cache_lock:
-        _foundation_snapshot_cache[key] = (time.monotonic() + max(0.0, float(ttl)), result)
+    put_market_data_cache(key, result, ttl=float(ttl))
     return deepcopy(result)
 
 

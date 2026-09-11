@@ -3,6 +3,14 @@ import type {
   AnalysisMode,
   AnalysisRunDetail,
   AnalysisRunSummary,
+  BatchQuoteResponse,
+  CapitalFlow,
+  InstrumentBarsQuery,
+  InstrumentBarsResponse,
+  InstrumentMarketSnapshot,
+  InstrumentMetadataResponse,
+  InstrumentQuote,
+  OrderBook,
   BacktestRun,
   CalibrationReport,
   DailyDashboard,
@@ -367,6 +375,19 @@ export const api = {
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
   getMarketSession: () => request<MarketSessionResponse>('/api/v3/market/session'),
+  getInstrument: (code: string) => request<InstrumentMetadataResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}`),
+  getInstrumentQuote: (code: string) => request<InstrumentQuote>(`/api/v3/market/instruments/${encodeURIComponent(code)}/quote`),
+  getInstrumentQuotes: (codes: string[]) => request<BatchQuoteResponse>('/api/v3/market/instruments/quotes', { method: 'POST', body: { codes } }),
+  getInstrumentBars: (code: string, query: InstrumentBarsQuery = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) params.set(key, String(value))
+    }
+    return request<InstrumentBarsResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}/bars?${params}`)
+  },
+  getInstrumentOrderBook: (code: string) => request<OrderBook>(`/api/v3/market/instruments/${encodeURIComponent(code)}/order-book`),
+  getInstrumentCapitalFlow: (code: string) => request<CapitalFlow>(`/api/v3/market/instruments/${encodeURIComponent(code)}/capital-flow`),
+  getInstrumentSnapshot: (code: string) => request<InstrumentMarketSnapshot>(`/api/v3/market/instruments/${encodeURIComponent(code)}/snapshot`),
   getMajorIndices: () => request<MajorIndexQuote[]>('/api/v3/market/major-indices'),
   getSystemicRisk: () => request<SystemicRiskSnapshot>('/api/v3/market/systemic-risk'),
   getMarketOverview: () => request<MarketOverview>('/api/v3/market/overview'),

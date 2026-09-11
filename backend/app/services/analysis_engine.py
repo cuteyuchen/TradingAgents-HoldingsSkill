@@ -27,7 +27,8 @@ from ..portfolio.decision_gate import apply_portfolio_decision_gate
 from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .holding_identity import UnresolvedSecurityIdentityError, snapshot_identity_issues
-from .market_data import collect_market_snapshot, normalize_code, refresh_snapshot_quotes
+from .market_data import normalize_code
+from .instrument_market_evidence import collect_market_snapshot, refresh_snapshot_quotes
 from .model_client import StructuredModelResult, call_model, call_model_json, model_cancellation, parse_json_result
 from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_metadata, runtime_prompt
