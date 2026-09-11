@@ -10,7 +10,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ..clock import utc_now
-from .codes import exchange_for_code, normalize_security_code
+from .codes import exchange_for_code, exchange_hint, normalize_security_code
 
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -138,9 +138,10 @@ class NormalizedQuote:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        explicit_exchange = exchange_hint(self.code)
         self.code = normalize_security_code(self.code)
         if self.exchange is None:
-            self.exchange = exchange_for_code(self.code)
+            self.exchange = explicit_exchange or exchange_for_code(self.code)
         else:
             self.exchange = _EXCHANGE_ALIASES.get(str(self.exchange).strip().upper(), str(self.exchange).strip().upper())
         self.market = str(self.market or "CN").upper()

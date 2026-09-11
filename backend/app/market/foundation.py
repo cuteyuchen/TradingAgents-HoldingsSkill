@@ -28,6 +28,7 @@ from .codes import canonical_security_code, normalize_security_code
 from .engine.median_index import next_median_index
 from .engine.metrics import is_price_limit
 from .providers.fuyao import FuyaoDataProvider
+from .quality import _worst_grade
 from .session import MarketDataBasis, MarketSession, MarketSessionResolution, MarketSessionService
 
 
@@ -128,14 +129,6 @@ def _quality_grade(status: Any, *, fallback: bool = False, coverage: float | Non
     if coverage is not None and coverage < 0.95 and grade in {"A", "B"}:
         grade = "C"
     return grade
-
-
-def _worst_grade(*grades: str) -> str:
-    return max(
-        grades,
-        key=lambda value: {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}.get(value, 4),
-        default="F",
-    )
 
 
 def _metric_status(value: Any) -> str:

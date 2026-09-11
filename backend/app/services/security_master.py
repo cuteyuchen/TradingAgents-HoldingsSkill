@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
-from ..market.codes import exchange_for_code, normalize_security_code as _normalize_security_code
+from ..market.codes import exchange_for_code, exchange_hint, normalize_security_code as _normalize_security_code
 from ..market_models import SecurityMaster
 
 CN_MARKET = "CN"
@@ -22,6 +22,7 @@ SZSE = "SZSE"
 BSE = "BSE"
 STOCK = "STOCK"
 ETF = "ETF"
+INDEX = "INDEX"
 
 _EXCHANGE_ALIASES = {
     "SH": SSE,
@@ -132,9 +133,9 @@ def _normalized_payload(row: SecurityMaster | Mapping[str, Any]) -> dict[str, An
     security_type = str(raw.get("security_type") or STOCK).strip().upper()
     if security_type in {"SHARE", "EQUITY"}:
         security_type = STOCK
-    if security_type not in {STOCK, ETF}:
+    if security_type not in {STOCK, ETF, INDEX}:
         raise ValueError(f"unsupported security_type: {security_type}")
-    exchange = infer_exchange(code, raw.get("exchange"),)
+    exchange = infer_exchange(code, raw.get("exchange") or exchange_hint(raw.get("code") or raw.get("symbol")))
     symbol = raw.get("symbol")
     if not symbol:
         suffix = {SSE: "SH", SZSE: "SZ", BSE: "BJ"}.get(exchange, exchange)
@@ -202,7 +203,7 @@ def get_security(
     statement: Select[tuple[SecurityMaster]] = select(SecurityMaster).where(
         SecurityMaster.market == market.upper(), SecurityMaster.code == normalized
     )
-    resolved_exchange = normalize_exchange(exchange)
+    resolved_exchange = normalize_exchange(exchange) or exchange_hint(code)
     if resolved_exchange:
         statement = statement.where(SecurityMaster.exchange == resolved_exchange)
     return db.execute(statement.order_by(SecurityMaster.id.asc())).scalars().first()

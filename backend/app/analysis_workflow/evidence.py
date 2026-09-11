@@ -64,6 +64,11 @@ def freeze_evidence(audit, input_payload: dict[str, Any], contract: dict[str, An
         if artifact is None or hash_input(content) != artifact.sha256:
             raise ResumeRejected("evidence_snapshot_hash_mismatch")
     else:
+        instrument_market = input_payload.get("market", {}).get("instrument_market")
+        if instrument_market is not None:
+            from ..market.instrument_schemas import InstrumentMarketEvidence
+
+            InstrumentMarketEvidence.model_validate(instrument_market)
         content = redact_payload({
             "schema_version": "v3-core-3.evidence.v1",
             "input": input_payload,

@@ -150,6 +150,7 @@ from .routers import (  # noqa: E402
     model_settings_v2,
     portfolios_v2,
     market_engine_v3,
+    instruments_v3,
     memory_v3,
     system_v3,
     research_v3,
@@ -172,6 +173,7 @@ app.include_router(governance_v3.router)
 app.include_router(history_v3.router)
 app.include_router(market_v3.router)
 app.include_router(market_engine_v3.router)
+app.include_router(instruments_v3.router)
 app.include_router(memory_v3.router)
 app.include_router(research_v3.router)
 app.include_router(monitor_v3.router)

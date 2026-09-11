@@ -1,4 +1,4 @@
-import { test, expect, login, selectPortfolio } from './fixtures'
+import { test, expect, login } from './fixtures'
 
 test('Single-user navigation exposes only the workbench pages and preserves legacy aliases', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
@@ -134,7 +134,7 @@ test('First run shows one actionable checklist instead of empty dashboard cards'
 
 test('Home prioritizes market, final decision, freshness, and a legal no-candidate state', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
-  await selectPortfolio(page, 'Acceptance Freshness')
+  await page.goto(`/dashboard?portfolio=${facts.portfolios.freshness}`)
   await expect(page.getByText('今日市场', { exact: true })).toBeVisible()
   await expect(page.locator('.freshness-label').first()).toBeVisible()
 

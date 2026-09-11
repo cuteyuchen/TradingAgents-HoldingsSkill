@@ -13,7 +13,9 @@ test('Reports exposes final decision, checkpoint, mode, quality, market context,
   await expect(page.locator('.flow-rail')).toContainText('风控')
   await expect(page.locator('.workflow-stage').filter({ hasText: '组合经理最终决策' })).toContainText('ACTION')
   await page.locator('.n-tabs-tab').filter({ hasText: '结构化证据' }).click()
-  await expect(page.locator('.json-panel')).toContainText('Acceptance deterministic fixture')
+  await page.locator('.json-panel').getByText('原始结构化 JSON', { exact: true }).click()
+  await expect(page.locator('.json-panel pre')).toBeVisible()
+  await expect(page.locator('.json-panel pre')).toContainText('Acceptance deterministic fixture')
 })
 
 test('Research creates a deterministic run, recovers the durable result, and shows PARTIAL PIT capability', async ({ acceptancePage: page, facts }) => {

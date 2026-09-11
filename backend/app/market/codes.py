@@ -116,7 +116,7 @@ def provider_symbol(code: object, provider: str) -> str:
     normalized = normalize_security_code(code)
     if not normalized:
         return ""
-    exchange = exchange_for_code(normalized)
+    exchange = exchange_hint(code) or exchange_for_code(normalized)
     prefix = {"SSE": "sh", "SZSE": "sz", "BSE": "bj"}.get(exchange or "", "")
     provider_name = provider.lower().strip()
     if provider_name in {"tencent", "sina", "qt.gtimg.cn", "hq.sinajs.cn"}:
