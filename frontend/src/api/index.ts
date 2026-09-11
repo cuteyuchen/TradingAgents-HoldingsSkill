@@ -159,7 +159,7 @@ export function saveSession(tokens: TokenPair): void {
 export function clearSession(): void { localStorage.removeItem(ACCESS_KEY); localStorage.removeItem(REFRESH_KEY) }
 export function hasSession(): boolean { return Boolean(getAccessToken() || getRefreshToken()) }
 
-interface RequestOptions { method?: string; body?: unknown; public?: boolean; headers?: Record<string, string>; retryAuth?: boolean; timeoutMs?: number }
+interface RequestOptions { method?: string; body?: unknown; public?: boolean; headers?: Record<string, string>; retryAuth?: boolean; timeoutMs?: number; signal?: AbortSignal }
 
 async function parseError(res: Response): Promise<ApiError> {
   let payload: any = null
@@ -218,6 +218,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const token = getAccessToken()
   if (token && !options.public) headers.Authorization = `Bearer ${token}`
   const controller = new AbortController()
+  if (options.signal?.aborted) controller.abort()
+  const abortExternal = () => controller.abort()
+  options.signal?.addEventListener('abort', abortExternal, { once: true })
   const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || 30_000)
   let res: Response
   try {
@@ -230,6 +233,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     )
   } finally {
     window.clearTimeout(timeout)
+    options.signal?.removeEventListener('abort', abortExternal)
   }
   if (res.status === 401 && !options.public && options.retryAuth !== false) {
     const refreshed = await refreshSession()
@@ -370,7 +374,7 @@ export const api = {
   deleteNotification: (id: number) => request<void>(`/api/v2/notifications/${id}`, { method: 'DELETE' }),
   testNotification: (id: number) => request<{ status: string; message: string }>(`/api/v2/notifications/${id}/test`, { method: 'POST' }),
 
-  getDashboardToday: (portfolioId: number) => request<DailyDashboard>(`/api/v3/portfolios/${portfolioId}/dashboard/today`),
+  getDashboardToday: (portfolioId: number, signal?: AbortSignal) => request<DailyDashboard>(`/api/v3/portfolios/${portfolioId}/dashboard/today`, { signal }),
   getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
