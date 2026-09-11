@@ -34,6 +34,8 @@ const creating = ref(false)
 const newPortfolioName = ref('我的主账户')
 let refreshTimer: number | null = null
 let mounted = false
+let dashboardRequestSequence = 0
+let dashboardAbortController: AbortController | null = null
 
 const { portfolios, selectedPortfolioId, selectedPortfolio, loadPortfolios, setSelectedPortfolio } = usePortfolioContext()
 const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
@@ -147,18 +149,33 @@ function openAnalysis() {
 }
 
 async function loadDashboard(silent = false) {
-  if (!selectedPortfolioId.value) {
+  const portfolioId = selectedPortfolioId.value
+  const requestSequence = ++dashboardRequestSequence
+  dashboardAbortController?.abort()
+  const controller = new AbortController()
+  dashboardAbortController = controller
+  if (!portfolioId) {
     dashboard.value = null
+    if (!silent && requestSequence === dashboardRequestSequence) loading.value = false
     return
   }
   if (!silent) loading.value = true
   error.value = null
   try {
-    dashboard.value = await api.getDashboardToday(selectedPortfolioId.value)
+    const next = await api.getDashboardToday(portfolioId, controller.signal)
+    // A slower response must never replace the currently selected portfolio.
+    if (requestSequence === dashboardRequestSequence && selectedPortfolioId.value === portfolioId) {
+      dashboard.value = next
+    }
   } catch (reason) {
-    error.value = reason
+    if (!controller.signal.aborted && requestSequence === dashboardRequestSequence && selectedPortfolioId.value === portfolioId) {
+      error.value = reason
+    }
   } finally {
-    if (!silent) loading.value = false
+    if (requestSequence === dashboardRequestSequence) {
+      if (!silent) loading.value = false
+      if (dashboardAbortController === controller) dashboardAbortController = null
+    }
   }
 }
 
@@ -213,10 +230,15 @@ function startRefresh() {
 }
 
 watch(selectedPortfolioId, (id, previous) => {
-  if (mounted && id && id !== previous) void loadDashboard()
+  if (id && id !== previous) void loadDashboard(!mounted)
 })
 onMounted(async () => { await load(); mounted = true; startRefresh() })
-onUnmounted(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer) })
+onUnmounted(() => {
+  if (refreshTimer !== null) window.clearInterval(refreshTimer)
+  dashboardAbortController?.abort()
+  dashboardAbortController = null
+  dashboardRequestSequence += 1
+})
 </script>
 
 <template>
