@@ -1,0 +1,177 @@
+/**
+ * V3 Design Tokens
+ * 金融工作台统一设计令牌：颜色 / 字体 / 间距 / 圆角 / 阴影 / 动效 / 布局
+ * A 股语义：上涨=红，下跌=绿；风险/错误状态与涨跌色分离。
+ */
+
+/* ========== Light (default) ========== */
+:root {
+  /* Surfaces */
+  --v3-bg: #f4f6f8;
+  --v3-surface: #ffffff;
+  --v3-surface-elevated: #ffffff;
+  --v3-surface-muted: #f7f8fa;
+  --v3-surface-hover: #f1f5f9;
+
+  /* Borders */
+  --v3-border: #dfe3e8;
+  --v3-border-strong: #c4cbd3;
+  --v3-border-subtle: #edf0f3;
+
+  /* Text */
+  --v3-text: #1b2530;
+  --v3-text-secondary: #3d4a56;
+  --v3-text-muted: #66727f;
+  --v3-text-inverse: #ffffff;
+
+  /* Brand / Primary */
+  --v3-primary: #245ea8;
+  --v3-primary-hover: #3477c2;
+  --v3-primary-pressed: #174984;
+  --v3-primary-soft: #e9f1fb;
+
+  /* A-share market direction — 红涨绿跌（硬约束） */
+  --v3-market-up: #c73535;
+  --v3-market-up-soft: #fdecec;
+  --v3-market-down: #17865b;
+  --v3-market-down-soft: #e7f6ef;
+  --v3-market-flat: #66727f;
+  --v3-market-flat-soft: #f1f4f7;
+
+  /* Status semantics — 禁止复用 market-up/down 表达风险 */
+  --v3-status-info: #245ea8;
+  --v3-status-info-soft: #e9f1fb;
+  --v3-status-success: #17865b;
+  --v3-status-success-soft: #e7f6ef;
+  --v3-status-warning: #b26a08;
+  --v3-status-warning-soft: #fff4e5;
+  --v3-status-danger: #b42318;
+  --v3-status-danger-soft: #fdecec;
+  --v3-status-blocked: #5c6670;
+  --v3-status-blocked-soft: #eef1f4;
+
+  /* Risk scale — 蓝/青/黄/橙/neutral，绝不与上涨红混用 */
+  --v3-risk-low: #0d7a8a;
+  --v3-risk-low-soft: #e6f6f8;
+  --v3-risk-medium: #b78114;
+  --v3-risk-medium-soft: #fff6e0;
+  --v3-risk-high: #c36a17;
+  --v3-risk-high-soft: #fff0e2;
+  --v3-risk-unknown: #66727f;
+  --v3-risk-unknown-soft: #f1f4f7;
+
+  /* Spacing scale: 4 / 8 / 12 / 16 / 20 / 24 / 32 */
+  --v3-space-1: 4px;
+  --v3-space-2: 8px;
+  --v3-space-3: 12px;
+  --v3-space-4: 16px;
+  --v3-space-5: 20px;
+  --v3-space-6: 24px;
+  --v3-space-8: 32px;
+
+  /* Radius — 金融工作台保持克制 */
+  --v3-radius-sm: 6px;
+  --v3-radius-md: 8px;
+  --v3-radius-lg: 12px;
+  --v3-radius-pill: 999px;
+
+  /* Shadow — subtle border 优先 */
+  --v3-shadow-sm: 0 1px 2px rgba(23, 35, 48, 0.04);
+  --v3-shadow-md: 0 4px 12px rgba(23, 35, 48, 0.06);
+  --v3-shadow-lg: 0 10px 28px rgba(23, 35, 48, 0.08);
+
+  /* Elevation / Z-index */
+  --v3-z-base: 0;
+  --v3-z-sticky: 100;
+  --v3-z-drawer: 1000;
+  --v3-z-modal: 2000;
+  --v3-z-tooltip: 3000;
+  --v3-z-notify: 4000;
+
+  /* Motion */
+  --v3-duration-fast: 120ms;
+  --v3-duration-base: 180ms;
+  --v3-duration-slow: 280ms;
+  --v3-ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Layout */
+  --v3-sidebar-width: 224px;
+  --v3-sidebar-collapsed-width: 64px;
+  --v3-topbar-height: 56px;
+  --v3-content-max: 1360px;
+  --v3-drawer-desktop-width: 68vw;
+  --v3-drawer-desktop-max: 960px;
+
+  /* Density */
+  --v3-density-compact-row: 36px;
+  --v3-density-default-row: 40px;
+
+  /* Typography */
+  --v3-font-sans: Inter, 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --v3-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --v3-font-size-xs: 11px;
+  --v3-font-size-sm: 12px;
+  --v3-font-size-md: 13px;
+  --v3-font-size-lg: 14px;
+  --v3-font-size-xl: 16px;
+  --v3-font-size-2xl: 20px;
+  --v3-font-size-3xl: 26px;
+  --v3-line-height: 1.5;
+}
+
+/* ========== Dark ========== */
+:root.theme-dark,
+body.body--dark {
+  color-scheme: dark;
+
+  --v3-bg: #11161c;
+  --v3-surface: #182028;
+  --v3-surface-elevated: #1d2731;
+  --v3-surface-muted: #141c24;
+  --v3-surface-hover: #202d38;
+
+  --v3-border: #2f3b46;
+  --v3-border-strong: #465562;
+  --v3-border-subtle: #25323d;
+
+  --v3-text: #eef3f7;
+  --v3-text-secondary: #c5d0da;
+  --v3-text-muted: #a8b4bf;
+  --v3-text-inverse: #11161c;
+
+  --v3-primary: #8fc0ff;
+  --v3-primary-hover: #a7d0ff;
+  --v3-primary-pressed: #4b91ed;
+  --v3-primary-soft: #1c3855;
+
+  --v3-market-up: #f07b7b;
+  --v3-market-up-soft: #3a1f22;
+  --v3-market-down: #58c796;
+  --v3-market-down-soft: #143328;
+  --v3-market-flat: #a8b4bf;
+  --v3-market-flat-soft: #1c242c;
+
+  --v3-status-info: #8fc0ff;
+  --v3-status-info-soft: #1c3855;
+  --v3-status-success: #58c796;
+  --v3-status-success-soft: #143328;
+  --v3-status-warning: #e5b85e;
+  --v3-status-warning-soft: #3a2e14;
+  --v3-status-danger: #ff8b82;
+  --v3-status-danger-soft: #3a1f1c;
+  --v3-status-blocked: #9aa7b2;
+  --v3-status-blocked-soft: #242c34;
+
+  --v3-risk-low: #4ec9d4;
+  --v3-risk-low-soft: #143036;
+  --v3-risk-medium: #e5c56d;
+  --v3-risk-medium-soft: #3a3218;
+  --v3-risk-high: #f2a262;
+  --v3-risk-high-soft: #3a2a18;
+  --v3-risk-unknown: #a8b4bf;
+  --v3-risk-unknown-soft: #1c242c;
+
+  --v3-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --v3-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.22);
+  --v3-shadow-lg: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
