@@ -33,3 +33,9 @@ frontend/node_modules/
 .DS_Store
 Thumbs.db
 output/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+output/playwright/
+frontend/vite-dev*.log

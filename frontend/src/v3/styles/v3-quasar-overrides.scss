@@ -1,0 +1,71 @@
+/**
+ * Quasar CSS 覆盖 — 收敛全局冲击，保护 Legacy Naive 页面。
+ * 仅调整真正会污染 body / form 控件的规则。
+ */
+
+/* Quasar reset 不覆盖 Legacy body 基线 */
+body {
+  font-family: var(--v3-font-sans, Inter, 'Microsoft YaHei', sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--v3-bg, #f4f6f8);
+  color: var(--v3-text, #1b2530);
+}
+
+/* Legacy Naive 页面中的 button/input/select 保持继承字体 */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* V3 作用域内统一 Quasar 控件观感 */
+.v3-root {
+  .q-btn {
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 600;
+  }
+
+  .q-card {
+    border-radius: var(--v3-radius-md, 8px);
+    box-shadow: none;
+    border: 1px solid var(--v3-border, #dfe3e8);
+    background: var(--v3-surface, #fff);
+  }
+
+  .q-table__th {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--v3-text-muted, #66727f);
+    background: var(--v3-surface-muted, #f7f8fa);
+  }
+
+  .q-table__td {
+    font-size: 13px;
+  }
+
+  .q-drawer {
+    background: var(--v3-surface, #fff);
+  }
+
+  .q-header {
+    background: var(--v3-surface, #fff);
+    color: var(--v3-text, #1b2530);
+    border-bottom: 1px solid var(--v3-border, #dfe3e8);
+  }
+
+  .q-tabs {
+    .q-tab {
+      text-transform: none;
+      font-weight: 600;
+      font-size: 13px;
+      min-height: 40px;
+    }
+  }
+
+  .q-notify {
+    font-size: 13px;
+  }
+}
