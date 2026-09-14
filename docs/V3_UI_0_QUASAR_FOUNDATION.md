@@ -192,6 +192,9 @@ V3 页面不要用 Tailwind 手造 Button/Input/Select/Dialog/Drawer/Tabs/Table/
 - 组件：`src/v3/views/V3FoundationView.vue`
 - 页面数据为 **development showcase data**，不可冒充真实行情
 - 普通生产导航不显示
+- Acceptance runner（`scripts/run_acceptance.py`）在 production build 前显式设置
+  `VITE_ENABLE_V3_FOUNDATION=true`，以便 CI 覆盖 foundation 路由；
+  未设置该变量的 production build 仍默认不暴露 foundation
 
 ## Deferred Scope（本阶段明确不做）
 
@@ -219,7 +222,7 @@ npm run build
 npm run e2e -- e2e/v3-foundation.spec.ts
 ```
 
-完整 acceptance（需后端）：
+完整 acceptance（需后端；runner 会在 build 前设置 `VITE_ENABLE_V3_FOUNDATION=true`）：
 
 ```bash
 npm run e2e:acceptance
