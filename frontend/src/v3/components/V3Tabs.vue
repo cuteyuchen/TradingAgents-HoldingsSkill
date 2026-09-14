@@ -59,6 +59,8 @@ const current = computed({
 .v3-tabs__bar {
   border-bottom: 1px solid var(--v3-border);
   color: var(--v3-text);
+  max-width: 100%;
+  overflow-x: auto;
 }
 .v3-tabs__panels {
   padding-top: var(--v3-space-4);

@@ -34,6 +34,13 @@ const router = createRouter({
       meta: { uiSystem: 'v3', public: true, foundation: true },
       beforeEnter: () => foundationEnabled() || { name: 'dashboard' },
     },
+    // V3-UI-1 Unified InstrumentDetail — auth protected, not foundation-flag gated
+    {
+      path: '/market/instruments/:code',
+      name: 'instrument-detail',
+      component: () => import('./v3/instrument-detail/V3InstrumentDetailPage.vue'),
+      meta: { uiSystem: 'v3', title: '标的详情' },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],
 })
