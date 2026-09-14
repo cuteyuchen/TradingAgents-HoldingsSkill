@@ -1,6 +1,13 @@
 /**
  * Shared InstrumentDetail data controller.
  * Used by both full page and drawer — no duplicated request logic.
+ *
+ * Lifecycle rules:
+ * - Each module owns an independent AbortController + sequence (RequestSlot).
+ * - Pollers are independent: quote/book/flow/bars/session only reschedule themselves.
+ * - code change / unmount / drawer close abort all and clear all timers.
+ * - Bars param change aborts only the bars slot.
+ * - Secondary loaders use resolved canonical identity, never raw route param equality.
  */
 import { computed, onBeforeUnmount, ref, shallowRef, watch, type Ref } from 'vue'
 import { ApiError, api } from '@/api'
@@ -66,7 +73,8 @@ function defaultAdjustment(caps: InstrumentMetadataResponse['capabilities'] | nu
   return caps.adjustments[0]
 }
 
-function pollingIntervalMs(session: MarketSessionResponse | null, module: 'quote' | 'book' | 'flow' | 'bars'): number | null {
+/** Exported for deterministic unit/acceptance timing tests. */
+export function pollingIntervalMs(session: MarketSessionResponse | null, module: 'quote' | 'book' | 'flow' | 'bars'): number | null {
   const kind = session?.session
   if (kind === 'CLOSED' || kind === 'NON_TRADING_DAY' || kind === 'DATA_ABNORMAL') {
     return null
@@ -86,6 +94,19 @@ function pollingIntervalMs(session: MarketSessionResponse | null, module: 'quote
     default:
       return null
   }
+}
+
+export function sessionPollIntervalMs(session: MarketSessionResponse | null): number | null {
+  const kind = session?.session
+  if (kind === 'MORNING' || kind === 'AFTERNOON' || kind === 'LUNCH_BREAK') return 60_000
+  return null
+}
+
+type RequestSlotName = 'identity' | 'quote' | 'bars' | 'book' | 'flow' | 'session'
+
+interface RequestSlot {
+  controller: AbortController | null
+  seq: number
 }
 
 export interface UseInstrumentDetailOptions {
@@ -124,17 +145,31 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
 
   const bookLoadedFor = ref<string | null>(null)
   const flowLoadedFor = ref<string | null>(null)
-  const bookRequestedRef = ref(false)
-  const flowRequestedRef = ref(false)
 
-  let abortController: AbortController | null = null
-  let requestSeq = 0
-  let activeCode = ''
-  let quoteTimer: number | null = null
-  let bookTimer: number | null = null
-  let flowTimer: number | null = null
-  let barsTimer: number | null = null
-  let sessionTimer: number | null = null
+  /** Incremented on every code change / initialLoad. Secondary responses must match. */
+  let requestGeneration = 0
+  /** Raw route/user input code for the current generation. */
+  let requestedInputCode = ''
+  /** Canonical identity.code after successful metadata (may alias 600519 -> 600519.SH). */
+  let resolvedCanonicalCode = ''
+
+  const slots: Record<RequestSlotName, RequestSlot> = {
+    identity: { controller: null, seq: 0 },
+    quote: { controller: null, seq: 0 },
+    bars: { controller: null, seq: 0 },
+    book: { controller: null, seq: 0 },
+    flow: { controller: null, seq: 0 },
+    session: { controller: null, seq: 0 },
+  }
+
+  const pollTimers: Record<'quote' | 'book' | 'flow' | 'bars' | 'session', number | null> = {
+    quote: null,
+    book: null,
+    flow: null,
+    bars: null,
+    session: null,
+  }
+
   let visibilityHandler: (() => void) | null = null
 
   const identity = computed(() => metadata.value?.identity ?? null)
@@ -147,52 +182,164 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
   const supportsBars = computed(() => capabilities.value?.bars !== false)
   const supportsQuote = computed(() => capabilities.value?.quote !== false)
 
-  function clearTimers(): void {
-    for (const t of [quoteTimer, bookTimer, flowTimer, barsTimer, sessionTimer]) {
-      if (t !== null) window.clearTimeout(t)
+  function beginModuleRequest(name: RequestSlotName): { signal: AbortSignal; seq: number; generation: number; inputCode: string; canonical: string } {
+    abortModule(name)
+    const slot = slots[name]
+    const controller = new AbortController()
+    slot.controller = controller
+    slot.seq += 1
+    return {
+      signal: controller.signal,
+      seq: slot.seq,
+      generation: requestGeneration,
+      inputCode: requestedInputCode,
+      canonical: resolvedCanonicalCode || code.value,
     }
-    quoteTimer = bookTimer = flowTimer = barsTimer = sessionTimer = null
   }
 
-  function abortInFlight(): void {
-    abortController?.abort()
-    abortController = null
+  function abortModule(name: RequestSlotName): void {
+    const slot = slots[name]
+    slot.controller?.abort()
+    slot.controller = null
   }
 
-  function beginRequest(): { signal: AbortSignal; seq: number; code: string } {
-    abortInFlight()
-    abortController = new AbortController()
-    requestSeq += 1
-    activeCode = code.value
-    return { signal: abortController.signal, seq: requestSeq, code: activeCode }
+  function abortAllModules(): void {
+    (Object.keys(slots) as RequestSlotName[]).forEach(abortModule)
   }
 
-  function isCurrent(seq: number, requestCode: string): boolean {
-    return seq === requestSeq && requestCode === activeCode && requestCode === code.value
+  function isCurrentModuleRequest(name: RequestSlotName, ctx: { seq: number; generation: number; signal: AbortSignal }): boolean {
+    if (ctx.signal.aborted) return false
+    if (ctx.generation !== requestGeneration) return false
+    if (ctx.seq !== slots[name].seq) return false
+    return true
   }
 
-  async function loadSession(signal?: AbortSignal): Promise<void> {
+  /** Secondary response may apply only if identity generation and canonical still match. */
+  function isCurrentSecondary(ctx: { seq: number; generation: number; signal: AbortSignal; name: RequestSlotName; canonical: string }): boolean {
+    if (!isCurrentModuleRequest(ctx.name, ctx)) return false
+    if (!resolvedCanonicalCode || ctx.canonical !== resolvedCanonicalCode) return false
+    return true
+  }
+
+  function clearPollTimer(name: 'quote' | 'book' | 'flow' | 'bars' | 'session'): void {
+    const t = pollTimers[name]
+    if (t !== null) window.clearTimeout(t)
+    pollTimers[name] = null
+  }
+
+  function clearAllPollTimers(): void {
+    (Object.keys(pollTimers) as (keyof typeof pollTimers)[]).forEach(clearPollTimer)
+  }
+
+  function isPageHidden(): boolean {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  }
+
+  function scheduleQuotePoll(): void {
+    clearPollTimer('quote')
+    if (isPageHidden()) return
+    const ms = pollingIntervalMs(session.value, 'quote')
+    if (ms === null) return
+    pollTimers.quote = window.setTimeout(async () => {
+      await loadQuote()
+      // Only reschedule quote — never touch other module timers.
+      scheduleQuotePoll()
+    }, ms)
+  }
+
+  function scheduleBookPoll(): void {
+    clearPollTimer('book')
+    if (isPageHidden()) return
+    if (activeTab.value !== 'book' || !supportsBook.value) return
+    const ms = pollingIntervalMs(session.value, 'book')
+    if (ms === null) return
+    pollTimers.book = window.setTimeout(async () => {
+      await loadOrderBook(true)
+      scheduleBookPoll()
+    }, ms)
+  }
+
+  function scheduleFlowPoll(): void {
+    clearPollTimer('flow')
+    if (isPageHidden()) return
+    if (activeTab.value !== 'flow' || !supportsFlow.value) return
+    const ms = pollingIntervalMs(session.value, 'flow')
+    if (ms === null) return
+    pollTimers.flow = window.setTimeout(async () => {
+      await loadCapitalFlow(true)
+      scheduleFlowPoll()
+    }, ms)
+  }
+
+  function scheduleBarsPoll(): void {
+    clearPollTimer('bars')
+    if (isPageHidden()) return
+    if (!supportsBars.value) return
+    const ms = pollingIntervalMs(session.value, 'bars')
+    if (ms === null) return
+    pollTimers.bars = window.setTimeout(async () => {
+      await loadBars()
+      scheduleBarsPoll()
+    }, ms)
+  }
+
+  function scheduleSessionPoll(): void {
+    clearPollTimer('session')
+    if (isPageHidden()) return
+    const ms = sessionPollIntervalMs(session.value)
+    if (ms === null) return
+    pollTimers.session = window.setTimeout(async () => {
+      await loadSession()
+      // Session state change may shift all cadences — full reschedule is intentional here.
+      rescheduleAllPollers()
+    }, ms)
+  }
+
+  /** Full reschedule: only for initial load, code change, visibility resume, session state change. */
+  function rescheduleAllPollers(): void {
+    clearAllPollTimers()
+    if (isPageHidden()) return
+    scheduleQuotePoll()
+    scheduleBookPoll()
+    scheduleFlowPoll()
+    scheduleBarsPoll()
+    scheduleSessionPoll()
+  }
+
+  function onVisibilityChange(): void {
+    if (isPageHidden()) {
+      clearAllPollTimers()
+    } else {
+      rescheduleAllPollers()
+    }
+  }
+
+  async function loadSession(externalSignal?: AbortSignal): Promise<void> {
+    const ctx = beginModuleRequest('session')
     sessionLoading.value = true
     try {
-      const data = await api.getMarketSession(signal)
-      if (signal?.aborted) return
+      const data = await api.getMarketSession(ctx.signal)
+      if (!isCurrentModuleRequest('session', ctx)) return
       session.value = data
     } catch {
       // Session is advisory for polling cadence; do not fail the page.
     } finally {
-      if (!signal?.aborted) sessionLoading.value = false
+      if (isCurrentModuleRequest('session', ctx)) sessionLoading.value = false
     }
+    void externalSignal
   }
 
   async function loadMetadata(force = false): Promise<boolean> {
-    const { signal, seq, code: reqCode } = beginRequest()
+    const ctx = beginModuleRequest('identity')
+    const reqInput = ctx.inputCode
     pageLoading.value = !metadata.value || force
     pageError.value = null
     pageNotFound.value = false
     try {
-      const data = await api.getInstrument(reqCode, signal)
-      if (!isCurrent(seq, reqCode)) return false
+      const data = await api.getInstrument(reqInput, ctx.signal)
+      if (!isCurrentModuleRequest('identity', ctx)) return false
       metadata.value = data
+      resolvedCanonicalCode = data.identity.code
       pageLoading.value = false
       const preferred = defaultAdjustment(data.capabilities)
       if (preferred && !data.capabilities.adjustments.includes(adjustment.value as BarAdjustment)) {
@@ -202,7 +349,7 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
       }
       return true
     } catch (error) {
-      if (isAbortError(error) || !isCurrent(seq, reqCode)) return false
+      if (isAbortError(error) || !isCurrentModuleRequest('identity', ctx)) return false
       pageLoading.value = false
       if (error instanceof ApiError && error.status === 404) {
         pageNotFound.value = true
@@ -216,124 +363,108 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
 
   async function loadQuote(): Promise<void> {
     if (!supportsQuote.value) return
-    const reqCode = canonicalCode.value
-    if (!reqCode) return
+    const reqCanonical = resolvedCanonicalCode || canonicalCode.value
+    if (!reqCanonical) return
+    const ctx = beginModuleRequest('quote')
     quoteLoading.value = true
     quoteError.value = null
-    const prevAbort = abortController
-    // Quote is independent of page identity load; use dedicated abort via local signal
-    const local = new AbortController()
-    const signal = local.signal
-    // If page-level abort fires, also abort quote
-    const onAbort = () => local.abort()
-    prevAbort?.signal.addEventListener('abort', onAbort, { once: true })
     try {
-      const data = await api.getInstrumentQuote(reqCode, signal)
-      if (signal.aborted || reqCode !== code.value) return
+      const data = await api.getInstrumentQuote(reqCanonical, ctx.signal)
+      // Compare canonical identity, never raw route param.
+      if (!isCurrentSecondary({ ...ctx, name: 'quote', canonical: reqCanonical })) return
       quote.value = data
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return
+      if (isAbortError(error) || !isCurrentSecondary({ ...ctx, name: 'quote', canonical: reqCanonical })) return
       quoteError.value = mapApiError(error)
     } finally {
-      prevAbort?.signal.removeEventListener('abort', onAbort)
-      if (!signal.aborted) quoteLoading.value = false
+      if (isCurrentSecondary({ ...ctx, name: 'quote', canonical: reqCanonical })) quoteLoading.value = false
     }
   }
 
   async function loadBars(): Promise<void> {
     if (!supportsBars.value) return
-    const reqCode = canonicalCode.value
-    if (!reqCode) return
-    barsLoading.value = true
-    barsError.value = null
+    const reqCanonical = resolvedCanonicalCode || canonicalCode.value
+    if (!reqCanonical) return
     const reqInterval = interval.value
     const reqAdjustment = adjustment.value
     const reqLimit = barLimit.value
-    const local = new AbortController()
-    const signal = local.signal
-    const onAbort = () => local.abort()
-    abortController?.signal.addEventListener('abort', onAbort, { once: true })
+    const ctx = beginModuleRequest('bars')
+    barsLoading.value = true
+    barsError.value = null
     try {
       const data = await api.getInstrumentBars(
-        reqCode,
+        reqCanonical,
         {
           interval: reqInterval,
           limit: reqLimit,
           ...(reqAdjustment ? { adjustment: reqAdjustment } : {}),
         },
-        signal,
+        ctx.signal,
       )
-      if (signal.aborted || reqCode !== code.value) return
-      if (data.interval !== reqInterval || data.adjustment !== (reqAdjustment ?? data.adjustment)) {
-        // Stale after param change
-        if (reqInterval !== interval.value || reqAdjustment !== adjustment.value) return
-      }
+      const stillParams =
+        interval.value === reqInterval &&
+        adjustment.value === reqAdjustment &&
+        barLimit.value === reqLimit
+      if (!isCurrentSecondary({ ...ctx, name: 'bars', canonical: reqCanonical })) return
+      if (!stillParams) return
       bars.value = data
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return
-      if (reqCode !== code.value || reqInterval !== interval.value) return
+      if (isAbortError(error) || !isCurrentSecondary({ ...ctx, name: 'bars', canonical: reqCanonical })) return
+      if (interval.value !== reqInterval || adjustment.value !== reqAdjustment || barLimit.value !== reqLimit) return
       barsError.value = mapApiError(error)
     } finally {
-      abortController?.signal.removeEventListener('abort', onAbort)
-      if (!signal.aborted) barsLoading.value = false
+      if (isCurrentSecondary({ ...ctx, name: 'bars', canonical: reqCanonical })) barsLoading.value = false
     }
   }
 
   async function loadOrderBook(force = false): Promise<void> {
     if (!supportsBook.value) return
-    const reqCode = canonicalCode.value
-    if (!reqCode) return
-    if (!force && bookLoadedFor.value === reqCode && orderBook.value) return
+    const reqCanonical = resolvedCanonicalCode || canonicalCode.value
+    if (!reqCanonical) return
+    if (!force && bookLoadedFor.value === reqCanonical && orderBook.value) return
+    const ctx = beginModuleRequest('book')
     bookLoading.value = true
     bookError.value = null
-    const local = new AbortController()
-    const signal = local.signal
-    const onAbort = () => local.abort()
-    abortController?.signal.addEventListener('abort', onAbort, { once: true })
     try {
-      const data = await api.getInstrumentOrderBook(reqCode, signal)
-      if (signal.aborted || reqCode !== code.value) return
+      const data = await api.getInstrumentOrderBook(reqCanonical, ctx.signal)
+      if (!isCurrentSecondary({ ...ctx, name: 'book', canonical: reqCanonical })) return
       orderBook.value = data
-      bookLoadedFor.value = reqCode
+      bookLoadedFor.value = reqCanonical
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return
-      if (reqCode !== code.value) return
+      if (isAbortError(error) || !isCurrentSecondary({ ...ctx, name: 'book', canonical: reqCanonical })) return
       bookError.value = mapApiError(error)
     } finally {
-      abortController?.signal.removeEventListener('abort', onAbort)
-      if (!signal.aborted) bookLoading.value = false
+      if (isCurrentSecondary({ ...ctx, name: 'book', canonical: reqCanonical })) bookLoading.value = false
     }
   }
 
   async function loadCapitalFlow(force = false): Promise<void> {
     if (!supportsFlow.value) return
-    const reqCode = canonicalCode.value
-    if (!reqCode) return
-    if (!force && flowLoadedFor.value === reqCode && capitalFlow.value) return
+    const reqCanonical = resolvedCanonicalCode || canonicalCode.value
+    if (!reqCanonical) return
+    if (!force && flowLoadedFor.value === reqCanonical && capitalFlow.value) return
+    const ctx = beginModuleRequest('flow')
     flowLoading.value = true
     flowError.value = null
-    const local = new AbortController()
-    const signal = local.signal
-    const onAbort = () => local.abort()
-    abortController?.signal.addEventListener('abort', onAbort, { once: true })
     try {
-      const data = await api.getInstrumentCapitalFlow(reqCode, signal)
-      if (signal.aborted || reqCode !== code.value) return
+      const data = await api.getInstrumentCapitalFlow(reqCanonical, ctx.signal)
+      if (!isCurrentSecondary({ ...ctx, name: 'flow', canonical: reqCanonical })) return
       capitalFlow.value = data
-      flowLoadedFor.value = reqCode
+      flowLoadedFor.value = reqCanonical
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return
-      if (reqCode !== code.value) return
+      if (isAbortError(error) || !isCurrentSecondary({ ...ctx, name: 'flow', canonical: reqCanonical })) return
       flowError.value = mapApiError(error)
     } finally {
-      abortController?.signal.removeEventListener('abort', onAbort)
-      if (!signal.aborted) flowLoading.value = false
+      if (isCurrentSecondary({ ...ctx, name: 'flow', canonical: reqCanonical })) flowLoading.value = false
     }
   }
 
   async function initialLoad(): Promise<void> {
-    abortInFlight()
-    clearTimers()
+    requestGeneration += 1
+    requestedInputCode = code.value
+    resolvedCanonicalCode = ''
+    abortAllModules()
+    clearAllPollTimers()
     bookLoadedFor.value = null
     flowLoadedFor.value = null
     quote.value = null
@@ -350,88 +481,34 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
     const ok = await loadMetadata(true)
     if (!ok) return
 
-    // Parallel secondary loads after identity is known
     await Promise.all([
-      loadSession(abortController?.signal),
+      loadSession(),
       loadQuote(),
       loadBars(),
     ])
-    schedulePolling()
+    rescheduleAllPollers()
     if (activeTab.value === 'book') void loadOrderBook()
     if (activeTab.value === 'flow') void loadCapitalFlow()
   }
 
   async function refreshAll(): Promise<void> {
-    if (!metadata.value) {
+    if (!metadata.value || !resolvedCanonicalCode) {
       await initialLoad()
       return
     }
     await Promise.all([loadQuote(), loadBars()])
     if (activeTab.value === 'book') await loadOrderBook(true)
     if (activeTab.value === 'flow') await loadCapitalFlow(true)
-    schedulePolling()
-  }
-
-  function schedulePolling(): void {
-    clearTimers()
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
-    const s = session.value
-    const quoteMs = pollingIntervalMs(s, 'quote')
-    if (quoteMs !== null) {
-      quoteTimer = window.setTimeout(async () => {
-        await loadQuote()
-        schedulePolling()
-      }, quoteMs)
-    }
-    if (activeTab.value === 'book' && supportsBook.value) {
-      const ms = pollingIntervalMs(s, 'book')
-      if (ms !== null) {
-        bookTimer = window.setTimeout(async () => {
-          await loadOrderBook(true)
-          schedulePolling()
-        }, ms)
-      }
-    }
-    if (activeTab.value === 'flow' && supportsFlow.value) {
-      const ms = pollingIntervalMs(s, 'flow')
-      if (ms !== null) {
-        flowTimer = window.setTimeout(async () => {
-          await loadCapitalFlow(true)
-          schedulePolling()
-        }, ms)
-      }
-    }
-    if (supportsBars.value) {
-      const ms = pollingIntervalMs(s, 'bars')
-      if (ms !== null) {
-        barsTimer = window.setTimeout(async () => {
-          await loadBars()
-          schedulePolling()
-        }, ms)
-      }
-    }
-    // Session refresh hourly-ish when open
-    if (s && (s.session === 'MORNING' || s.session === 'AFTERNOON' || s.session === 'LUNCH_BREAK')) {
-      sessionTimer = window.setTimeout(async () => {
-        await loadSession()
-        schedulePolling()
-      }, 60_000)
-    }
-  }
-
-  function onVisibilityChange(): void {
-    if (document.visibilityState === 'hidden') {
-      clearTimers()
-    } else {
-      schedulePolling()
-    }
+    rescheduleAllPollers()
   }
 
   function setTab(tab: InstrumentTab): void {
     activeTab.value = tab
     if (tab === 'book') void loadOrderBook()
     if (tab === 'flow') void loadCapitalFlow()
-    schedulePolling()
+    // Tab change only affects book/flow pollers; quote/bars/session keep cadence.
+    scheduleBookPoll()
+    scheduleFlowPoll()
   }
 
   function setInterval(next: BarInterval): void {
@@ -462,8 +539,8 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
   )
 
   onBeforeUnmount(() => {
-    abortInFlight()
-    clearTimers()
+    abortAllModules()
+    clearAllPollTimers()
     if (visibilityHandler) {
       document.removeEventListener('visibilitychange', visibilityHandler)
       visibilityHandler = null

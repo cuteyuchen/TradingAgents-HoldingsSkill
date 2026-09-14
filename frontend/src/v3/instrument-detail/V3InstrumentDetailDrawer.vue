@@ -21,7 +21,13 @@ const open = computed({
   set: (v: boolean) => emit('update:modelValue', v),
 })
 
-const displayTitle = computed(() => props.code ? `${props.title} · ${props.code}` : props.title)
+const displayTitle = computed(() => (props.code ? `${props.title} · ${props.code}` : props.title))
+
+/**
+ * v-if="open && code" unmounts the shared detail on close so
+ * onBeforeUnmount aborts in-flight requests and clears poll timers.
+ */
+const detailMounted = computed(() => open.value && Boolean(props.code))
 </script>
 
 <template>
@@ -31,7 +37,7 @@ const displayTitle = computed(() => props.code ? `${props.title} · ${props.code
     data-testid="instrument-detail-drawer"
   >
     <V3InstrumentDetail
-      v-if="code"
+      v-if="detailMounted"
       :code="code"
       :initial-tab="initialTab"
       compact

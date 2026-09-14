@@ -41,6 +41,14 @@ const router = createRouter({
       component: () => import('./v3/instrument-detail/V3InstrumentDetailPage.vue'),
       meta: { uiSystem: 'v3', title: '标的详情' },
     },
+    // Acceptance host for drawer open/close lifecycle (foundation flag, not in product nav)
+    {
+      path: '/v3/instrument-drawer-host',
+      name: 'v3-instrument-drawer-host',
+      component: () => import('./v3/instrument-detail/V3InstrumentDrawerHostView.vue'),
+      meta: { uiSystem: 'v3', title: 'Drawer Host', foundation: true },
+      beforeEnter: () => foundationEnabled() || { name: 'dashboard' },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],
 })

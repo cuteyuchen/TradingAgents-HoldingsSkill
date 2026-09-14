@@ -582,3 +582,317 @@ test.describe('V3 InstrumentDetail', () => {
     await expect(page.locator('[data-testid="v3-tabs"]')).toBeVisible()
   })
 })
+
+test.describe('V3 InstrumentDetail request lifecycle', () => {
+  test('Alias 600519 resolves to canonical 600519.SH and secondary modules load', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    const secondaryHits: string[] = []
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload()) })
+    })
+    // Metadata accepts raw alias and returns canonical identity
+    await page.route('**/api/v3/market/instruments/600519', async (route) => {
+      const url = route.request().url()
+      if (url.includes('/quote') || url.includes('/bars') || url.includes('/order-book') || url.includes('/capital-flow')) {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', true)) })
+    })
+    // Secondary loaders use canonical 600519.SH
+    for (const path of ['quote', 'bars', 'order-book', 'capital-flow']) {
+      await page.route(`**/api/v3/market/instruments/600519.SH/${path}**`, async (route) => {
+        secondaryHits.push(path)
+        if (path === 'quote') {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+        } else if (path === 'bars') {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+        } else if (path === 'order-book') {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(bookPayload('600519.SH', '贵州茅台', 'SSE')) })
+        } else {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(flowPayload('600519.SH', '贵州茅台', 'SSE')) })
+        }
+      })
+    }
+
+    await page.goto('/market/instruments/600519')
+    await expect(page.locator('[data-testid="instrument-name"]')).toHaveText('贵州茅台')
+    await expect(page.locator('[data-testid="instrument-code"]')).toContainText('600519.SH')
+    await expect(page.locator('[data-testid="quote-last"]')).toHaveText('1688.00')
+    await expect(page.locator('[data-testid="kline-chart"]')).toBeVisible()
+    expect(secondaryHits).toEqual(expect.arrayContaining(['quote', 'bars']))
+
+    await page.locator('[data-testid="v3-tab-book"]').click()
+    await expect(page.locator('[data-testid="book-bid-1"]')).toBeVisible()
+    await page.locator('[data-testid="v3-tab-flow"]').click()
+    await expect(page.locator('[data-testid="flow-cards"]')).toBeVisible()
+    expect(secondaryHits).toEqual(expect.arrayContaining(['order-book', 'capital-flow']))
+  })
+
+  test('Slow 1d bars response does not overwrite fast 1w', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    let release1d!: () => void
+    const gate1d = new Promise<void>((resolve) => { release1d = resolve })
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload()) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', false)) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      const u = new URL(route.request().url())
+      const interval = u.searchParams.get('interval') || '1d'
+      if (interval === '1d') {
+        await gate1d
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ ...barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', 'forward', 5), interval: '1d' }),
+        }).catch(() => undefined)
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', 'forward', 8), interval: '1w' }),
+      })
+    })
+
+    await page.goto('/market/instruments/600519.SH')
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toBeVisible()
+    // Switch to 1w while 1d is still pending
+    await page.locator('[data-testid="kline-interval-1w"]').click()
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toContainText('周K')
+    release1d()
+    await page.waitForTimeout(250)
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toContainText('周K')
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).not.toContainText('日K')
+    await expect(page.locator('[data-testid="kline-error"]')).toHaveCount(0)
+  })
+
+  test('Slow forward adjustment does not overwrite fast none', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    let releaseForward!: () => void
+    const gateForward = new Promise<void>((resolve) => { releaseForward = resolve })
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload()) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', false)) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      const u = new URL(route.request().url())
+      const adjustment = u.searchParams.get('adjustment') || 'forward'
+      if (adjustment === 'forward') {
+        await gateForward
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            ...barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', 'forward', 4),
+            bars: [{ time: '2026-01-01', open: 1, high: 2, low: 0.5, close: 1.5, volume: 1, turnover: 1 }],
+          }),
+        }).catch(() => undefined)
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', 'none', 6) }),
+      })
+    })
+
+    await page.goto('/market/instruments/600519.SH')
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toBeVisible()
+    await page.locator('[data-testid="kline-adjustment-none"]').click()
+    await expect(page.locator('[data-testid="kline-adjustment-none"]')).toHaveAttribute('aria-pressed', 'true')
+    releaseForward()
+    await page.waitForTimeout(250)
+    await expect(page.locator('[data-testid="kline-adjustment-none"]')).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-testid="kline-error"]')).toHaveCount(0)
+  })
+
+  test('Slow limit=250 does not overwrite fast limit=60', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    let release250!: () => void
+    const gate250 = new Promise<void>((resolve) => { release250 = resolve })
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload()) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', false)) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      const u = new URL(route.request().url())
+      const limit = u.searchParams.get('limit') || '250'
+      if (limit === '250') {
+        await gate250
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ ...barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', 'forward', 20), interval: '1d' }),
+        }).catch(() => undefined)
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', 'forward', 3), interval: '1d' }),
+      })
+    })
+
+    await page.goto('/market/instruments/600519.SH')
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toBeVisible()
+    await page.locator('[data-testid="kline-limit-60"]').click()
+    await expect(page.locator('[data-testid="kline-limit-60"]')).toHaveAttribute('aria-pressed', 'true')
+    // Fast limit=60 response applies (3 bars)
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toContainText('共 3 根')
+    release250()
+    await page.waitForTimeout(250)
+    await expect(page.locator('[data-testid="kline-limit-60"]')).toHaveAttribute('aria-pressed', 'true')
+    // Old 250/20-bar response must not overwrite
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).toContainText('共 3 根')
+    await expect(page.locator('[data-testid="kline-aria-summary"]')).not.toContainText('共 20 根')
+    await expect(page.locator('[data-testid="kline-error"]')).toHaveCount(0)
+  })
+
+  test('Independent pollers: short quote poll does not reset bars poll window', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    const quoteHits: number[] = []
+    const barsHits: number[] = []
+    let t0 = Date.now()
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      // MORNING => quote 5s, bars 30s
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...sessionPayload(),
+          session: 'MORNING',
+          is_market_open: true,
+          data_basis: 'live',
+        }),
+      })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', false)) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      quoteHits.push(Date.now() - t0)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      barsHits.push(Date.now() - t0)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+
+    t0 = Date.now()
+    await page.goto('/market/instruments/600519.SH')
+    await expect(page.locator('[data-testid="instrument-detail"]')).toBeVisible()
+    // Wait past quote cadence (5s) but well under bars cadence (30s)
+    await page.waitForTimeout(6500)
+    // Quote should have polled again; bars should still be only the initial load (1 hit)
+    expect(quoteHits.length).toBeGreaterThanOrEqual(2)
+    expect(barsHits.length).toBe(1)
+  })
+
+  test('Real drawer open/close unmounts detail and stops further instrument requests', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    const counts = { quote: 0, bars: 0, book: 0, flow: 0 }
+    let releaseSlow!: () => void
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...sessionPayload(), session: 'MORNING', is_market_open: true, data_basis: 'live' }),
+      })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', true)) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      counts.quote += 1
+      if (counts.quote === 1) {
+        await slowGate
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) }).catch(() => undefined)
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      counts.bars += 1
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/order-book', async (route) => {
+      counts.book += 1
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(bookPayload('600519.SH', '贵州茅台', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/capital-flow', async (route) => {
+      counts.flow += 1
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(flowPayload('600519.SH', '贵州茅台', 'SSE')) })
+    })
+
+    await page.goto('/v3/instrument-drawer-host')
+    await expect(page.locator('[data-testid="instrument-drawer-host"]')).toBeVisible()
+    await page.locator('[data-testid="drawer-host-open"]').click()
+    await expect(page.locator('[data-testid="instrument-detail-drawer-body"]')).toBeVisible()
+    await expect(page.locator('[data-testid="instrument-name"]')).toHaveText('贵州茅台')
+
+    const snapshot = { ...counts }
+    // Close via drawer chrome (backdrop blocks host buttons under the dialog)
+    await page.locator('[data-testid="v3-detail-drawer-close"]').click()
+    await expect(page.locator('[data-testid="instrument-detail-drawer-body"]')).toHaveCount(0)
+
+    releaseSlow()
+    await page.waitForTimeout(800)
+    expect(counts.quote).toBe(snapshot.quote)
+    expect(counts.bars).toBe(snapshot.bars)
+    expect(counts.book).toBe(snapshot.book)
+    expect(counts.flow).toBe(snapshot.flow)
+    await expect(page.locator('.n-message').filter({ hasText: /超时|失败|错误|异常/ })).toHaveCount(0)
+    await expect(page.locator('[data-testid="v3-error-state"]')).toHaveCount(0)
+  })
+
+  test('Abort on code switch does not show error UI', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    let releaseA!: () => void
+    const gate = new Promise<void>((resolve) => { releaseA = resolve })
+    let aQuoteStarted = false
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload()) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      aQuoteStarted = true
+      await gate
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) }).catch(() => undefined)
+    })
+    await routeInstrument(page, { code: '000300.SH', name: '沪深300', type: 'INDEX', exchange: 'SSE' })
+
+    await page.goto('/market/instruments/600519.SH')
+    await expect.poll(() => aQuoteStarted).toBe(true)
+    await page.goto('/market/instruments/000300.SH')
+    await expect(page.locator('[data-testid="instrument-name"]')).toHaveText('沪深300')
+    releaseA()
+    await page.waitForTimeout(200)
+    await expect(page.locator('[data-testid="detail-page-error"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="quote-error"]')).toHaveCount(0)
+    await expect(page.locator('.n-message').filter({ hasText: /超时|失败|错误/ })).toHaveCount(0)
+  })
+})

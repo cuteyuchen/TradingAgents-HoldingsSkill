@@ -89,11 +89,15 @@ Lazy modules:
 
 ## Race Safety
 
-`useInstrumentDetail` combines:
+`useInstrumentDetail` uses per-module `RequestSlot` (`identity` / `quote` / `bars` / `book` / `flow` / `session`):
 
-- `AbortController` (code/interval/adjustment change, drawer close, unmount)
-- monotonically increasing request sequence
-- active code validation before applying payloads
+- `requestGeneration` increments on code change / initial load
+- `requestedInputCode` is the raw route param (may be alias `600519`)
+- `resolvedCanonicalCode` is `identity.code` after metadata (`600519.SH`)
+- Secondary loaders request with canonical code and apply only when generation, slot seq, canonical identity, signal, and module params still match
+- Never compare canonical code to the raw route param
+
+Bars param switches (`setInterval` / `setAdjustment` / `setBarLimit`) abort only the bars slot and re-sequence; a slow prior bars response cannot overwrite a newer parameter state.
 
 Abort is normal control flow — no Toast/Banner.
 
@@ -108,7 +112,11 @@ Uses `/api/v3/market/session` (not browser clock):
 | CapitalFlow (active tab) | 50s | — | no poll |
 | Bars | 30s | — | no poll |
 
-`document.visibilitychange`: hidden → pause timers; visible → re-evaluate from session. Unmount clears timers/listeners.
+Each module owns an independent timer. A quote tick only reschedules the quote poll; it does **not** clear or reset bars/book/flow/session timers (no starvation). Full `rescheduleAllPollers` runs only on: initial load, code change, visibility resume, or session state change.
+
+`document.visibilitychange`: hidden → pause all module timers; visible → full reschedule. Unmount / drawer close aborts all slots and clears all timers/listeners.
+
+Drawer contract: `v-if="open && code"` so closing unmounts the shared detail (no hidden polling).
 
 ## Time / Provenance / Quality
 
