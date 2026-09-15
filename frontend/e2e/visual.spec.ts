@@ -17,7 +17,7 @@ async function waitForVisualContent(page: Parameters<typeof login>[0], route: st
   }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
   await expect.poll(() => page.evaluate(() => {
-    const header = document.querySelector('header.topbar')
+    const header = document.querySelector('header.topbar, [data-testid="v3-topbar"]')
     return !header || header.scrollWidth <= header.clientWidth + 1
   })).toBe(true)
 }

@@ -14,7 +14,12 @@ const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: () => import('./views/LoginView.vue'), meta: { public: true, uiSystem: 'legacy' } },
     { path: '/', redirect: '/dashboard' },
-    { path: '/dashboard', name: 'dashboard', component: () => import('./views/DashboardView.vue'), meta: { uiSystem: 'legacy' } },
+    {
+      path: '/dashboard',
+      name: 'dashboard',
+      component: () => import('./v3/dashboard/V3DashboardView.vue'),
+      meta: { uiSystem: 'v3', title: '首页' },
+    },
     { path: '/holdings', name: 'holdings', component: () => import('./views/HoldingsView.vue'), meta: { uiSystem: 'legacy' } },
     { path: '/analysis', name: 'analysis', component: () => import('./views/AnalysisView.vue'), meta: { uiSystem: 'legacy' } },
     { path: '/simulation', name: 'simulation', component: () => import('./views/SimulationView.vue'), meta: { uiSystem: 'legacy' } },

@@ -3,6 +3,13 @@ import { test, expect, login } from './fixtures'
 test('Single-user navigation exposes only the workbench pages and preserves legacy aliases', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
 
+  // Dashboard is V3 shell
+  await expect(page.getByTestId('v3-app-shell')).toBeVisible()
+  await expect(page.getByTestId('v3-sidebar')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+
+  // Legacy pages still use the legacy top nav
+  await page.goto('/holdings')
   const nav = page.locator('nav.top-nav')
   await expect(nav.getByRole('link')).toHaveCount(5)
   await expect(nav).toContainText('首页')
@@ -36,9 +43,11 @@ test('Single-user navigation exposes only the workbench pages and preserves lega
 
 test('Shell keeps email private and hides the portfolio selector for one portfolio', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.b)
-  await expect(page.locator('header.topbar')).not.toContainText(facts.users.b.email)
-  await expect(page.locator('header.topbar')).not.toContainText('当前用户')
+  await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText(facts.users.b.email)
+  await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText('当前用户')
   await expect(page.locator('.global-portfolio-select')).toHaveCount(0)
+  // Single portfolio: V3 select may render one option but no global legacy selector.
+  await page.goto('/holdings')
   await expect(page.locator('nav.top-nav')).toBeVisible()
 })
 
