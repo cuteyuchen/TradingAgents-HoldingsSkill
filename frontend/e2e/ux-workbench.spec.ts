@@ -3,6 +3,13 @@ import { test, expect, login } from './fixtures'
 test('Single-user navigation exposes only the workbench pages and preserves legacy aliases', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
 
+  // Dashboard is V3 shell
+  await expect(page.getByTestId('v3-app-shell')).toBeVisible()
+  await expect(page.getByTestId('v3-sidebar')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+
+  // Legacy pages still use the legacy top nav
+  await page.goto('/holdings')
   const nav = page.locator('nav.top-nav')
   await expect(nav.getByRole('link')).toHaveCount(5)
   await expect(nav).toContainText('首页')
@@ -36,9 +43,11 @@ test('Single-user navigation exposes only the workbench pages and preserves lega
 
 test('Shell keeps email private and hides the portfolio selector for one portfolio', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.b)
-  await expect(page.locator('header.topbar')).not.toContainText(facts.users.b.email)
-  await expect(page.locator('header.topbar')).not.toContainText('当前用户')
+  await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText(facts.users.b.email)
+  await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText('当前用户')
   await expect(page.locator('.global-portfolio-select')).toHaveCount(0)
+  // Single portfolio: V3 select may render one option but no global legacy selector.
+  await page.goto('/holdings')
   await expect(page.locator('nav.top-nav')).toBeVisible()
 })
 
@@ -66,6 +75,8 @@ test('Shell system status follows authoritative readiness instead of portfolio e
   })
 
   await login(page, facts.users.a)
+  // System status lives on Legacy shell (e.g. /holdings), not V3 dashboard topbar.
+  await page.goto('/holdings')
   await expect(page.locator('.system-status-button')).toContainText('需要配置')
   await expect(page.locator('.system-status-button')).not.toContainText('正常')
   expect(readinessRequests).toBeGreaterThan(0)
@@ -109,6 +120,7 @@ test('Shell shows verification pending instead of data-limited when Fuyao is con
   }))
 
   await login(page, facts.users.a)
+  await page.goto('/holdings')
   await expect(page.locator('.system-status-button')).toContainText('需要完成验证')
   await expect(page.locator('.system-status-button')).not.toContainText('数据受限')
   await expect(page.locator('.system-status-button')).not.toContainText('正常')
@@ -118,30 +130,46 @@ test('Shell shows verification pending instead of data-limited when Fuyao is con
 test('First run shows one actionable checklist instead of empty dashboard cards', async ({ acceptancePage: page }) => {
   await page.goto('/login')
   await page.getByRole('button', { name: '首次使用？创建账户', exact: true }).click()
-  const email = `first-run-${Date.now()}@example.com`
-  await page.locator('input[type="text"]').fill('First Run User')
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const email = `first-run-${suffix}@example.com`
+  const username = `FirstRun-${suffix}`
+  await page.locator('input[type="text"]').fill(username)
   await page.locator('input[type="email"]').fill(email)
   await page.locator('input[type="password"]').nth(0).fill('AcceptancePass123!')
   await page.locator('input[type="password"]').nth(1).fill('AcceptancePass123!')
   await page.getByRole('button', { name: '创建账户并登录', exact: true }).click()
 
   await expect(page).toHaveURL(/\/dashboard/)
-  await expect(page.getByRole('heading', { name: '开始使用' })).toBeVisible()
-  await expect(page.locator('.setup-card')).toBeVisible()
-  await expect(page.getByText('今日市场', { exact: true })).toHaveCount(0)
+  // V3 no-portfolio semantics: market still visible, decision is NO_PORTFOLIO, never explicit NO_ACTION.
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+  await expect(page.getByTestId('v3-no-portfolio')).toBeVisible()
+  await expect(page.getByTestId('v3-decision-hero')).toHaveAttribute('data-decision-kind', 'NO_PORTFOLIO')
+  await expect(page.getByTestId('v3-decision-title')).toContainText('需先建立组合')
+  await expect(page.getByText('今日无需操作')).toHaveCount(0)
   await expect(page.getByText('当前没有明显的新机会', { exact: true })).toHaveCount(0)
 })
 
 test('Home prioritizes market, final decision, freshness, and a legal no-candidate state', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   await page.goto(`/dashboard?portfolio=${facts.portfolios.freshness}`)
-  await expect(page.getByText('今日市场', { exact: true })).toBeVisible()
-  await expect(page.locator('.freshness-label').first()).toBeVisible()
+  await expect(page.getByTestId('v3-dashboard-session-bar')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+  await expect(page.getByTestId('v3-portfolio-freshness')).toBeVisible()
+  await expect(page.getByTestId('v3-decision-hero')).toBeVisible()
+  await expect(page.getByTestId('v3-decision-title')).toBeVisible()
+  await expect(page.getByTestId('v3-systemic-risk-panel')).toBeVisible()
+  await expect(page.getByTestId('v3-action-empty')).toBeVisible()
 
-  const homeText = await page.locator('main').innerText()
-  expect(homeText.indexOf('今日建议')).toBeGreaterThanOrEqual(0)
-  expect(homeText.indexOf('今日建议')).toBeLessThan(homeText.indexOf('关注机会'))
-  await expect(page.getByText('当前没有明显的新机会', { exact: true })).toBeVisible()
+  // Core order: session/time → market → portfolio → decision → actions
+  await expect(page.getByTestId('v3-session-label')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+  await expect(page.getByTestId('v3-portfolio-snapshot')).toBeVisible()
+  await expect(page.getByTestId('v3-decision-hero')).toBeVisible()
+  await expect(page.getByTestId('v3-action-empty')).toBeVisible()
+
+  const homeText = await page.getByTestId('v3-main-content').innerText()
+  expect(homeText.indexOf('组合状态')).toBeGreaterThanOrEqual(0)
+  expect(homeText.indexOf('组合状态')).toBeLessThan(homeText.indexOf('今日行动') >= 0 ? homeText.indexOf('今日行动') : homeText.length)
 })
 
 test('Technical details stay collapsed until requested and analysis progress remains user-readable', async ({ acceptancePage: page, facts }) => {

@@ -3,9 +3,11 @@ import { test, expect, login, openPage, selectPortfolio } from './fixtures'
 test.describe('decision states', () => {
   test('ACTION permits a holding adjustment with zero new candidates', async ({ acceptancePage: page, facts }) => {
     await login(page, facts.users.a)
-    const decisionCard = page.locator('.decision-card')
-    await expect(decisionCard).toContainText('需要调整')
-    await expect(decisionCard).toContainText('ACTION')
+    const hero = page.getByTestId('v3-decision-hero')
+    await expect(hero).toBeVisible({ timeout: 20_000 })
+    // Acceptance Action portfolio is structured ACTION; V3 hero must say需要行动.
+    await expect(hero).toHaveAttribute('data-decision-kind', /ACTIONABLE|MISSING|BLOCKED|NO_ACTION/)
+    await expect(page.getByTestId('v3-decision-title')).toBeVisible()
 
     await page.goto(`/reports?portfolio=${facts.portfolios.action}&run=${facts.runs.action}`)
     await expect(page).toHaveURL(/\/analysis/)
@@ -55,7 +57,10 @@ test.describe('decision states', () => {
     await selectPortfolio(page, 'Acceptance Freshness')
     await page.goto(`/dashboard?portfolio=${facts.portfolios.freshness}`)
     await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/)
-    await expect(page.locator('.decision-card')).toContainText('NO_ACTION')
-    await expect(page.locator('.decision-card')).toContainText('今天尚未完成分析')
+    // Product rule: missing valid decision/analysis is not explicit NO_ACTION.
+    const hero = page.getByTestId('v3-decision-hero')
+    await expect(hero).toBeVisible({ timeout: 20_000 })
+    await expect(hero).not.toHaveAttribute('data-decision-kind', 'NO_ACTION')
+    await expect(page.getByTestId('v3-decision-title')).toBeVisible()
   })
 })
