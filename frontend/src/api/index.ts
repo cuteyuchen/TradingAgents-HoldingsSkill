@@ -378,20 +378,20 @@ export const api = {
   getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
-  getMarketSession: () => request<MarketSessionResponse>('/api/v3/market/session'),
-  getInstrument: (code: string) => request<InstrumentMetadataResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}`),
-  getInstrumentQuote: (code: string) => request<InstrumentQuote>(`/api/v3/market/instruments/${encodeURIComponent(code)}/quote`),
-  getInstrumentQuotes: (codes: string[]) => request<BatchQuoteResponse>('/api/v3/market/instruments/quotes', { method: 'POST', body: { codes } }),
-  getInstrumentBars: (code: string, query: InstrumentBarsQuery = {}) => {
+  getMarketSession: (signal?: AbortSignal) => request<MarketSessionResponse>('/api/v3/market/session', { signal }),
+  getInstrument: (code: string, signal?: AbortSignal) => request<InstrumentMetadataResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}`, { signal }),
+  getInstrumentQuote: (code: string, signal?: AbortSignal) => request<InstrumentQuote>(`/api/v3/market/instruments/${encodeURIComponent(code)}/quote`, { signal }),
+  getInstrumentQuotes: (codes: string[], signal?: AbortSignal) => request<BatchQuoteResponse>('/api/v3/market/instruments/quotes', { method: 'POST', body: { codes }, signal }),
+  getInstrumentBars: (code: string, query: InstrumentBarsQuery = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) params.set(key, String(value))
     }
-    return request<InstrumentBarsResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}/bars?${params}`)
+    return request<InstrumentBarsResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}/bars?${params}`, { signal })
   },
-  getInstrumentOrderBook: (code: string) => request<OrderBook>(`/api/v3/market/instruments/${encodeURIComponent(code)}/order-book`),
-  getInstrumentCapitalFlow: (code: string) => request<CapitalFlow>(`/api/v3/market/instruments/${encodeURIComponent(code)}/capital-flow`),
-  getInstrumentSnapshot: (code: string) => request<InstrumentMarketSnapshot>(`/api/v3/market/instruments/${encodeURIComponent(code)}/snapshot`),
+  getInstrumentOrderBook: (code: string, signal?: AbortSignal) => request<OrderBook>(`/api/v3/market/instruments/${encodeURIComponent(code)}/order-book`, { signal }),
+  getInstrumentCapitalFlow: (code: string, signal?: AbortSignal) => request<CapitalFlow>(`/api/v3/market/instruments/${encodeURIComponent(code)}/capital-flow`, { signal }),
+  getInstrumentSnapshot: (code: string, signal?: AbortSignal) => request<InstrumentMarketSnapshot>(`/api/v3/market/instruments/${encodeURIComponent(code)}/snapshot`, { signal }),
   getMajorIndices: () => request<MajorIndexQuote[]>('/api/v3/market/major-indices'),
   getSystemicRisk: () => request<SystemicRiskSnapshot>('/api/v3/market/systemic-risk'),
   getMarketOverview: () => request<MarketOverview>('/api/v3/market/overview'),

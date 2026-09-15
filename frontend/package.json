@@ -12,6 +12,7 @@
     "e2e:acceptance": "python ../scripts/run_acceptance.py"
   },
   "dependencies": {
+    "echarts": "^6.1.0",
     "lucide-vue-next": "^0.468.0",
     "markdown-it": "^14.1.0",
     "naive-ui": "^2.40.3",

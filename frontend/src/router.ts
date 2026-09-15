@@ -34,6 +34,21 @@ const router = createRouter({
       meta: { uiSystem: 'v3', public: true, foundation: true },
       beforeEnter: () => foundationEnabled() || { name: 'dashboard' },
     },
+    // V3-UI-1 Unified InstrumentDetail — auth protected, not foundation-flag gated
+    {
+      path: '/market/instruments/:code',
+      name: 'instrument-detail',
+      component: () => import('./v3/instrument-detail/V3InstrumentDetailPage.vue'),
+      meta: { uiSystem: 'v3', title: '标的详情' },
+    },
+    // Acceptance host for drawer open/close lifecycle (foundation flag, not in product nav)
+    {
+      path: '/v3/instrument-drawer-host',
+      name: 'v3-instrument-drawer-host',
+      component: () => import('./v3/instrument-detail/V3InstrumentDrawerHostView.vue'),
+      meta: { uiSystem: 'v3', title: 'Drawer Host', foundation: true },
+      beforeEnter: () => foundationEnabled() || { name: 'dashboard' },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],
 })
