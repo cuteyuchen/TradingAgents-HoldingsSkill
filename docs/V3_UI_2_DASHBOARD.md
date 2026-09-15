@@ -178,12 +178,23 @@ Important events: next checkpoint from backend timeline, warnings, trigger state
 ## Polling / Visibility
 
 - Session: self-healing heartbeat (never dead-zones null / DATA_ABNORMAL / all session kinds).
+- **Session heartbeat only reschedules data pollers when the authoritative session kind actually changes.** Same-kind ticks must never reset indices/risk/overview/portfolio timers (would starve the 90s overview).
 - Indices: 8s during trading, 30s lunch, stop on closed/non-trading.
 - Systemic risk: ~45s trading (aggregate market, not 5s).
 - Overview: ~90s low frequency + manual refresh.
 - Portfolio: ~60s during trading.
 - `document.hidden` stops timers.
 - Resume: **session first**, then refresh live modules, then reschedule from the fresh session.
+
+## Portfolio Ownership
+
+Dashboard payload is bound to the portfolio that produced it:
+
+- `portfolioDashboardOwnerId` records which portfolio owns the applied payload.
+- ViewModel only exposes the payload when `ownerId === selectedPortfolioId`.
+- Switch A → B while B is pending: selector shows B; A metrics/decision/analysis are **not** attributed to B (loading skeleton instead).
+- B first failure: B localized error; A last-success is not shown as B.
+- Same-portfolio refresh failure: keep last-success + refresh-failed badge.
 
 ## Module Failure Isolation
 
@@ -240,7 +251,7 @@ Covered fixtures/scenarios:
 
 Legacy race test updated to V3 selectors and continues to assert A-stale cannot override B.
 
-Local full acceptance: **82 passed / 0 failed**.
+Local full acceptance: **86 passed / 0 failed**.
 
 ## Backend Changes
 
@@ -260,7 +271,7 @@ None. Frontend-only. No DB migration.
 
 - `npm run typecheck` — pass
 - `npm run build` — pass
-- `scripts/run_acceptance.py` — **82 passed, 0 failed**
+- `scripts/run_acceptance.py` — **86 passed, 0 failed**
 - Backend unchanged (frontend-only)
 - Exact-head CI required for merge gate
 

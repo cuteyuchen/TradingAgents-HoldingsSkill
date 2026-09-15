@@ -721,6 +721,194 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-decision-hero')).toHaveAttribute('data-decision-kind', 'NO_ACTION')
   })
 
+  test('portfolio switch ownership: pending B never shows A metrics or decision', async ({ acceptancePage: page }) => {
+    await mockAuthAndShell(page)
+    await mockMarket(page)
+
+    let releaseB!: () => void
+    let markBStarted!: () => void
+    const bGate = new Promise<void>((resolve) => { releaseB = resolve })
+    const bStarted = new Promise<void>((resolve) => { markBStarted = resolve })
+
+    await page.route('**/api/v3/portfolios/*/dashboard/today**', async (route) => {
+      const match = route.request().url().match(/portfolios\/(\d+)\/dashboard/)
+      const portfolioId = Number(match?.[1] || 1)
+      if (portfolioId === 2) {
+        markBStarted()
+        await bGate
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(dashboardToday({ portfolioId: 2, totalAssets: 22000, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE, finalAction: 'NO_ACTION' })),
+        }).catch(() => undefined)
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(dashboardToday({ portfolioId: 1, totalAssets: 11000, decision: ACTIONABLE_DECISION, analysis: ANALYSIS_DONE, finalAction: 'ACTION' })),
+      })
+    })
+
+    await openDashboard(page, '?portfolio=1')
+    await expect(page.getByTestId('v3-portfolio-total-assets')).toContainText('11,000')
+    await expect(page.getByTestId('v3-decision-hero')).toHaveAttribute('data-decision-kind', 'ACTIONABLE')
+
+    await page.getByTestId('v3-portfolio-select').selectOption({ label: '组合B' })
+    await bStarted
+    await expect(page.getByTestId('v3-portfolio-select')).toHaveValue('2')
+    // A payload must not be attributed to B while B is pending.
+    await expect(page.getByTestId('v3-portfolio-total-assets')).toHaveCount(0)
+    await expect(page.getByText('11,000')).toHaveCount(0)
+    await expect(page.getByTestId('v3-decision-title')).not.toHaveText('今日需要行动')
+    await expect(page.getByTestId('v3-index-000001.SH')).toBeVisible()
+
+    releaseB()
+    await expect(page.getByTestId('v3-portfolio-total-assets')).toContainText('22,000')
+    await expect(page.getByTestId('v3-decision-hero')).toHaveAttribute('data-decision-kind', 'NO_ACTION')
+  })
+
+  test('portfolio switch first failure shows B localized error, not A data', async ({ acceptancePage: page }) => {
+    allowExpectedHttpError(page, 500)
+    await mockAuthAndShell(page)
+    await mockMarket(page)
+
+    await page.route('**/api/v3/portfolios/*/dashboard/today**', (route) => {
+      const match = route.request().url().match(/portfolios\/(\d+)\/dashboard/)
+      const portfolioId = Number(match?.[1] || 1)
+      if (portfolioId === 2) {
+        return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'b_failed' }) })
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(dashboardToday({ portfolioId: 1, totalAssets: 11000, decision: ACTIONABLE_DECISION, analysis: ANALYSIS_DONE, finalAction: 'ACTION' })),
+      })
+    })
+
+    await openDashboard(page, '?portfolio=1')
+    await expect(page.getByTestId('v3-portfolio-total-assets')).toContainText('11,000')
+
+    await page.getByTestId('v3-portfolio-select').selectOption({ label: '组合B' })
+    await expect(page.getByTestId('v3-portfolio-error')).toBeVisible()
+    await expect(page.getByTestId('v3-portfolio-select')).toHaveValue('2')
+    await expect(page.getByTestId('v3-portfolio-total-assets')).toHaveCount(0)
+    await expect(page.getByText('11,000')).toHaveCount(0)
+    await expect(page.getByTestId('v3-index-000001.SH')).toBeVisible()
+
+    await page.unroute('**/api/v3/portfolios/*/dashboard/today**')
+    await page.route('**/api/v3/portfolios/*/dashboard/today**', (route) => {
+      const match = route.request().url().match(/portfolios\/(\d+)\/dashboard/)
+      const portfolioId = Number(match?.[1] || 2)
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(dashboardToday({ portfolioId, totalAssets: 22000, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE, finalAction: 'NO_ACTION' })),
+      })
+    })
+    await page.getByTestId('v3-portfolio-retry').click()
+    await expect(page.getByTestId('v3-portfolio-total-assets')).toContainText('22,000')
+  })
+
+  test('session heartbeat does not starve slower overview poll (MORNING 60s vs overview 90s)', async ({ acceptancePage: page }) => {
+    await page.clock.install({ time: new Date('2026-09-11T02:00:00.000Z') })
+    await mockAuthAndShell(page)
+    await mockMarket(page, { sessionKind: 'MORNING' })
+
+    let sessionCalls = 0
+    let overviewCalls = 0
+    let riskCalls = 0
+    await page.unroute('**/api/v3/market/session**')
+    await page.unroute('**/api/v3/market/overview**')
+    await page.unroute('**/api/v3/market/systemic-risk**')
+    await page.route('**/api/v3/market/session**', (route) => {
+      sessionCalls += 1
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload('MORNING')) })
+    })
+    await page.route('**/api/v3/market/overview**', (route) => {
+      overviewCalls += 1
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(overviewPayload('MORNING')) })
+    })
+    await page.route('**/api/v3/market/systemic-risk**', (route) => {
+      riskCalls += 1
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(systemicRiskPayload()) })
+    })
+    await mockDashboardToday(page, (portfolioId) => dashboardToday({ portfolioId, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE }))
+
+    await openDashboard(page)
+    await expect(page.getByTestId('v3-dashboard')).toBeVisible()
+    const sessionBase = sessionCalls
+    const overviewBase = overviewCalls
+    const riskBase = riskCalls
+    expect(sessionBase).toBeGreaterThanOrEqual(1)
+    expect(overviewBase).toBeGreaterThanOrEqual(1)
+
+    // Advance in chunks so async poll callbacks can settle between jumps.
+    // MORNING: session 60s, risk 45s, overview 90s. Session tick at 60s must not reset overview.
+    for (const step of [45_000, 20_000, 35_000]) {
+      await page.clock.fastForward(step)
+      await page.waitForTimeout(20)
+    }
+
+    expect(sessionCalls).toBeGreaterThanOrEqual(sessionBase + 1)
+    expect(riskCalls).toBeGreaterThanOrEqual(riskBase + 2)
+    expect(overviewCalls).toBeGreaterThanOrEqual(overviewBase + 1)
+  })
+
+  test('LUNCH_BREAK: session tick does not reset risk/overview/portfolio cadence', async ({ acceptancePage: page }) => {
+    await page.clock.install({ time: new Date('2026-09-11T04:00:00.000Z') })
+    await mockAuthAndShell(page)
+    await mockMarket(page, { sessionKind: 'LUNCH_BREAK' })
+
+    let sessionCalls = 0
+    let overviewCalls = 0
+    let riskCalls = 0
+    let portfolioCalls = 0
+    await page.unroute('**/api/v3/market/session**')
+    await page.unroute('**/api/v3/market/overview**')
+    await page.unroute('**/api/v3/market/systemic-risk**')
+    await page.route('**/api/v3/market/session**', (route) => {
+      sessionCalls += 1
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sessionPayload('LUNCH_BREAK')) })
+    })
+    await page.route('**/api/v3/market/overview**', (route) => {
+      overviewCalls += 1
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(overviewPayload('LUNCH_BREAK')) })
+    })
+    await page.route('**/api/v3/market/systemic-risk**', (route) => {
+      riskCalls += 1
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(systemicRiskPayload()) })
+    })
+    await page.route('**/api/v3/portfolios/*/dashboard/today**', (route) => {
+      portfolioCalls += 1
+      const match = route.request().url().match(/portfolios\/(\d+)\/dashboard/)
+      const portfolioId = Number(match?.[1] || 1)
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(dashboardToday({ portfolioId, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE })),
+      })
+    })
+
+    await openDashboard(page)
+    await expect(page.getByTestId('v3-dashboard')).toBeVisible()
+    const sessionBase = sessionCalls
+    const overviewBase = overviewCalls
+    const riskBase = riskCalls
+    const portfolioBase = portfolioCalls
+
+    // LUNCH: session 60s, risk 90s, overview 120s, portfolio 120s.
+    for (const step of [60_000, 40_000, 30_000]) {
+      await page.clock.fastForward(step)
+      await page.waitForTimeout(20)
+    }
+
+    expect(sessionCalls).toBeGreaterThan(sessionBase)
+    expect(riskCalls).toBeGreaterThan(riskBase)
+    expect(overviewCalls).toBeGreaterThan(overviewBase)
+    expect(portfolioCalls).toBeGreaterThan(portfolioBase)
+  })
+
   test('market failure does not break portfolio decision', async ({ acceptancePage: page }) => {
     allowExpectedHttpError(page, 500)
     await mockAuthAndShell(page)

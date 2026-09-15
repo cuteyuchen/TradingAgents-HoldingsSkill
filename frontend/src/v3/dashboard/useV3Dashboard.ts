@@ -72,6 +72,8 @@ export function useV3Dashboard() {
   const systemicRisk = ref<SystemicRiskSnapshot | null>(null)
   const marketOverview = ref<MarketOverview | null>(null)
   const portfolioDashboard = ref<DailyDashboard | null>(null)
+  /** Which portfolio currently owns the applied dashboard payload. */
+  const portfolioDashboardOwnerId = ref<number | null>(null)
 
   const sessionLoading = ref(false)
   const indicesLoading = ref(false)
@@ -86,6 +88,8 @@ export function useV3Dashboard() {
   const riskError = ref<unknown>(null)
   const overviewError = ref<unknown>(null)
   const portfolioError = ref<unknown>(null)
+  /** Portfolio id the current portfolioError belongs to (same-portfolio refresh vs switch). */
+  const portfolioErrorOwnerId = ref<number | null>(null)
 
   const sessionLastSuccess = ref<string | null>(null)
   const indicesLastSuccess = ref<string | null>(null)
@@ -111,13 +115,26 @@ export function useV3Dashboard() {
 
   const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
 
+  /** Payload is only visible when the owning portfolio is still selected. */
+  const currentPortfolioDashboard = computed<DailyDashboard | null>(() => {
+    if (portfolioDashboardOwnerId.value === null) return null
+    if (portfolioDashboardOwnerId.value !== selectedPortfolioId.value) return null
+    return portfolioDashboard.value
+  })
+
+  /** Errors apply only to the selected portfolio (A last-success refresh vs B first failure). */
+  const currentPortfolioError = computed<unknown>(() => {
+    if (portfolioErrorOwnerId.value !== selectedPortfolioId.value) return null
+    return portfolioError.value
+  })
+
   const viewModel = computed<V3DashboardViewModel>(() =>
     buildViewModel({
       session: session.value,
       majorIndices: majorIndices.value,
       systemicRisk: systemicRisk.value,
       overview: marketOverview.value,
-      dashboard: portfolioDashboard.value,
+      dashboard: currentPortfolioDashboard.value,
       portfolioId: selectedPortfolioId.value,
       portfolioName: selectedPortfolio.value?.name || null,
       hasPortfolio: hasPortfolio.value,
@@ -209,7 +226,9 @@ export function useV3Dashboard() {
     const ctx = begin(slotPortfolio)
     if (!portfolioId) {
       portfolioDashboard.value = null
+      portfolioDashboardOwnerId.value = null
       portfolioError.value = null
+      portfolioErrorOwnerId.value = null
       if (!silent) portfolioLoading.value = false
       return
     }
@@ -220,12 +239,15 @@ export function useV3Dashboard() {
       if (!isCurrent(slotPortfolio, ctx.seq)) return
       if (selectedPortfolioId.value !== portfolioId) return
       portfolioDashboard.value = data
+      portfolioDashboardOwnerId.value = portfolioId
       portfolioError.value = null
+      portfolioErrorOwnerId.value = null
       portfolioLastSuccess.value = new Date().toISOString()
     } catch (error) {
       if (isAbortError(error) || !isCurrent(slotPortfolio, ctx.seq)) return
       if (selectedPortfolioId.value !== portfolioId) return
       portfolioError.value = error
+      portfolioErrorOwnerId.value = portfolioId
     } finally {
       if (isCurrent(slotPortfolio, ctx.seq) && !silent) portfolioLoading.value = false
     }
@@ -246,10 +268,16 @@ export function useV3Dashboard() {
     if (isPageHidden() || !mounted.value) return
     const ms = dashboardPollIntervals(session.value?.session ?? null).sessionMs
     sessionTimer = window.setTimeout(async () => {
+      const previousKind = session.value?.session ?? null
       await loadSession(true)
+      if (isPageHidden() || !mounted.value) return
+      const nextKind = session.value?.session ?? null
+      // Session heartbeat is cadence authority only — never reset data pollers
+      // on same-kind ticks (would starve slower overview/risk timers).
       scheduleSessionPoll()
-      // Reconcile other pollers when session kind changes.
-      rescheduleDataPollers()
+      if (previousKind !== nextKind) {
+        rescheduleDataPollers()
+      }
     }, ms)
   }
 
@@ -406,6 +434,11 @@ export function useV3Dashboard() {
 
   watch(selectedPortfolioId, (id, previous) => {
     if (id === previous) return
+    // New selection: drop prior portfolio errors so A errors are never shown as B.
+    // Keep last-success payload + owner so same-portfolio refresh can still use it,
+    // but ViewModel hides it while owner !== selected.
+    portfolioError.value = null
+    portfolioErrorOwnerId.value = null
     // Market modules are portfolio-independent — do not reload them.
     void loadPortfolioDashboard(!mounted.value)
     if (!isPageHidden() && mounted.value) reschedulePortfolioOnly()
@@ -455,6 +488,9 @@ export function useV3Dashboard() {
     systemicRisk,
     marketOverview,
     portfolioDashboard,
+    portfolioDashboardOwnerId,
+    currentPortfolioDashboard,
+    currentPortfolioError,
     viewModel,
     instrumentDrawerOpen,
     selectedInstrumentCode,

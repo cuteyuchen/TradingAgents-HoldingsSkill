@@ -41,7 +41,7 @@ const {
   indicesError,
   riskError,
   overviewError,
-  portfolioError,
+  currentPortfolioError,
   viewModel,
   instrumentDrawerOpen,
   selectedInstrumentCode,
@@ -61,6 +61,8 @@ const marketRefreshFailed = computed(
 )
 
 const portfolioDashboardHasData = computed(() => Boolean(viewModel.value.portfolio && viewModel.value.portfolio.status !== 'MISSING'))
+
+const portfolioRefreshFailed = computed(() => Boolean(currentPortfolioError.value) && portfolioDashboardHasData.value)
 
 function onPortfolioChange(event: Event): void {
   const raw = Number((event.target as HTMLSelectElement).value)
@@ -101,7 +103,7 @@ function goAnalysis(): void {
           data-testid="v3-market-stale"
         />
         <V3StatusBadge
-          v-if="portfolioError && portfolioDashboardHasData"
+          v-if="portfolioRefreshFailed"
           label="组合刷新失败"
           tone="warning"
           data-testid="v3-portfolio-refresh-failed"
@@ -163,7 +165,7 @@ function goAnalysis(): void {
               :portfolio="viewModel.portfolio"
               :has-portfolio="hasPortfolio"
               :loading="portfolioLoading"
-              :error="Boolean(portfolioError)"
+              :error="Boolean(currentPortfolioError)"
               @go-holdings="goHoldings"
               @retry="loadPortfolioDashboard(false)"
             />
