@@ -165,7 +165,11 @@ export function mapSessionBar(
 ): V3SessionBarVM {
   const kind = (session?.session ?? null) as MarketSessionKind | null
   const dataBasis = strOrNull(session?.data_basis) || '—'
-  const isPreviousClose = dataBasis === 'previous_session_close' || kind === 'NON_TRADING_DAY' || kind === 'CLOSED'
+  // CLOSED + session_close is same-trading-day close, NOT previous session close.
+  // Only explicit previous_session_close or NON_TRADING_DAY fallback shows 上一交易日收盘.
+  const isPreviousClose =
+    dataBasis === 'previous_session_close'
+    || (kind === 'NON_TRADING_DAY' && dataBasis !== 'session_close')
   const quoteStateText = isPreviousClose
     ? '上一交易日收盘'
     : kind
@@ -236,9 +240,12 @@ export function mapTurnover(turnover: TotalTurnoverMetric | null | undefined): V
 export function mapConcentration(metric: TurnoverConcentrationMetric | null | undefined): V3ConcentrationVM | null {
   if (!metric) return null
   const trend = (strOrNull(metric.trend) || 'unavailable') as V3ConcentrationVM['trend']
-  const history: number[] = []
-  if (isNum(metric.avg_20d)) history.push(metric.avg_20d)
-  if (isNum(metric.ratio)) history.push(metric.ratio)
+  // MARKET-1 overview currently has no real concentration time series.
+  // Never fabricate a sparkline from current + 20d average.
+  const rawHistory = (metric as TurnoverConcentrationMetric & { history?: unknown }).history
+  const history: number[] = Array.isArray(rawHistory)
+    ? rawHistory.filter((value): value is number => isNum(value))
+    : []
   return {
     ratio: numOrNull(metric.ratio),
     avg20d: numOrNull(metric.avg_20d),
@@ -435,7 +442,8 @@ export function mapDecision(
     (latestDecision as Record<string, unknown> | null)?.conclusion
     ?? (latestAnalysis as Record<string, unknown> | null)?.portfolio_action
     ?? (latestAnalysis as Record<string, unknown> | null)?.final_rating
-    ?? sectionField(decisions, 'final_action')
+    // Backend final_action fallbacks to NO_ACTION when no decision exists — never trust it as explicit NO_ACTION.
+    ?? (decisionStatus === 'AVAILABLE' ? sectionField(decisions, 'final_action') : null)
   const conclusion = normalizeConclusion(rawConclusion)
 
   if (conclusion === 'BLOCKED' || conclusion === 'BLOCK') {
@@ -458,7 +466,8 @@ export function mapDecision(
   const actionCount = holdingActions.filter((row) => row.action && ACTION_SET.has(normalizeConclusion(row.action))).length
     + candidateActions.filter((row) => row.action && ACTION_SET.has(normalizeConclusion(row.action))).length
 
-  if (NO_ACTION_SET.has(conclusion) || conclusion === '') {
+  // Explicit NO_ACTION only from a structured non-empty conclusion.
+  if (NO_ACTION_SET.has(conclusion)) {
     return {
       kind: 'NO_ACTION',
       title: '今日无需操作',
@@ -468,7 +477,7 @@ export function mapDecision(
       holdingActions: [],
       candidateActions: [],
       reasons: collectReasons(latestDecision, latestAnalysis, ['当前没有足够的新信息改变组合决策。']),
-      conclusion: conclusion || 'NO_ACTION',
+      conclusion,
       quality,
       decisionAt: strOrNull((latestDecision as Record<string, unknown> | null)?.decision_at),
       analysisRunId: numOrNull((latestDecision as Record<string, unknown> | null)?.analysis_run_id),
@@ -492,11 +501,13 @@ export function mapDecision(
     }
   }
 
-  // Unknown structured conclusion — do not invent NO_ACTION.
+  // Empty or unknown structured conclusion — MISSING, never invent NO_ACTION.
   return {
     kind: 'MISSING',
     title: '暂无有效策略结论',
-    subtitle: `无法识别的结构化结论：${conclusion || '空'}`,
+    subtitle: conclusion
+      ? `无法识别的结构化结论：${conclusion}`
+      : '分析已存在但未给出明确组合结论。',
     tone: 'blocked',
     actionCount: 0,
     holdingActions,

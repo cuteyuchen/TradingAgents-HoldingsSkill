@@ -1,8 +1,10 @@
 /**
  * V3 Dashboard Decision Workbench acceptance
  * Fully deterministic via page.route() — no live Tencent/Eastmoney/Fuyao.
+ * Uses project fixtures acceptancePage error guard (401 / console.error / pageerror).
  */
-import { test, expect, type Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
+import { test, expect, allowExpectedHttpError } from './fixtures'
 
 const TRADE_DATE = '2026-09-11'
 
@@ -162,7 +164,7 @@ function systemicRiskPayload() {
   }
 }
 
-function overviewPayload(sessionKind: SessionKind = 'MORNING', dataBasis: 'live' | 'previous_session_close' = 'live') {
+function overviewPayload(sessionKind: SessionKind = 'MORNING', dataBasis: 'live' | 'session_close' | 'previous_session_close' = 'live') {
   return {
     session: sessionPayload(sessionKind, dataBasis),
     major_indices: majorIndicesPayload(),
@@ -340,7 +342,20 @@ async function mockAuthAndShell(page: Page): Promise<void> {
     }),
   )
   await page.route('**/api/v3/system/**', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'OK' }) }),
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'OK', ready: true, components: {}, as_of: `${TRADE_DATE}T00:00:00+08:00` }) }),
+  )
+  // App.vue loadSystemStatus also calls Fuyao status — mock narrowly to avoid real 401 with fake token.
+  await page.route('**/api/v3/fuyao/status*', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        provider: 'fuyao',
+        configured: false,
+        connection_status: '未配置',
+        capabilities: {},
+      }),
+    }),
   )
   await page.route('**/api/v2/portfolios**', (route) =>
     route.fulfill({
@@ -358,7 +373,7 @@ async function mockMarket(
   page: Page,
   options: {
     sessionKind?: SessionKind
-    dataBasis?: 'live' | 'previous_session_close'
+    dataBasis?: 'live' | 'session_close' | 'previous_session_close'
     indicesStatus?: number
     riskStatus?: number
     overviewStatus?: number
@@ -411,7 +426,7 @@ async function openDashboard(page: Page, query = ''): Promise<void> {
 }
 
 test.describe('V3 Dashboard Decision Workbench', () => {
-  test('renders V3 shell, session, six indices, risk, portfolio, decision, analysis, events', async ({ page }) => {
+  test('renders V3 shell, session, six indices, risk, portfolio, decision, analysis, events', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page, { sessionKind: 'MORNING' })
     await mockDashboardToday(page, (portfolioId) =>
@@ -460,7 +475,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-next-checkpoint')).toContainText('快速复核')
   })
 
-  test('explicit NO_ACTION is first-class and not green success', async ({ page }) => {
+  test('explicit NO_ACTION is first-class and not green success', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     await mockDashboardToday(page, (portfolioId) =>
@@ -473,7 +488,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-decision-kind')).toContainText('NO_ACTION')
   })
 
-  test('missing decision is NOT NO_ACTION', async ({ page }) => {
+  test('missing decision is NOT NO_ACTION', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     // Backend fallback final_action=NO_ACTION without valid latest decision/analysis
@@ -493,7 +508,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-decision-title')).toHaveText('暂无有效策略结论')
   })
 
-  test('BLOCKED decision shows structured block reason', async ({ page }) => {
+  test('BLOCKED decision shows structured block reason', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     await mockDashboardToday(page, (portfolioId) =>
@@ -511,7 +526,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-decision-reasons')).toContainText('数据质量不足')
   })
 
-  test('actionable decision lists structured actions and opens drawer from code', async ({ page }) => {
+  test('actionable decision lists structured actions and opens drawer from code', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     await mockDashboardToday(page, (portfolioId) =>
@@ -553,7 +568,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('instrument-detail-drawer')).toBeVisible({ timeout: 15_000 })
   })
 
-  test('index card opens unified InstrumentDetail drawer', async ({ page }) => {
+  test('index card opens unified InstrumentDetail drawer', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     await mockDashboardToday(page, (portfolioId) => dashboardToday({ portfolioId, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE }))
@@ -602,7 +617,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('instrument-detail-drawer')).toContainText('000300.SH')
   })
 
-  test('non-trading day shows previous session close label', async ({ page }) => {
+  test('non-trading day shows previous session close label', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page, { sessionKind: 'NON_TRADING_DAY', dataBasis: 'previous_session_close' })
     await mockDashboardToday(page, (portfolioId) => dashboardToday({ portfolioId, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE }))
@@ -612,7 +627,60 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByText('今日收盘')).toHaveCount(0)
   })
 
-  test('portfolio race: slow A must not override selected B', async ({ page }) => {
+  test('CLOSED + session_close is same-day close, not previous session close', async ({ acceptancePage: page }) => {
+    await mockAuthAndShell(page)
+    await mockMarket(page, { sessionKind: 'CLOSED', dataBasis: 'session_close' })
+    await mockDashboardToday(page, (portfolioId) => dashboardToday({ portfolioId, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE }))
+    await openDashboard(page)
+    await expect(page.getByTestId('v3-session-label')).toContainText('已收盘')
+    await expect(page.getByTestId('v3-previous-close')).toHaveCount(0)
+    await expect(page.getByText('上一交易日收盘')).toHaveCount(0)
+  })
+
+  test('blank analysis conclusion is MISSING, never NO_ACTION', async ({ acceptancePage: page }) => {
+    await mockAuthAndShell(page)
+    await mockMarket(page)
+    const blankAnalysis = {
+      analysis_job_id: 21,
+      analysis_run_id: 101,
+      mode: 'fast',
+      finished_at: `${TRADE_DATE}T09:40:00+08:00`,
+      status: 'SUCCESS',
+      final_rating: null,
+      portfolio_action: null,
+      quality: 'A',
+      confidence: 0.5,
+      candidate_action_count: 0,
+    }
+    await mockDashboardToday(page, (portfolioId) =>
+      dashboardToday({
+        portfolioId,
+        decision: null,
+        analysis: blankAnalysis,
+        decisionsStatus: 'MISSING',
+        analysisStatus: 'AVAILABLE',
+        finalAction: 'NO_ACTION',
+      }),
+    )
+    await openDashboard(page)
+    const hero = page.getByTestId('v3-decision-hero')
+    await expect(hero).toHaveAttribute('data-decision-kind', 'MISSING')
+    await expect(page.getByTestId('v3-decision-title')).toHaveText('暂无有效策略结论')
+    await expect(page.getByText('今日无需操作')).toHaveCount(0)
+  })
+
+  test('top5 concentration has no fabricated 2-point sparkline', async ({ acceptancePage: page }) => {
+    await mockAuthAndShell(page)
+    await mockMarket(page)
+    await mockDashboardToday(page, (portfolioId) => dashboardToday({ portfolioId, decision: NO_ACTION_DECISION, analysis: ANALYSIS_DONE }))
+    await openDashboard(page)
+    await expect(page.getByTestId('v3-top5-current')).toContainText('28.0%')
+    await expect(page.getByTestId('v3-top5-avg20')).toContainText('24.0%')
+    await expect(page.getByTestId('v3-top5-trend')).toContainText('趋向集中')
+    await expect(page.getByTestId('v3-top5-sparkline')).toHaveCount(0)
+  })
+
+  test('portfolio race: slow A must not override selected B', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
 
@@ -653,7 +721,8 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-decision-hero')).toHaveAttribute('data-decision-kind', 'NO_ACTION')
   })
 
-  test('market failure does not break portfolio decision', async ({ page }) => {
+  test('market failure does not break portfolio decision', async ({ acceptancePage: page }) => {
+    allowExpectedHttpError(page, 500)
     await mockAuthAndShell(page)
     await mockMarket(page, { indicesStatus: 500, riskStatus: 500, overviewStatus: 500 })
     await mockDashboardToday(page, (portfolioId) =>
@@ -664,16 +733,20 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-portfolio-total-assets')).toBeVisible()
   })
 
-  test('portfolio failure does not break market modules', async ({ page }) => {
+  test('portfolio failure does not break market modules', async ({ acceptancePage: page }) => {
+    allowExpectedHttpError(page, 500)
     await mockAuthAndShell(page)
     await mockMarket(page)
     await mockDashboardToday(page, () => ({}), 500)
     await openDashboard(page)
     await expect(page.getByTestId('v3-index-000001.SH')).toBeVisible()
     await expect(page.getByTestId('v3-risk-level-text')).toHaveText('MEDIUM')
+    // Localized portfolio failure — market stays visible; no full-page V3ErrorState.
+    await expect(page.getByTestId('v3-portfolio-error')).toBeVisible()
+    await expect(page.getByTestId('v3-error-state')).toHaveCount(0)
   })
 
-  test('visibility resume loads session first', async ({ page }) => {
+  test('visibility resume loads session first', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     let sessionCalls = 0
     let sessionKind: SessionKind = 'PRE_OPEN'
@@ -707,7 +780,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     expect(sessionCalls).toBeGreaterThan(before)
   })
 
-  test('no portfolio shows market still and no NO_ACTION', async ({ page }) => {
+  test('no portfolio shows market still and no NO_ACTION', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     await page.route('**/api/v2/portfolios**', (route) =>
@@ -723,7 +796,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByText('今日无需操作')).toHaveCount(0)
   })
 
-  test('mobile 375 has no horizontal overflow', async ({ page }) => {
+  test('mobile 375 has no horizontal overflow', async ({ acceptancePage: page }) => {
     await page.setViewportSize({ width: 375, height: 720 })
     await mockAuthAndShell(page)
     await mockMarket(page)

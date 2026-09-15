@@ -230,11 +230,17 @@ Covered fixtures/scenarios:
 - ANALYSIS_RUNNING
 - MULTI_PORTFOLIO race A-slow / B-fast
 - Partial failure market 500 / portfolio 500
+- Initial portfolio failure + localized retry
+- CLOSED + session_close (same-day close)
+- Blank conclusion = MISSING
+- No fabricated Top5 sparkline
 - Visibility resume session-first
 - Mobile 375 overflow
 - Index drawer reuse
 
 Legacy race test updated to V3 selectors and continues to assert A-stale cannot override B.
+
+Local full acceptance: **82 passed / 0 failed**.
 
 ## Backend Changes
 
@@ -248,14 +254,15 @@ None. Frontend-only. No DB migration.
 - Full mobile business flows not human-verified.
 - Day return / floating P&L unavailable on homepage (no authoritative dashboard amount contract).
 - Homepage places no orders and adds no new strategy recommendations.
-- Top5 history series is limited by current overview contract (comparison + trend text + simple sparkline points).
+- Top5 history series is limited by current overview contract — no fabricated 2-point sparkline; current / 20d avg / trend only until a real series exists.
 
 ## Verification
 
 - `npm run typecheck` — pass
 - `npm run build` — pass
-- `npm run e2e:acceptance` — run on exact-head CI
-- Backend `pytest` — unchanged (frontend-only)
+- `scripts/run_acceptance.py` — **82 passed, 0 failed**
+- Backend unchanged (frontend-only)
+- Exact-head CI required for merge gate
 
 ## Follow-up
 

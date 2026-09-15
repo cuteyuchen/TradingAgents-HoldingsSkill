@@ -13,7 +13,7 @@ const props = defineProps<{
   error?: boolean
 }>()
 
-const emit = defineEmits<{ goHoldings: [] }>()
+const emit = defineEmits<{ goHoldings: []; retry: [] }>()
 
 const freshnessLabel = computed(() => {
   const map: Record<string, string> = {
@@ -25,6 +25,9 @@ const freshnessLabel = computed(() => {
   }
   return map[props.portfolio?.freshness || 'UNKNOWN'] || props.portfolio?.freshness || '状态未知'
 })
+
+/** Initial load failed with no last-success data — localized error, not a blank section. */
+const showInitialError = computed(() => Boolean(props.error && props.hasPortfolio && !props.portfolio && !props.loading))
 </script>
 
 <template>
@@ -46,6 +49,11 @@ const freshnessLabel = computed(() => {
         <button type="button" class="link-btn" @click="emit('goHoldings')">去导入持仓</button>
       </template>
     </V3EmptyState>
+    <div v-else-if="showInitialError" class="portfolio__error-block" role="alert" data-testid="v3-portfolio-error">
+      <p>组合数据暂时加载失败</p>
+      <p class="portfolio__error-hint">市场数据仍可查看；请重试组合模块。</p>
+      <button type="button" class="link-btn" data-testid="v3-portfolio-retry" @click="emit('retry')">重试</button>
+    </div>
     <div v-else-if="portfolio && portfolio.status === 'MISSING'" class="portfolio__missing" data-testid="v3-portfolio-missing">
       <p>组合快照缺失，无法展示最新持仓市值。</p>
       <button type="button" class="link-btn" @click="emit('goHoldings')">更新持仓</button>
@@ -115,6 +123,19 @@ const freshnessLabel = computed(() => {
   font-size: var(--v3-font-size-sm);
 }
 .portfolio__error { color: var(--v3-status-warning); }
+.portfolio__error-block {
+  display: grid;
+  gap: var(--v3-space-2);
+  border: 1px solid var(--v3-border);
+  border-left: 3px solid var(--v3-status-warning);
+  border-radius: var(--v3-radius-md);
+  background: var(--v3-status-warning-soft);
+  padding: var(--v3-space-4);
+  color: var(--v3-status-warning);
+  font-size: var(--v3-font-size-sm);
+}
+.portfolio__error-block p { margin: 0; font-weight: 700; }
+.portfolio__error-hint { font-weight: 400 !important; color: var(--v3-text-secondary); }
 .link-btn {
   border: 0;
   background: none;
@@ -122,6 +143,7 @@ const freshnessLabel = computed(() => {
   cursor: pointer;
   font-weight: 600;
   padding: 0;
+  justify-self: start;
 }
 @media (max-width: 900px) {
   .portfolio__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

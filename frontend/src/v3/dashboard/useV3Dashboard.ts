@@ -239,6 +239,10 @@ export function useV3Dashboard() {
   }
 
   function scheduleSessionPoll(): void {
+    if (sessionTimer !== null) {
+      window.clearTimeout(sessionTimer)
+      sessionTimer = null
+    }
     if (isPageHidden() || !mounted.value) return
     const ms = dashboardPollIntervals(session.value?.session ?? null).sessionMs
     sessionTimer = window.setTimeout(async () => {

@@ -47,6 +47,7 @@ const {
   selectedInstrumentCode,
   openInstrument,
   refreshAll,
+  loadPortfolioDashboard,
 } = useV3Dashboard()
 
 const pageTitle = computed(() => {
@@ -164,6 +165,7 @@ function goAnalysis(): void {
               :loading="portfolioLoading"
               :error="Boolean(portfolioError)"
               @go-holdings="goHoldings"
+              @retry="loadPortfolioDashboard(false)"
             />
           </V3Section>
         </div>

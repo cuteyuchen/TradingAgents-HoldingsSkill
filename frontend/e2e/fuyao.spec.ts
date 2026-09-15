@@ -11,11 +11,13 @@ test.describe('Fuyao context and degradation', () => {
     await expect(fuyaoCard).toContainText('行情')
 
     await page.goto(`/dashboard?portfolio=${facts.portfolios.action}`)
-    const context = page.getByTestId('fuyao-market-context')
-    await expect(context).toBeVisible()
-    await expect(context).toContainText('涨停')
-    await expect(context).toContainText('43')
-    await expect(context).toContainText('跌停')
+    // V3 Dashboard uses MARKET-1 canonical market surface, not Fuyao brief.
+    await expect(page.getByTestId('v3-systemic-risk-panel')).toBeVisible()
+    await expect(page.getByTestId('v3-market-breadth')).toBeVisible()
+    await expect(page.getByTestId('v3-limit-up')).toBeVisible()
+    await expect(page.getByTestId('v3-limit-down')).toBeVisible()
+    await expect(page.getByTestId('v3-typical-stock')).toContainText('典型个股表现')
+    await expect(page.getByTestId('fuyao-market-context')).toHaveCount(0)
 
     await page.goto(`/holdings?portfolio=${facts.portfolios.action}`)
     const table = page.locator('.holdings-table')
