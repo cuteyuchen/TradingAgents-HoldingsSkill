@@ -47,9 +47,9 @@ async function createRetryJob(
 async function openJobInDrawer(page: Page, portfolioId: number, jobId: number): Promise<void> {
   await page.goto(`/upload?portfolio=${portfolioId}&job=${jobId}&focus=analysis`)
   await expect(page).toHaveURL(/\/holdings\?/)
-  const drawer = page.locator('.n-drawer').last()
-  await expect(drawer).toBeVisible()
-  await expect(drawer.locator('.job-status')).toBeVisible({ timeout: 30_000 })
+  const drawer = page.getByTestId('v3-holdings-update-drawer')
+  await expect(drawer).toBeVisible({ timeout: 20_000 })
+  await expect(drawer.getByTestId('v3-update-job')).toBeVisible({ timeout: 30_000 })
 }
 
 async function auditedWorkflow(page: Page, jobId: number) {

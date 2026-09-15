@@ -20,7 +20,12 @@ const router = createRouter({
       component: () => import('./v3/dashboard/V3DashboardView.vue'),
       meta: { uiSystem: 'v3', title: '首页' },
     },
-    { path: '/holdings', name: 'holdings', component: () => import('./views/HoldingsView.vue'), meta: { uiSystem: 'legacy' } },
+    {
+      path: '/holdings',
+      name: 'holdings',
+      component: () => import('./v3/holdings/V3HoldingsView.vue'),
+      meta: { uiSystem: 'v3', title: '持仓' },
+    },
     { path: '/analysis', name: 'analysis', component: () => import('./views/AnalysisView.vue'), meta: { uiSystem: 'legacy' } },
     { path: '/simulation', name: 'simulation', component: () => import('./views/SimulationView.vue'), meta: { uiSystem: 'legacy' } },
     { path: '/history', name: 'history', component: () => import('./views/HistoryView.vue'), meta: { uiSystem: 'legacy' } },

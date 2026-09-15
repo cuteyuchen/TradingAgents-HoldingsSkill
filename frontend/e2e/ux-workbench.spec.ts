@@ -8,18 +8,10 @@ test('Single-user navigation exposes only the workbench pages and preserves lega
   await expect(page.getByTestId('v3-sidebar')).toBeVisible()
   await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
 
-  // Legacy pages still use the legacy top nav
+  // Holdings is now V3 shell
   await page.goto('/holdings')
-  const nav = page.locator('nav.top-nav')
-  await expect(nav.getByRole('link')).toHaveCount(5)
-  await expect(nav).toContainText('首页')
-  await expect(nav).toContainText('持仓')
-  await expect(nav).toContainText('分析')
-  await expect(nav).toContainText('模拟')
-  await expect(nav).toContainText('历史')
-  await expect(nav).not.toContainText('治理')
-  await expect(nav).not.toContainText('系统')
-  await expect(page.locator('.icon-link[aria-label="设置"]')).toBeVisible()
+  await expect(page.getByTestId('v3-holdings')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '我的持仓' })).toBeVisible()
 
   const aliases = [
     ['/reports?portfolio=' + facts.portfolios.action + '&run=' + facts.runs.action, '/analysis', '今日分析'],
@@ -37,8 +29,8 @@ test('Single-user navigation exposes only the workbench pages and preserves lega
   await page.goto('/upload?portfolio=' + facts.portfolios.action)
   await expect(page).toHaveURL(/\/holdings\?/)
   await expect(page.getByRole('heading', { name: '我的持仓' })).toBeVisible()
-  await expect(page.locator('.n-drawer').last()).toBeVisible()
-  await page.getByRole('button', { name: '关闭更新持仓' }).click()
+  await expect(page.getByTestId('v3-holdings-update-drawer')).toBeVisible()
+  await page.getByTestId('v3-detail-drawer-close').click()
 })
 
 test('Shell keeps email private and hides the portfolio selector for one portfolio', async ({ acceptancePage: page, facts }) => {
@@ -46,9 +38,9 @@ test('Shell keeps email private and hides the portfolio selector for one portfol
   await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText(facts.users.b.email)
   await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText('当前用户')
   await expect(page.locator('.global-portfolio-select')).toHaveCount(0)
-  // Single portfolio: V3 select may render one option but no global legacy selector.
+  // Single portfolio: V3 holdings select may render one option but no global legacy selector.
   await page.goto('/holdings')
-  await expect(page.locator('nav.top-nav')).toBeVisible()
+  await expect(page.getByTestId('v3-holdings')).toBeVisible()
 })
 
 test('Shell system status follows authoritative readiness instead of portfolio existence', async ({ acceptancePage: page, facts }) => {
@@ -75,8 +67,8 @@ test('Shell system status follows authoritative readiness instead of portfolio e
   })
 
   await login(page, facts.users.a)
-  // System status lives on Legacy shell (e.g. /holdings), not V3 dashboard topbar.
-  await page.goto('/holdings')
+  // System status lives on Legacy settings shell after /holdings became V3.
+  await page.goto('/settings')
   await expect(page.locator('.system-status-button')).toContainText('需要配置')
   await expect(page.locator('.system-status-button')).not.toContainText('正常')
   expect(readinessRequests).toBeGreaterThan(0)
@@ -120,7 +112,7 @@ test('Shell shows verification pending instead of data-limited when Fuyao is con
   }))
 
   await login(page, facts.users.a)
-  await page.goto('/holdings')
+  await page.goto('/settings')
   await expect(page.locator('.system-status-button')).toContainText('需要完成验证')
   await expect(page.locator('.system-status-button')).not.toContainText('数据受限')
   await expect(page.locator('.system-status-button')).not.toContainText('正常')

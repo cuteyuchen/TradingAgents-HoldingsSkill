@@ -20,15 +20,16 @@ test.describe('Fuyao context and degradation', () => {
     await expect(page.getByTestId('fuyao-market-context')).toHaveCount(0)
 
     await page.goto(`/holdings?portfolio=${facts.portfolios.action}`)
-    const table = page.locator('.holdings-table')
-    await expect(table).toBeVisible()
-    await expect(table).toContainText('实时价格')
-    await expect(table).toContainText('今日贡献')
-    await expect(table.locator('tbody tr').first().locator('td').nth(3)).toHaveText(/\d+\.\d{3}/)
+    // V3 Holdings uses MARKET-2 unified quotes as the primary quote surface.
+    await expect(page.getByTestId('v3-holdings')).toBeVisible()
+    await expect(page.getByTestId('v3-holdings-table')).toBeVisible()
+    await expect(page.getByTestId('v3-holdings-quote-ts')).toBeVisible()
 
-    await table.locator('tbody tr').first().click()
-    await expect(page.getByRole('heading', { name: '实时标记', exact: true })).toBeVisible()
-    await expect(page.getByText('报价质量', { exact: true })).toBeVisible()
+    const firstResolved = page.locator('[data-testid^="v3-holding-row-"]').first()
+    await expect(firstResolved).toBeVisible()
+    // Missing-aware: quote cells may be —, but never a fabricated Fuyao contribution column.
+    await expect(page.locator('.holdings-table')).toHaveCount(0)
+    await expect(page.getByText('实时价格', { exact: true })).toHaveCount(0)
   })
 
   test('permission and upstream states are distinguished in settings', async ({ acceptancePage: page, facts }) => {

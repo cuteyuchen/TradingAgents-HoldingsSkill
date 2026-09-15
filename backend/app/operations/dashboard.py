@@ -541,6 +541,8 @@ def _decision_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
             "quality": latest.quality_status,
             "confidence": latest.confidence,
             "analysis_run_id": latest.analysis_run_id,
+            # Additive read-model: UI must not apply holding actions to a different snapshot.
+            "portfolio_snapshot_id": latest.portfolio_snapshot_id,
         }
     return {
         "status": "AVAILABLE" if latest else "MISSING",

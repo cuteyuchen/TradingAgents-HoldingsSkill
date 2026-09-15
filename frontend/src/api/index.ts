@@ -291,7 +291,7 @@ export const api = {
   confirmUpload: (id: number) => request<PortfolioSnapshot>(`/api/v2/uploads/${id}/confirm`, { method: 'POST' }),
   getUploadImage: (id: number) => requestBlob(`/api/v2/uploads/${id}/image`),
   listSnapshots: (portfolioId: number) => request<PortfolioSnapshot[]>(`/api/v2/portfolios/${portfolioId}/snapshots`),
-  getSnapshot: (id: number) => request<PortfolioSnapshot>(`/api/v2/snapshots/${id}`),
+  getSnapshot: (id: number, signal?: AbortSignal) => request<PortfolioSnapshot>(`/api/v2/snapshots/${id}`, { signal }),
 
   createAnalysisJob: (snapshotId: number, mode: AnalysisMode, checkpoint?: string, notify = true) => request<AnalysisJob>('/api/v2/analysis/jobs', { method: 'POST', body: { snapshot_id: snapshotId, mode, checkpoint, notify } }),
   getAnalysisJob: (id: number) => request<AnalysisJob>(`/api/v2/analysis/jobs/${id}`),
