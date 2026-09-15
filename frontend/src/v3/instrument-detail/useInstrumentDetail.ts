@@ -96,10 +96,36 @@ export function pollingIntervalMs(session: MarketSessionResponse | null, module:
   }
 }
 
-export function sessionPollIntervalMs(session: MarketSessionResponse | null): number | null {
+/**
+ * Session heartbeat cadence. NEVER returns null — only unmount/hidden may stop it.
+ * MarketSessionService remains the only session authority (no browser-clock guessing).
+ */
+export function sessionPollIntervalMs(session: MarketSessionResponse | null): number {
   const kind = session?.session
-  if (kind === 'MORNING' || kind === 'AFTERNOON' || kind === 'LUNCH_BREAK') return 60_000
-  return null
+  if (!kind) {
+    // Initial failure / unknown: fast self-healing retry.
+    return 10_000
+  }
+  switch (kind) {
+    case 'DATA_ABNORMAL':
+      return 20_000
+    case 'PRE_OPEN':
+      return 20_000
+    case 'OPEN_AUCTION':
+      return 12_000
+    case 'MORNING':
+    case 'LUNCH_BREAK':
+    case 'AFTERNOON':
+      return 60_000
+    case 'CLOSE_AUCTION':
+      return 12_000
+    case 'CLOSED':
+      return 120_000
+    case 'NON_TRADING_DAY':
+      return 300_000
+    default:
+      return 30_000
+  }
 }
 
 type RequestSlotName = 'identity' | 'quote' | 'bars' | 'book' | 'flow' | 'session'
@@ -286,16 +312,32 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
   function scheduleSessionPoll(): void {
     clearPollTimer('session')
     if (isPageHidden()) return
+    // Always schedule: any session kind (and null) must keep a heartbeat path.
     const ms = sessionPollIntervalMs(session.value)
-    if (ms === null) return
-    pollTimers.session = window.setTimeout(async () => {
-      await loadSession()
-      // Session state change may shift all cadences — full reschedule is intentional here.
-      rescheduleAllPollers()
+    pollTimers.session = window.setTimeout(() => {
+      void runSessionHeartbeat()
     }, ms)
   }
 
-  /** Full reschedule: only for initial load, code change, visibility resume, session state change. */
+  /**
+   * Session tick: refresh only the session slot.
+   * Reschedule all module pollers only when the authoritative kind changes.
+   * Never aborts quote/bars/book/flow.
+   */
+  async function runSessionHeartbeat(): Promise<void> {
+    if (isPageHidden()) return
+    const oldKind = session.value?.session ?? null
+    await loadSession()
+    if (isPageHidden()) return
+    const newKind = session.value?.session ?? null
+    if (oldKind !== newKind) {
+      rescheduleAllPollers()
+    } else {
+      scheduleSessionPoll()
+    }
+  }
+
+  /** Full reschedule: initial load, code change, visibility resume, session state change. */
   function rescheduleAllPollers(): void {
     clearAllPollTimers()
     if (isPageHidden()) return
@@ -306,11 +348,26 @@ export function useInstrumentDetail(options: UseInstrumentDetailOptions) {
     scheduleSessionPoll()
   }
 
+  /**
+   * Visibility resume: load authoritative session first, then refresh live modules,
+   * then reschedule all pollers from the fresh session. No browser-clock session guessing.
+   */
+  async function refreshOnVisibilityResume(): Promise<void> {
+    clearAllPollTimers()
+    await loadSession()
+    if (isPageHidden()) return
+    if (!resolvedCanonicalCode) return
+    await Promise.all([loadQuote(), loadBars()])
+    if (activeTab.value === 'book' && supportsBook.value) await loadOrderBook(true)
+    if (activeTab.value === 'flow' && supportsFlow.value) await loadCapitalFlow(true)
+    rescheduleAllPollers()
+  }
+
   function onVisibilityChange(): void {
     if (isPageHidden()) {
       clearAllPollTimers()
     } else {
-      rescheduleAllPollers()
+      void refreshOnVisibilityResume()
     }
   }
 

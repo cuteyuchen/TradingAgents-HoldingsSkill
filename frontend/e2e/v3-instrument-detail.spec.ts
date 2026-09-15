@@ -896,3 +896,141 @@ test.describe('V3 InstrumentDetail request lifecycle', () => {
     await expect(page.locator('.n-message').filter({ hasText: /超时|失败|错误/ })).toHaveCount(0)
   })
 })
+
+test.describe('V3 InstrumentDetail session heartbeat', () => {
+  function sessionBody(kind: string, extra: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      ...sessionPayload(),
+      session: kind,
+      is_market_open: kind === 'MORNING' || kind === 'AFTERNOON' || kind === 'OPEN_AUCTION' || kind === 'CLOSE_AUCTION',
+      data_basis: kind === 'MORNING' || kind === 'AFTERNOON' ? 'live' : 'session_close',
+      display_label: kind,
+      ...extra,
+    })
+  }
+
+  async function routeStock(page: Page) {
+    await page.route('**/api/v3/market/instruments/600519.SH', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(metadataPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE', false)) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+  }
+
+  test('PRE_OPEN session heartbeat transitions to MORNING and re-enables bars poll', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    const sessionKinds: string[] = []
+    const barsTimes: number[] = []
+    let t0 = Date.now()
+    let sessionCalls = 0
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      sessionCalls += 1
+      const kind = sessionCalls === 1 ? 'PRE_OPEN' : 'MORNING'
+      sessionKinds.push(kind)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: sessionBody(kind) })
+    })
+    await routeStock(page)
+    await page.route('**/api/v3/market/instruments/600519.SH/bars**', async (route) => {
+      barsTimes.push(Date.now() - t0)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(barsPayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+
+    await page.clock.install()
+    t0 = Date.now()
+    await page.goto('/market/instruments/600519.SH')
+    await expect(page.locator('[data-testid="instrument-detail"]')).toBeVisible()
+    // initialLoad runs session in parallel after metadata — wait for the first session response
+    await expect.poll(() => sessionKinds.length, { timeout: 5_000 }).toBeGreaterThanOrEqual(1)
+    expect(sessionKinds[0]).toBe('PRE_OPEN')
+    // PRE_OPEN heartbeat is 20s — fast-forward past it
+    await page.clock.fastForward(25_000)
+    await expect.poll(() => sessionKinds.length, { timeout: 5_000 }).toBeGreaterThanOrEqual(2)
+    expect(sessionKinds[1]).toBe('MORNING')
+    // After MORNING, bars poll (30s) is armed — advance and expect a second bars fetch
+    const barsAfterTransition = barsTimes.length
+    expect(barsAfterTransition).toBeGreaterThanOrEqual(1)
+    await page.clock.fastForward(35_000)
+    await expect.poll(() => barsTimes.length, { timeout: 5_000 }).toBeGreaterThan(barsAfterTransition)
+    await expect(page.locator('[data-testid="detail-page-error"]')).toHaveCount(0)
+  })
+
+  test('Initial session failure does not block page and recovers on heartbeat retry', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    let sessionCalls = 0
+    const sessionOutcomes: string[] = []
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      sessionCalls += 1
+      if (sessionCalls === 1) {
+        sessionOutcomes.push('500')
+        allowExpectedHttpError(page, 500)
+        await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'session down' }) })
+        return
+      }
+      sessionOutcomes.push('MORNING')
+      await route.fulfill({ status: 200, contentType: 'application/json', body: sessionBody('MORNING') })
+    })
+    await routeStock(page)
+
+    await page.clock.install()
+    await page.goto('/market/instruments/600519.SH')
+    // Page still loads identity/quote/bars without page-level session error
+    await expect(page.locator('[data-testid="instrument-name"]')).toHaveText('贵州茅台')
+    await expect(page.locator('[data-testid="quote-last"]')).toHaveText('1688.00')
+    await expect(page.locator('[data-testid="detail-page-error"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="detail-not-found"]')).toHaveCount(0)
+    expect(sessionOutcomes[0]).toBe('500')
+    // null session heartbeat retry is 10s
+    await page.clock.fastForward(12_000)
+    await expect.poll(() => sessionOutcomes.length, { timeout: 5_000 }).toBeGreaterThanOrEqual(2)
+    expect(sessionOutcomes[1]).toBe('MORNING')
+    await expect(page.locator('.n-message').filter({ hasText: /会话|session/i })).toHaveCount(0)
+  })
+
+  test('Visibility resume loads authoritative session before resuming module polls', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    let sessionCalls = 0
+    const events: string[] = []
+
+    await page.route('**/api/v3/market/session', async (route) => {
+      sessionCalls += 1
+      const kind = sessionCalls === 1 ? 'PRE_OPEN' : 'MORNING'
+      events.push(`session:${kind}`)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: sessionBody(kind) })
+    })
+    await routeStock(page)
+    await page.route('**/api/v3/market/instruments/600519.SH/quote', async (route) => {
+      events.push('quote')
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(quotePayload('600519.SH', '贵州茅台', 'STOCK', 'SSE')) })
+    })
+
+    await page.clock.install()
+    await page.goto('/market/instruments/600519.SH')
+    await expect(page.locator('[data-testid="instrument-detail"]')).toBeVisible()
+    await expect.poll(() => sessionCalls, { timeout: 5_000 }).toBe(1)
+
+    // Hide: stop timers
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    const callsWhileHidden = sessionCalls
+
+    // Resume visible — should load session first (now MORNING), then quote/bars, then reschedule
+    events.length = 0
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await expect.poll(() => sessionCalls, { timeout: 5_000 }).toBeGreaterThan(callsWhileHidden)
+    // First event after resume must be session refresh, not a module poll
+    expect(events[0]).toBe('session:MORNING')
+    await expect.poll(() => events.includes('quote'), { timeout: 5_000 }).toBe(true)
+    await expect(page.locator('[data-testid="detail-page-error"]')).toHaveCount(0)
+  })
+})

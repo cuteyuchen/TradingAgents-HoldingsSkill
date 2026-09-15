@@ -114,7 +114,27 @@ Uses `/api/v3/market/session` (not browser clock):
 
 Each module owns an independent timer. A quote tick only reschedules the quote poll; it does **not** clear or reset bars/book/flow/session timers (no starvation). Full `rescheduleAllPollers` runs only on: initial load, code change, visibility resume, or session state change.
 
-`document.visibilitychange`: hidden → pause all module timers; visible → full reschedule. Unmount / drawer close aborts all slots and clears all timers/listeners.
+### Session heartbeat (self-healing)
+
+`sessionPollIntervalMs` **never returns null**. Only unmount / `document.hidden` stop the heartbeat.
+
+| Session kind | Heartbeat |
+| --- | --- |
+| null / initial failure | 10s retry |
+| DATA_ABNORMAL / PRE_OPEN | 20s |
+| OPEN_AUCTION / CLOSE_AUCTION | 12s |
+| MORNING / LUNCH_BREAK / AFTERNOON | 60s |
+| CLOSED | 120s |
+| NON_TRADING_DAY | 300s |
+
+Session tick only refreshes the session slot (never aborts quote/bars/book/flow). If the authoritative kind changes, all module pollers are rescheduled; otherwise only the session timer is re-armed.
+
+`document.visibilitychange`:
+
+- hidden → pause all module timers
+- visible → **load MarketSession first**, then refresh quote/bars (and active book/flow), then reschedule from the fresh session
+
+MarketSessionService remains the only session authority; the frontend never derives A-share session from the browser clock.
 
 Drawer contract: `v-if="open && code"` so closing unmounts the shared detail (no hidden polling).
 
