@@ -31,7 +31,7 @@ async function createRetryJob(
       },
       body: JSON.stringify({
         snapshot_id: snapshot,
-        mode: 'fast',
+        mode: 'deep',
         checkpoint: marker,
         notify: false,
       }),
@@ -52,6 +52,27 @@ async function openJobInDrawer(page: Page, portfolioId: number, jobId: number): 
   await expect(drawer.locator('.job-status')).toBeVisible({ timeout: 30_000 })
 }
 
+async function auditedWorkflow(page: Page, jobId: number) {
+  return page.evaluate(async (id) => {
+    const token = localStorage.getItem('advisor_v2_access_token')
+    const headers = token ? { Authorization: `Bearer ${token}` } : undefined
+    const jobResponse = await fetch(`/api/v2/analysis/jobs/${id}`, { headers })
+    if (!jobResponse.ok) throw new Error(`job audit lookup failed: ${jobResponse.status}`)
+    const job = await jobResponse.json() as { run_id: number }
+    const response = await fetch(`/api/v2/analysis/runs/${job.run_id}/workflow`, { headers })
+    if (!response.ok) throw new Error(`workflow audit failed: ${response.status}`)
+    return response.json() as Promise<{
+      run: { workflow_version: string; legacy_fallback_used: boolean }
+      stages: Array<{ nodes: Array<{
+        node_key: string
+        status: string
+        attempt_count: number
+        attempts: Array<{ structured_retry_count: number }>
+      }> }>
+    }>
+  }, jobId)
+}
+
 test('Analysis structured retry succeeds after one malformed/truncated response', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   const portfolioId = facts.portfolios.action
@@ -64,6 +85,18 @@ test('Analysis structured retry succeeds after one malformed/truncated response'
   await expect(drawer.getByRole('button', { name: '查看今日分析', exact: true })).toBeVisible()
   await expect(page.locator('body')).not.toContainText('acceptance truncation fixture')
   await expect(page.locator('body')).not.toContainText('模型没有返回有效 JSON')
+  const workflow = await auditedWorkflow(page, jobId)
+  expect(workflow.run.workflow_version).toBe('v3-core-3')
+  expect(workflow.run.legacy_fallback_used).toBe(false)
+  const nodes = workflow.stages.flatMap((stage) => stage.nodes)
+  const analysts = nodes.filter((node) => node.node_key.endsWith('_analyst'))
+  expect(analysts).toHaveLength(7)
+  expect(analysts.every((node) => node.status === 'succeeded' && node.attempt_count === 1)).toBe(true)
+  expect(nodes.filter((node) => node.node_key.endsWith('_risk_agent'))).toHaveLength(3)
+  expect(nodes.some((node) => node.node_key.includes('legacy'))).toBe(false)
+  expect(nodes.find((node) => node.node_key === 'bull_round_1')?.attempts[0]?.structured_retry_count).toBe(1)
+  expect(nodes.find((node) => node.node_key === 'claim_resolver')?.status).toBe('succeeded')
+  expect(nodes.find((node) => node.node_key === 'risk_synthesis')?.status).toBe('succeeded')
 })
 
 test('Analysis structured retry exhaustion shows a safe error and retry action', async ({ acceptancePage: page, facts }) => {
@@ -78,4 +111,9 @@ test('Analysis structured retry exhaustion shows a safe error and retry action',
   await expect(drawer.getByRole('button', { name: '重新分析', exact: true })).toBeVisible()
   await expect(page.locator('body')).not.toContainText('acceptance truncation fixture')
   await expect(page.locator('body')).not.toContainText('bull_claims')
+  const workflow = await auditedWorkflow(page, jobId)
+  const nodes = workflow.stages.flatMap((stage) => stage.nodes)
+  expect(nodes.filter((node) => node.node_key.endsWith('_analyst')).every((node) => node.attempt_count === 1)).toBe(true)
+  expect(nodes.find((node) => node.node_key === 'bull_round_1')?.status).toBe('failed')
+  expect(nodes.some((node) => node.node_key === 'bear_round_1')).toBe(false)
 })

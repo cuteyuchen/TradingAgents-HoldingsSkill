@@ -6,8 +6,10 @@ import json
 from typing import AsyncIterator
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from ..database import SessionLocal, get_db
 from ..decision_contract import canonicalize_analysis_mode
@@ -15,7 +17,23 @@ from ..services.analysis_engine import run_analysis_job
 from ..services.analysis_admission import active_portfolio_analysis
 from ..services.holding_identity import snapshot_identity_issues
 from ..system.health import RuntimeNotReadyError, require_runtime_ready_for_risk_work
+from ..system.workers import signal_worker, worker_active
 from ..v2_dependencies import get_current_user
+from ..analysis_workflow.constants import RunStatus
+from ..analysis_workflow.exporter import (
+    AnalysisExportError,
+    AnalysisExportSizeLimitExceeded,
+    AnalysisRunExporter,
+)
+from ..analysis_workflow.queries import (
+    load_artifact_detail,
+    load_artifact_metadata,
+    load_claims,
+    load_resume_contract,
+    load_timeline,
+    load_workflow_tree,
+)
+from ..analysis_workflow.schemas import ArtifactDetail, ArtifactMetadata, ClaimSummary, WorkflowTree
 from ..v2_models import AnalysisJob, AnalysisRun, PortfolioSnapshot, User
 from ..v2_schemas import AnalysisJobCreate, AnalysisJobResponse, AnalysisRunDetail, AnalysisRunSummary
 
@@ -171,6 +189,7 @@ def cancel_job(
     row.status = "cancelled"
     row.current_stage = "cancelled"
     db.commit()
+    signal_worker("analysis", row.id)
     db.refresh(row)
     return _job_response(row)
 
@@ -181,11 +200,14 @@ def retry_job(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    force_restart: bool = Query(False),
 ) -> AnalysisJobResponse:
     _require_ready(db)
     row = _get_job(db, current_user.id, job_id)
     if row.status not in {"failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Only failed or cancelled jobs can be retried.")
+    if worker_active("analysis", row.id):
+        raise HTTPException(status_code=409, detail="Wait for the cancelled worker to finish before resuming.")
     snapshot = (
         db.query(PortfolioSnapshot)
         .filter(PortfolioSnapshot.id == row.snapshot_id, PortfolioSnapshot.status == "confirmed")
@@ -202,6 +224,12 @@ def retry_job(
     row.error_code = None
     row.error_message = None
     row.retry_count += 1
+    context = dict(row.context_json or {})
+    if force_restart:
+        context["force_restart"] = True
+    else:
+        context.pop("force_restart", None)
+    row.context_json = context
     db.commit()
     db.refresh(row)
     background_tasks.add_task(run_analysis_job, row.id)
@@ -251,6 +279,7 @@ def list_runs(
     query = db.query(AnalysisRun).join(AnalysisJob, AnalysisRun.job_id == AnalysisJob.id).filter(AnalysisRun.user_id == current_user.id)
     if portfolio_id is not None:
         query = query.filter(AnalysisJob.portfolio_id == portfolio_id)
+    query = query.filter(or_(AnalysisRun.status.in_(list(RunStatus.REPORTABLE)), AnalysisRun.status.is_(None)))
     rows = query.order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(limit).all()
     return [_run_summary(row) for row in rows]
 
@@ -262,6 +291,41 @@ def get_run(
     current_user: User = Depends(get_current_user),
 ) -> AnalysisRunDetail:
     return _run_detail(_get_run(db, current_user.id, run_id))
+
+
+@router.get("/runs/{run_id}/export")
+def export_run(
+    run_id: int,
+    mode: str = Query(default="standard"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a short-lived evidence package from historical audit rows."""
+
+    run = _get_run(db, current_user.id, run_id)
+    export_mode = str(mode or "").lower()
+    if export_mode not in {"standard", "debug"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Export mode must be standard or debug.")
+    if run.status and run.status not in RunStatus.TERMINAL:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only terminal analysis runs can be exported.")
+    package = None
+    try:
+        exporter = AnalysisRunExporter(db)
+        package = exporter.build_standard_package(run.id) if export_mode == "standard" else exporter.build_debug_package(run.id)
+        return FileResponse(
+            package.path,
+            media_type="application/zip",
+            filename=package.filename,
+            background=BackgroundTask(package.cleanup),
+        )
+    except AnalysisExportSizeLimitExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except AnalysisExportError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception:
+        if package is not None:
+            package.cleanup()
+        raise
 
 
 @router.get("/runs/{run_id}/markdown", response_class=PlainTextResponse)
@@ -307,3 +371,103 @@ def compare_run(
         "previous": _run_summary(previous).model_dump(mode="json"),
         "changes": changes,
     }
+
+
+@router.get("/runs/{run_id}/workflow", response_model=WorkflowTree)
+def get_run_workflow(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WorkflowTree:
+    return load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+
+
+@router.get("/runs/{run_id}/stages")
+def get_run_stages(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    tree = load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+    return {"stages": [item.model_dump(mode="json") for item in tree.stages]}
+
+
+@router.get("/runs/{run_id}/nodes")
+def get_run_nodes(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    tree = load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+    nodes = [node.model_dump(mode="json") for stage in tree.stages for node in stage.nodes]
+    return {"nodes": nodes}
+
+
+@router.get("/runs/{run_id}/attempts")
+def get_run_attempts(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    tree = load_workflow_tree(db, _get_run(db, current_user.id, run_id))
+    attempts = [
+        attempt.model_dump(mode="json")
+        for stage in tree.stages
+        for node in stage.nodes
+        for attempt in node.attempts
+    ]
+    return {"attempts": attempts}
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=list[ArtifactMetadata])
+def get_run_artifacts(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ArtifactMetadata]:
+    _get_run(db, current_user.id, run_id)
+    return load_artifact_metadata(db, run_id)
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}", response_model=ArtifactDetail)
+def get_run_artifact(
+    run_id: int,
+    artifact_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ArtifactDetail:
+    _get_run(db, current_user.id, run_id)
+    row = load_artifact_detail(db, run_id, artifact_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return row
+
+
+@router.get("/runs/{run_id}/claims", response_model=list[ClaimSummary])
+def get_run_claims(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ClaimSummary]:
+    _get_run(db, current_user.id, run_id)
+    return load_claims(db, run_id)
+
+
+@router.get("/runs/{run_id}/timeline")
+def get_run_timeline(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _get_run(db, current_user.id, run_id)
+    return {"events": load_timeline(db, run_id)}
+
+
+@router.get("/runs/{run_id}/resume-contract")
+def get_run_resume_contract(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    run = _get_run(db, current_user.id, run_id)
+    return load_resume_contract(db, run)

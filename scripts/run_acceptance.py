@@ -112,6 +112,8 @@ def main() -> int:
             "ADVISOR_BACKUP_DIR": str(backup_path),
             "ADVISOR_STATIC_DIR": str(static_path),
             "ACCEPTANCE_MODE": "true",
+            "TRUE_MULTI_AGENT_WORKFLOW_ENABLED": "true",
+            "ANALYSIS_MAX_PARALLEL_AGENTS": "3",
             "ACCEPTANCE_TRADE_DATE": "2026-08-21",
             "ACCEPTANCE_NOW_UTC": "2026-08-21T06:00:00+00:00",
             "APP_ENV": "acceptance",
@@ -126,6 +128,10 @@ def main() -> int:
             "BACKUP_SCHEDULE_ENABLED": "false",
             "HOLDINGS_SKILL_DIR": str(ROOT / "skill" / "tradingagents-holdings-advisor"),
             "VITE_BACKEND_URL": f"http://127.0.0.1:{backend_port}",
+            # Acceptance uses a production Vite build (DEV=false); enable the
+            # foundation route explicitly so CI can exercise /v3/foundation
+            # without changing production default (flag still opt-in).
+            "VITE_ENABLE_V3_FOUNDATION": "true",
             "PLAYWRIGHT_BASE_URL": f"http://127.0.0.1:{frontend_port}",
             "PLAYWRIGHT_FACTS_FILE": str(facts_path),
             "PLAYWRIGHT_ARTIFACT_DIR": str(ARTIFACTS),

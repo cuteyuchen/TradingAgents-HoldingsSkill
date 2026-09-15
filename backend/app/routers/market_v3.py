@@ -13,6 +13,7 @@ from ..config import settings
 from ..database import get_db
 from ..market.codes import normalize_security_code
 from ..market.quality import is_final_close_timestamp
+from ..market.providers.fallback import classify_provider_failure
 from ..market.providers.identity import build_calendar_provider, build_security_provider
 from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import MarketSnapshot, ProviderHealth
@@ -468,7 +469,10 @@ def create_quote_snapshot(
             db.commit()
         except Exception:  # pragma: no cover - pre-migration compatibility
             db.rollback()
-        raise HTTPException(status_code=502, detail=f"market_snapshot_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"market_snapshot_failed:{classify_provider_failure(exc)}",
+        ) from exc
 
 
 @router.get("/quotes/snapshots")

@@ -2,7 +2,11 @@ import { test, captureScreenshot, expect, login } from './fixtures'
 
 async function waitForVisualContent(page: Parameters<typeof login>[0], route: string): Promise<void> {
   await expect(page.locator('.shared-loading')).toHaveCount(0, { timeout: 20_000 })
-  if (route.startsWith('/dashboard')) await expect(page.getByText('今日市场', { exact: true })).toBeVisible()
+  if (route.startsWith('/dashboard')) {
+    await expect(page.getByTestId('v3-dashboard-session-bar')).toBeVisible()
+    await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+    await expect(page.getByTestId('v3-decision-hero')).toBeVisible()
+  }
   if (route.startsWith('/holdings')) await expect(page.getByText('持仓列表', { exact: true })).toBeVisible()
   if (route.startsWith('/analysis')) await expect(page.locator('.decision-hero, .shared-empty, .progress-panel, .failed-panel').first()).toBeVisible()
   if (route.startsWith('/simulation')) await expect(page.locator('.simulation-banner')).toBeVisible()
@@ -17,7 +21,7 @@ async function waitForVisualContent(page: Parameters<typeof login>[0], route: st
   }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
   await expect.poll(() => page.evaluate(() => {
-    const header = document.querySelector('header.topbar')
+    const header = document.querySelector('header.topbar, [data-testid="v3-topbar"]')
     return !header || header.scrollWidth <= header.clientWidth + 1
   })).toBe(true)
 }
@@ -29,14 +33,16 @@ test('Desktop visual smoke at 1440, 1366, and 1920', async ({ acceptancePage: pa
   await captureScreenshot(page, 'login-light')
 
   await page.getByRole('button', { name: '首次使用？创建账户', exact: true }).click()
-  const unique = `visual-${Date.now()}@example.com`
-  await page.locator('input[type="text"]').fill('Visual User')
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const unique = `visual-${suffix}@example.com`
+  await page.locator('input[type="text"]').fill(`Visual-${suffix}`)
   await page.locator('input[type="email"]').fill(unique)
   await page.locator('input[type="password"]').nth(0).fill('AcceptancePass123!')
   await page.locator('input[type="password"]').nth(1).fill('AcceptancePass123!')
   await page.getByRole('button', { name: '创建账户并登录', exact: true }).click()
   await expect(page).toHaveURL(/\/dashboard/)
-  await expect(page.getByRole('heading', { name: '开始使用' })).toBeVisible()
+  await expect(page.getByTestId('v3-no-portfolio')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
   await captureScreenshot(page, 'home-first-run-light')
   await page.getByRole('button', { name: '退出登录' }).click()
   await login(page, facts.users.a)

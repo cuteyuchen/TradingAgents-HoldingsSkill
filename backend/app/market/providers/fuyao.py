@@ -7,7 +7,7 @@ import math
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from ..codes import exchange_for_code, normalize_security_code
+from ..codes import canonical_security_code, exchange_hint, exchange_for_code, normalize_security_code
 from ..models import DataQualityStatus, NormalizedQuote
 from .base import CalendarProvider, KLineProvider, QuoteProvider, SecurityProvider
 from .fuyao_client import FuyaoAPIError, FuyaoClient, FuyaoResponse, client_from_settings
@@ -64,7 +64,7 @@ def _full_thscode(code: str, exchange: str | None = None) -> str:
     normalized = normalize_security_code(code)
     if not normalized:
         return ""
-    resolved = str(exchange or exchange_for_code(normalized) or "").upper()
+    resolved = str(exchange or exchange_hint(code) or exchange_for_code(normalized) or "").upper()
     suffix = _EXCHANGE_SUFFIX.get(resolved)
     return f"{normalized}.{suffix}" if suffix else normalized
 
@@ -118,7 +118,7 @@ def parse_fuyao_quote(
     code = normalize_security_code(raw_code)
     if not code:
         return None
-    source_timestamp = _timestamp(response_timestamp or row.get("timestamp"))
+    source_timestamp = _timestamp(row.get("timestamp") or response_timestamp)
     fetched = fetched_at or datetime.now(UTC)
     price = _number(row.get("last_price"))
     quality, errors = _quality_for_quote(price)
@@ -127,13 +127,15 @@ def parse_fuyao_quote(
         "endpoint": endpoint,
         "request_id": request_id,
         "thscode": str(raw_code) if raw_code else _full_thscode(code),
+        "volume_unit": "shares",
+        "turnover_unit": "CNY",
     }
     if response_timestamp is not None:
         metadata["source_timestamp_ms"] = response_timestamp
     return NormalizedQuote(
         code=code,
         market="CN",
-        exchange=exchange_for_code(code),
+        exchange=exchange_hint(raw_code) or exchange_for_code(code),
         name=str(row.get("name") or "").strip() or None,
         security_type=_ASSET_TYPES.get(asset_type),
         price=price,
@@ -279,6 +281,37 @@ class FuyaoQuoteProvider(QuoteProvider):
             raise RuntimeError("fuyao_quote_batch_empty")
         return result
 
+    def get_instrument_quotes(self, codes: Iterable[str], *, instrument_types=None) -> dict[str, NormalizedQuote]:
+        requested = list(dict.fromkeys(canonical_security_code(code) for code in codes))
+        types = instrument_types or {}
+        result: dict[str, NormalizedQuote] = {}
+        self.last_errors = []
+        self.last_responses = []
+        # Fuyao has separate batch endpoints for indices and listed equities.
+        for endpoint, batch_codes in (
+            (self.endpoint, [code for code in requested if types.get(code) != "INDEX"]),
+            (FUYAO_INDEX_SNAPSHOT_ENDPOINT, [code for code in requested if types.get(code) == "INDEX"]),
+        ):
+            for offset in range(0, len(batch_codes), self.batch_size):
+                batch = batch_codes[offset:offset + self.batch_size]
+                try:
+                    response = self.client.get(
+                        endpoint, params={"thscodes": ",".join(batch)},
+                        capability="index" if endpoint == FUYAO_INDEX_SNAPSHOT_ENDPOINT else "quotes",
+                    )
+                    fetched_at = datetime.now(UTC)
+                    data = response.data if isinstance(response.data, Mapping) else {}
+                    for row in _rows(data):
+                        quote = parse_fuyao_quote(
+                            row, response_timestamp=data.get("timestamp"), fetched_at=fetched_at,
+                            request_id=response.request_id, endpoint=endpoint,
+                        )
+                        if quote is not None and quote.symbol in batch:
+                            result[quote.symbol] = quote
+                except Exception as exc:
+                    self.last_errors.append(_safe_error(exc, provider=self.name, endpoint=endpoint))
+        return result
+
     def get_all_a_share_quotes(self, universe: Iterable[str]) -> dict[str, NormalizedQuote]:
         normalized = list(
             dict.fromkeys(
@@ -369,7 +402,10 @@ class FuyaoKLineProvider(KLineProvider):
     @staticmethod
     def _adjustment(value: str) -> str:
         normalized = str(value or "QFQ").upper()
-        return {"QFQ": "forward", "HFQ": "backward", "NONE": "none", "RAW": "none"}.get(normalized, "forward")
+        values = {"QFQ": "forward", "FORWARD": "forward", "HFQ": "backward", "BACKWARD": "backward", "NONE": "none", "RAW": "none"}
+        if normalized not in values:
+            raise ValueError("unsupported_adjustment")
+        return values[normalized]
 
     def get_historical(
         self,
@@ -378,6 +414,7 @@ class FuyaoKLineProvider(KLineProvider):
         start: date,
         end: date,
         adjustment: str = "QFQ",
+        instrument_type: str = "STOCK",
     ) -> list[dict[str, Any]]:
         normalized = normalize_security_code(code)
         if not normalized:
@@ -387,17 +424,28 @@ class FuyaoKLineProvider(KLineProvider):
             fetched_at = fetched_at.replace(tzinfo=CHINA_TZ)
         self.last_errors = []
         try:
+            endpoint = {
+                "INDEX": FUYAO_INDEX_HISTORICAL_ENDPOINT,
+                "ETF": FUYAO_FUND_HISTORICAL_ENDPOINT,
+            }.get(instrument_type, self.endpoint)
+            if instrument_type != "STOCK" and self._adjustment(adjustment) != "none":
+                raise ValueError("unsupported_adjustment")
+            params = {
+                "thscode": _full_thscode(code),
+                "interval": "1d",
+                "start": int(datetime.combine(start, datetime.min.time(), tzinfo=CHINA_TZ).timestamp() * 1000),
+                "end": int(datetime.combine(end, datetime.max.time(), tzinfo=CHINA_TZ).timestamp() * 1000),
+            }
+            if instrument_type == "STOCK":
+                params["adjust"] = self._adjustment(adjustment)
             response = self.client.get(
-                self.endpoint,
-                params={
-                    "thscode": _full_thscode(normalized),
-                    "interval": "1d",
-                    "start": int(datetime.combine(start, datetime.min.time(), tzinfo=CHINA_TZ).timestamp() * 1000),
-                    "end": int(datetime.combine(end, datetime.max.time(), tzinfo=CHINA_TZ).timestamp() * 1000),
-                    "adjust": self._adjustment(adjustment),
-                },
+                endpoint,
+                params=params,
                 capability="historical",
             )
+            fetched_at = self.now()
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=CHINA_TZ)
         except Exception as exc:
             self.last_errors.append(_safe_error(exc, provider=self.name, endpoint=self.endpoint))
             return []
@@ -416,7 +464,7 @@ class FuyaoKLineProvider(KLineProvider):
             row = {
                 "code": normalized,
                 "market": "CN",
-                "exchange": exchange_for_code(normalized),
+                "exchange": exchange_hint(code) or exchange_for_code(normalized),
                 "trade_date": trade_day,
                 "open": _number(raw.get("open_price")),
                 "high": _number(raw.get("high_price")),
@@ -444,6 +492,8 @@ class FuyaoKLineProvider(KLineProvider):
                     "source_timestamp": source_timestamp.isoformat() if source_timestamp else None,
                     "source_timestamp_ms": data.get("timestamp"),
                     "bar_timestamp_ms": raw.get("date_ms"),
+                    "volume_unit": "shares",
+                    "turnover_unit": "CNY",
                 },
             }
             rows.append(row)

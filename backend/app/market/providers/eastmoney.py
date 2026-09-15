@@ -8,6 +8,7 @@ the analysis layer.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
@@ -17,12 +18,13 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from ..codes import exchange_for_code, normalize_security_code
+from ..codes import canonical_security_code, exchange_for_code, normalize_security_code
 from ..models import DataQualityStatus, NormalizedQuote
 from .base import QuoteProvider
 
 
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+EASTMONEY_INSTRUMENT_QUOTE_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -131,11 +133,13 @@ def parse_eastmoney_row(
     code = normalize_security_code(row.get("f12") or row.get("code") or row.get("symbol"))
     if not code:
         return None
-    source_time = _source_timestamp(row.get("f86") or row.get("source_timestamp") or row.get("quote_time"))
+    raw_source_time = row.get("f86") or row.get("source_timestamp") or row.get("quote_time")
+    source_time = _source_timestamp(raw_source_time)
+    observed_date_inferred = isinstance(raw_source_time, str) and bool(re.fullmatch(r"\d{2}:\d{2}:\d{2}", raw_source_time.strip()))
     price = _scaled_price(row.get("f43", row.get("price")))
     quality = DataQualityStatus.VALID if price is not None else DataQualityStatus.MISSING
     errors = [] if price is not None else ["quote_missing"]
-    return NormalizedQuote(
+    quote = NormalizedQuote(
         market="CN",
         exchange=exchange_for_code(code),
         code=code,
@@ -156,7 +160,18 @@ def parse_eastmoney_row(
         raw_reference=EASTMONEY_QUOTE_URL,
         is_suspended=bool(row.get("is_suspended") or row.get("suspended")),
         errors=errors,
+        metadata={
+            "volume_unit": "lots", "turnover_unit": "CNY",
+            "observed_date_inferred": observed_date_inferred,
+            "timestamp_field": "f86" if row.get("f86") is not None else "source_timestamp" if row.get("source_timestamp") is not None else "quote_time",
+        },
     )
+    if observed_date_inferred:
+        # HH:MM:SS carries no observation date. Do not let NormalizedQuote's
+        # generic parser bind it to the host's current day.
+        quote.source_timestamp = None
+        quote.trade_date = None
+    return quote
 
 
 class EastmoneyBatchQuoteProvider(QuoteProvider):
@@ -192,14 +207,14 @@ class EastmoneyBatchQuoteProvider(QuoteProvider):
         self._last_request = 0.0
         self._lock = Lock()
 
-    def _get(self, params: dict[str, Any]) -> Mapping[str, Any]:
+    def _get(self, params: dict[str, Any], *, endpoint: str = EASTMONEY_QUOTE_URL) -> Mapping[str, Any]:
         with self._lock:
             elapsed = time.monotonic() - self._last_request
             if self.min_interval_seconds and elapsed < self.min_interval_seconds:
                 time.sleep(self.min_interval_seconds - elapsed)
             request = self.transport or self.session.get
             response = request(
-                EASTMONEY_QUOTE_URL,
+                endpoint,
                 params=params,
                 headers={"User-Agent": USER_AGENT, "Referer": "https://quote.eastmoney.com/"},
                 timeout=self.timeout,
@@ -269,6 +284,35 @@ class EastmoneyBatchQuoteProvider(QuoteProvider):
 
     def get_all_a_share_quotes(self, universe: Iterable[str]) -> dict[str, NormalizedQuote]:
         return self.get_quotes(universe)
+
+    def get_instrument_quotes(self, codes: Iterable[str], *, instrument_types=None) -> dict[str, NormalizedQuote]:
+        requested = list(dict.fromkeys(canonical_security_code(code) for code in codes))
+        if not requested:
+            return {}
+        payload = self._get({
+            "secids": ",".join(f"{'1' if code.endswith('.SH') else '0'}.{code[:6]}" for code in requested),
+            "fltt": 2,
+            "invt": 2,
+            "fields": "f12,f13,f14,f2,f18,f17,f15,f16,f3,f5,f6,f8,f124",
+        }, endpoint=EASTMONEY_INSTRUMENT_QUOTE_URL)
+        fetched_at = datetime.now(UTC)
+        result: dict[str, NormalizedQuote] = {}
+        for row in _rows(payload)[0]:
+            quote = parse_eastmoney_row({
+                "f12": row.get("f12"), "f14": row.get("f14"),
+                "f43": row.get("f2"), "f60": row.get("f18"), "f46": row.get("f17"),
+                "f44": row.get("f15"), "f45": row.get("f16"), "f170": row.get("f3"),
+                "f47": row.get("f5"), "f48": row.get("f6"), "f86": row.get("f124"),
+            }, fetched_at=fetched_at, provider=self.name)
+            if quote is None:
+                continue
+            if quote.exchange != "BSE":
+                quote.exchange = {0: "SZSE", 1: "SSE"}.get(_int_or_none(row.get("f13")))
+            if quote.exchange is None or quote.symbol not in requested:
+                continue
+            quote.turnover_rate = _number(row.get("f8"))
+            result[quote.symbol] = quote
+        return result
 
 
 # A concise compatibility spelling for callers that do not need the full name.

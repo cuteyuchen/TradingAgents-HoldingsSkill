@@ -3,6 +3,14 @@ import type {
   AnalysisMode,
   AnalysisRunDetail,
   AnalysisRunSummary,
+  BatchQuoteResponse,
+  CapitalFlow,
+  InstrumentBarsQuery,
+  InstrumentBarsResponse,
+  InstrumentMarketSnapshot,
+  InstrumentMetadataResponse,
+  InstrumentQuote,
+  OrderBook,
   BacktestRun,
   CalibrationReport,
   DailyDashboard,
@@ -10,6 +18,10 @@ import type {
   FuyaoMarketBrief,
   FuyaoSecurityContext,
   FuyaoStatus,
+  MajorIndexQuote,
+  MarketOverview,
+  MarketSessionResponse,
+  SystemicRiskSnapshot,
   DashboardDiagnostics,
   DashboardHealth,
   DashboardTimeline,
@@ -147,7 +159,7 @@ export function saveSession(tokens: TokenPair): void {
 export function clearSession(): void { localStorage.removeItem(ACCESS_KEY); localStorage.removeItem(REFRESH_KEY) }
 export function hasSession(): boolean { return Boolean(getAccessToken() || getRefreshToken()) }
 
-interface RequestOptions { method?: string; body?: unknown; public?: boolean; headers?: Record<string, string>; retryAuth?: boolean; timeoutMs?: number }
+interface RequestOptions { method?: string; body?: unknown; public?: boolean; headers?: Record<string, string>; retryAuth?: boolean; timeoutMs?: number; signal?: AbortSignal }
 
 async function parseError(res: Response): Promise<ApiError> {
   let payload: any = null
@@ -206,6 +218,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const token = getAccessToken()
   if (token && !options.public) headers.Authorization = `Bearer ${token}`
   const controller = new AbortController()
+  if (options.signal?.aborted) controller.abort()
+  const abortExternal = () => controller.abort()
+  options.signal?.addEventListener('abort', abortExternal, { once: true })
   const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || 30_000)
   let res: Response
   try {
@@ -218,6 +233,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     )
   } finally {
     window.clearTimeout(timeout)
+    options.signal?.removeEventListener('abort', abortExternal)
   }
   if (res.status === 401 && !options.public && options.retryAuth !== false) {
     const refreshed = await refreshSession()
@@ -358,10 +374,27 @@ export const api = {
   deleteNotification: (id: number) => request<void>(`/api/v2/notifications/${id}`, { method: 'DELETE' }),
   testNotification: (id: number) => request<{ status: string; message: string }>(`/api/v2/notifications/${id}/test`, { method: 'POST' }),
 
-  getDashboardToday: (portfolioId: number) => request<DailyDashboard>(`/api/v3/portfolios/${portfolioId}/dashboard/today`),
+  getDashboardToday: (portfolioId: number, signal?: AbortSignal) => request<DailyDashboard>(`/api/v3/portfolios/${portfolioId}/dashboard/today`, { signal }),
   getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),
+  getMarketSession: (signal?: AbortSignal) => request<MarketSessionResponse>('/api/v3/market/session', { signal }),
+  getInstrument: (code: string, signal?: AbortSignal) => request<InstrumentMetadataResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}`, { signal }),
+  getInstrumentQuote: (code: string, signal?: AbortSignal) => request<InstrumentQuote>(`/api/v3/market/instruments/${encodeURIComponent(code)}/quote`, { signal }),
+  getInstrumentQuotes: (codes: string[], signal?: AbortSignal) => request<BatchQuoteResponse>('/api/v3/market/instruments/quotes', { method: 'POST', body: { codes }, signal }),
+  getInstrumentBars: (code: string, query: InstrumentBarsQuery = {}, signal?: AbortSignal) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) params.set(key, String(value))
+    }
+    return request<InstrumentBarsResponse>(`/api/v3/market/instruments/${encodeURIComponent(code)}/bars?${params}`, { signal })
+  },
+  getInstrumentOrderBook: (code: string, signal?: AbortSignal) => request<OrderBook>(`/api/v3/market/instruments/${encodeURIComponent(code)}/order-book`, { signal }),
+  getInstrumentCapitalFlow: (code: string, signal?: AbortSignal) => request<CapitalFlow>(`/api/v3/market/instruments/${encodeURIComponent(code)}/capital-flow`, { signal }),
+  getInstrumentSnapshot: (code: string, signal?: AbortSignal) => request<InstrumentMarketSnapshot>(`/api/v3/market/instruments/${encodeURIComponent(code)}/snapshot`, { signal }),
+  getMajorIndices: (signal?: AbortSignal) => request<MajorIndexQuote[]>('/api/v3/market/major-indices', { signal }),
+  getSystemicRisk: (signal?: AbortSignal) => request<SystemicRiskSnapshot>('/api/v3/market/systemic-risk', { signal }),
+  getMarketOverview: (signal?: AbortSignal) => request<MarketOverview>('/api/v3/market/overview', { signal }),
   getFuyaoStatus: (probe = false) => request<FuyaoStatus>(`/api/v3/fuyao/status${probe ? '?probe=true' : ''}`),
   getFuyaoMarketBrief: (refresh = false) => request<{ brief: FuyaoMarketBrief; score: Record<string, any>; production_score_changed: boolean; all_a_median_definition: string; top5_definition: string }>(`/api/v3/fuyao/market-brief${refresh ? '?refresh=true' : ''}`),
   getFuyaoSecurityContext: (code: string) => request<FuyaoSecurityContext>(`/api/v3/fuyao/securities/${encodeURIComponent(code)}`),

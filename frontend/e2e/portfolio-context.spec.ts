@@ -2,7 +2,8 @@ import { test, expect, login, openPage, selectPortfolio } from './fixtures'
 
 test('Portfolio context follows the selected portfolio across business pages', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
-  await expect(page.locator('.global-portfolio-select .n-base-selection')).toContainText('Acceptance Action')
+  await expect(page.getByTestId('v3-portfolio-select')).toBeVisible()
+  await expect(page.getByTestId('v3-portfolio-name')).toContainText('Acceptance Action')
 
   await selectPortfolio(page, 'Acceptance States')
   await page.goto('/holdings')

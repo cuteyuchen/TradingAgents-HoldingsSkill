@@ -937,6 +937,17 @@ def test_dashboard_historical_as_of_does_not_expose_later_analysis_or_review_com
             completed_at=_utc_naive(completed_at),
             last_refreshed_at=_utc_naive(completed_at),
         ))
+        quote_at = _local(date(2026, 8, 20), 9, 40)
+        db.add(MarketScoreSnapshot(
+            snapshot_id="phase-h-market-time-separation",
+            market="CN",
+            trade_date=date(2026, 8, 20),
+            captured_at=_utc_naive(quote_at),
+            display_score=50.0,
+            raw_score=50.0,
+            quality_status="VALID",
+            is_frozen=False,
+        ))
         db.commit()
 
         historical = build_daily_dashboard(
@@ -959,6 +970,9 @@ def test_dashboard_historical_as_of_does_not_expose_later_analysis_or_review_com
         assert after_completion["analysis"]["latest"]["analysis_run_id"] == run.id
         assert after_completion["decisions"]["latest"]["analysis_run_id"] == run.id
         assert after_completion["memory"]["review"]["status"] == "COMPLETED"
+        assert after_completion["quote_as_of"] == _utc_naive(quote_at).isoformat()
+        assert after_completion["strategy_analysis_at"] == _utc_naive(completed_at).isoformat()
+        assert after_completion["quote_as_of"] != after_completion["strategy_analysis_at"]
     finally:
         db.close()
 

@@ -23,6 +23,20 @@ def unregister_worker(kind: str, work_id: int) -> None:
         _WORKERS.pop((kind, int(work_id)), None)
 
 
+def signal_worker(kind: str, work_id: int) -> bool:
+    with _LOCK:
+        event = _WORKERS.get((kind, int(work_id)))
+        if event is None:
+            return False
+        event.set()
+        return True
+
+
+def worker_active(kind: str, work_id: int) -> bool:
+    with _LOCK:
+        return (kind, int(work_id)) in _WORKERS
+
+
 def signal_workers(*, kinds: tuple[str, ...] | None = None, timeout: float = 5.0) -> int:
     """Signal registered workers and wait bounded seconds for them to exit."""
 
@@ -61,4 +75,4 @@ def active_workers() -> list[dict[str, Any]]:
         ]
 
 
-__all__ = ["active_workers", "register_worker", "signal_workers", "unregister_worker"]
+__all__ = ["active_workers", "register_worker", "signal_worker", "signal_workers", "unregister_worker", "worker_active"]

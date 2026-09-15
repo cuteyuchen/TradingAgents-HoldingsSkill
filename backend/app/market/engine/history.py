@@ -232,5 +232,25 @@ class LegacyMarketDataHistoryProvider:
         self._cache[key] = (now, rows)
         return list(rows)
 
+    def get_historical(
+        self, code: str, *, start: date, end: date, adjustment: str = "forward",
+        instrument_type: str = "STOCK",
+    ) -> list[dict[str, Any]]:
+        if instrument_type == "INDEX" and adjustment != "none":
+            raise ValueError("unsupported_adjustment")
+        payload = self.fetcher(
+            code, limit=min((end - start).days + 1, 100_000),
+            start=start, end=end, adjustment=adjustment,
+        )
+        fetched_at = datetime.now(UTC)
+        return [
+            {
+                **row, "trade_date": row.get("date"), "provider": "eastmoney_daily_qfq",
+                "fetched_at": fetched_at, "adjustment": adjustment,
+                "metadata": {"volume_unit": "lots", "turnover_unit": "CNY"},
+            }
+            for row in (payload.get("rows") or [])
+        ]
+
 
 __all__ = ["NormalizedDailyBar", "MarketHistoryAccessLayer", "LegacyMarketDataHistoryProvider"]

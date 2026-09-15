@@ -18,13 +18,16 @@ import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThe
 import { api, clearSession, hasSession } from './api'
 import type { FuyaoStatus, LiveValidationReadiness, SystemHealth } from './api/types'
 import { clearPortfolioContext, usePortfolioContext } from './composables/portfolio'
+// V3 主题唯一权威（light/dark/system），Legacy 只消费 resolved 结果
+import { resolvedTheme, setThemePref } from './v3/composables/useV3Theme'
+import V3AppShell from './v3/layouts/V3AppShell.vue'
 
 const route = useRoute()
 const router = useRouter()
-const THEME_KEY = 'advisor_theme'
-type ThemePref = 'light' | 'dark'
 
-const themePref = ref<ThemePref>(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light')
+/** Legacy 壳层展示用：始终是 light 或 dark */
+const themePref = resolvedTheme
+const isV3Route = computed(() => route.meta?.uiSystem === 'v3')
 const loadingUser = ref(false)
 const loadingSystemStatus = ref(false)
 const systemStatusError = ref(false)
@@ -136,8 +139,8 @@ async function loadUser() {
 }
 
 function toggleTheme() {
-  themePref.value = themePref.value === 'dark' ? 'light' : 'dark'
-  localStorage.setItem(THEME_KEY, themePref.value)
+  // Legacy 顶栏只做 light/dark 切换；system 由 V3 Topbar 管理
+  setThemePref(themePref.value === 'dark' ? 'light' : 'dark')
 }
 
 async function logout() {
@@ -164,10 +167,12 @@ const onSessionExpired = () => {
   void router.replace({ name: 'login', query: { expired: '1' } }).finally(() => clearPortfolioContext())
 }
 const onThemeChanged = (event: Event) => {
+  // useV3Theme 会广播 resolved 主题；Legacy 侧保持 class 同步
   const value = (event as CustomEvent<{ theme?: string }>).detail?.theme
   if (value !== 'light' && value !== 'dark') return
-  themePref.value = value
-  localStorage.setItem(THEME_KEY, value)
+  // themePref 已由 useV3Theme 驱动，这里只需保证 body class
+  document.documentElement.classList.toggle('theme-dark', value === 'dark')
+  document.documentElement.classList.toggle('theme-light', value === 'light')
 }
 
 onMounted(() => {
@@ -191,6 +196,10 @@ watch(() => route.name, () => void loadUser())
         <n-global-style />
         <div class="app-root" :class="`theme-${themePref}`">
           <router-view v-if="isLogin" />
+          <!-- V3 路由：独立 App Shell，不混用 Legacy 顶栏 -->
+          <V3AppShell v-else-if="isV3Route">
+            <router-view />
+          </V3AppShell>
           <template v-else>
             <a class="skip-link" href="#main-content">跳到主要内容</a>
             <header class="topbar">
