@@ -86,6 +86,8 @@ AnalysisRun（不可变结构化结果 + Markdown）
 
 ## 快速开始
 
+本地开发与日常启动默认走本机进程，不依赖 Docker 镜像。生产环境才打包/部署镜像。
+
 ### 1. 准备环境变量
 
 ```bash
@@ -97,29 +99,47 @@ cp .env.example .env
 ```dotenv
 ADVISOR_TOKEN=adv_replace_me
 APP_SECRET_KEY=replace_with_a_stable_random_secret_at_least_32_bytes
-PUBLIC_APP_URL=http://localhost:8080
+PUBLIC_APP_URL=http://localhost:5173
 ```
 
 `APP_SECRET_KEY` 用于 JWT 签名、模型 API Key 和通知凭据加密。保存凭据后不要更改，否则旧数据无法解密。
 
-### 2. Docker 启动
+### 2. 本地启动（推荐）
 
-```bash
-docker compose up -d --build
+Windows 一键启动后端 + 前端：
+
+```powershell
+.\scripts\start_local.ps1
+```
+
+或：
+
+```bat
+scripts\start_local.cmd
 ```
 
 访问：
 
-- 应用：`http://localhost:8080`
-- Swagger：`http://localhost:8080/docs`
-- V1 兼容 API：`http://localhost:8000/api/v1`
+- 应用：`http://localhost:5173`
+- 后端 API：`http://127.0.0.1:8000`
+- Swagger：`http://127.0.0.1:8000/docs`
 
-前端静态资源与 FastAPI 已构建到同一个镜像、运行在同一个容器中。默认同时映射 `8080` 和 `8000`，两个端口都访问同一应用；保留 `8000` 是为了兼容已有 Skill 的 API 地址。
+前端 Vite 会把 `/api` 代理到本地后端。停止：
 
-首次打开前端后创建账户。生产部署完成首个账户创建后，建议设置：
+```powershell
+.\scripts\stop_local.ps1
+```
 
-```dotenv
-ALLOW_REGISTRATION=false
+也可以分终端手动启动：
+
+```powershell
+# 后端
+.\backend\scripts\start-dev.ps1 -Reload
+
+# 前端（另开终端）
+cd frontend
+npm install
+npm run dev
 ```
 
 ### 3. 系统内配置
@@ -131,6 +151,13 @@ ALLOW_REGISTRATION=false
 5. 在总览中新建持仓组合。
 6. 上传今日持仓截图并核对识图结果。
 7. 确认快照后执行快速或深度分析。
+
+首次打开前端后创建账户。对外暴露的生产部署完成首个账户创建后，建议设置：
+
+```dotenv
+ALLOW_REGISTRATION=false
+```
+
 
 ## 模型用途
 
@@ -249,7 +276,18 @@ GET    /api/v1/archives/{id}
 DELETE /api/v1/archives/{id}
 ```
 
-## GHCR 部署与升级
+## 生产镜像与部署
+
+Docker 镜像只用于生产/CI 打包与部署，不是本地默认启动方式。
+
+本地若只是验证镜像（需要可访问 Docker Hub 或已配置镜像加速）：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+前端静态资源与 FastAPI 会打进同一镜像。默认同时映射 `8080` 和 `8000`。
 
 GitHub Actions 在 `main`、版本标签或手动触发时发布单一镜像：
 
@@ -278,6 +316,11 @@ docker compose -f docker-compose.deploy.yml up -d --no-deps advisor
 
 ## 本地开发与测试
 
+```powershell
+# 推荐：一键本地前后端
+.\scripts\start_local.ps1
+```
+
 ```bash
 cd backend
 python -m venv .venv
@@ -295,11 +338,6 @@ npm install
 npm run typecheck
 npm run build
 npm run dev
-```
-
-```bash
-docker compose build
-docker compose up -d
 ```
 
 GitHub Actions 会执行 Alembic 空库升级与重复升级、全部后端测试、前端 TypeScript 类型检查与构建，以及包含前后端的单一 Docker 镜像构建。
