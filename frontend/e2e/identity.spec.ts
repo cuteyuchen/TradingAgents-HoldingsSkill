@@ -71,7 +71,7 @@ test('Case B: ambiguous identity blocks confirm until the user selects one secur
 
   const dialog = page.getByTestId('v3-security-candidate-dialog')
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByText('同名验收ETF')).toBeVisible()
+  await expect(dialog.getByText('同名验收ETF').first()).toBeVisible()
   await page.getByTestId('v3-candidate-pick').first().click()
 
   await expect(page.getByText('已匹配', { exact: true }).first()).toBeVisible()
