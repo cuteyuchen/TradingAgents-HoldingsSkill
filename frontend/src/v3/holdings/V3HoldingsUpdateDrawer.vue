@@ -259,10 +259,12 @@ watch(() => props.modelValue, async (value) => {
         </div>
         <div v-if="job" class="job" data-testid="v3-update-job">
           <div class="job__row">
-            <strong>{{ job.current_stage }}</strong>
+            <strong data-testid="v3-update-job-status">
+              {{ job.status === 'succeeded' ? '分析完成' : job.status === 'failed' ? '分析暂时失败' : job.status === 'cancelled' ? '已取消' : job.current_stage }}
+            </strong>
             <span>{{ job.progress_percent }}%</span>
           </div>
-          <p v-if="job.error_message" class="update__alert update__alert--error">{{ job.error_message }}</p>
+          <p v-if="job.error_message" class="update__alert update__alert--error" data-testid="v3-update-job-error">{{ job.error_message }}</p>
           <div class="update__actions">
             <button
               v-if="job.status === 'succeeded' && job.run_id"

@@ -351,7 +351,8 @@ export function useV3HoldingsUpdate(options: {
     if (!value && previous) {
       window.removeEventListener('paste', handlePaste)
       stopAllPolling()
-      if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+      // Preserve draft on ordinary close: keep selectedFile + previewUrl.
+      // Revoke only on file replacement / clearDraft / unmount.
     }
   })
 

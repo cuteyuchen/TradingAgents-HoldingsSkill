@@ -12,6 +12,7 @@ const resolving = ref<Record<number, boolean>>({})
 const candidateIndex = ref<number | null>(null)
 const rowMeta = ref<Record<number, { seq: number; input: string }>>({})
 const timers = new Map<number, number>()
+const controllers = new Map<number, AbortController>()
 const notify = ref<string | null>(null)
 
 const candidateHolding = computed(() => candidateIndex.value === null ? null : props.holdings[candidateIndex.value] || null)
@@ -32,7 +33,16 @@ function statusLabel(holding: Holding): string {
     UNRESOLVED: '未找到',
     INVALID: '代码无效',
   } as Record<string, string>)[statusOf(holding)]
-  return base
+  if (statusOf(holding) !== 'RESOLVED') return base
+  const source = String(holding.resolution_source || '')
+  const suffix = source.startsWith('portfolio_history')
+    ? '历史'
+    : source.includes('fuyao')
+      ? '行情核验'
+      : source.includes('ranked') || source.includes('exact') || source.includes('direct_code')
+        ? '证券库'
+        : ''
+  return suffix ? `${base} · ${suffix}` : base
 }
 
 function statusTone(holding: Holding): 'success' | 'warning' | 'info' | 'danger' {
@@ -100,43 +110,70 @@ function updateName(index: number, value: string) {
   invalidate(holding, { clearName: false })
 }
 
+function isAbortError(error: unknown): boolean {
+  return Boolean(error && (error as { name?: string }).name === 'AbortError')
+}
+
+function isCurrentResolve(index: number, seq: number, capturedInput: string): boolean {
+  const meta = rowMeta.value[index]
+  if (!meta || meta.seq !== seq) return false
+  return meta.input === String(props.holdings[index]?.code ?? '').trim()
+}
+
 async function resolve(index: number) {
   clearTimer(index)
   const holding = props.holdings[index]
-  if (!holding || resolving.value[index]) return
+  if (!holding) return
   const capturedInput = holding.code.trim()
   const capturedName = (holding.name || '').trim()
   if (!capturedInput && !capturedName) {
     invalidate(holding, { clearName: false })
     return
   }
+
+  // Overlapping resolve is allowed: a new edit supersedes an in-flight old request.
+  controllers.get(index)?.abort()
+  const controller = new AbortController()
+  controllers.set(index, controller)
+
   const seq = (rowMeta.value[index]?.seq || 0) + 1
   rowMeta.value = { ...rowMeta.value, [index]: { seq, input: capturedInput } }
   resolving.value = { ...resolving.value, [index]: true }
+
   try {
     const resolved = await api.resolveHolding(
-      { ...holding, extra: { ...(holding.extra || {}), submitted_code: holding.code || undefined } },
+      {
+        ...holding,
+        code: capturedInput,
+        name: capturedName || holding.name,
+        extra: { ...(holding.extra || {}), submitted_code: capturedInput || undefined },
+      },
       props.portfolioId,
+      controller.signal,
     )
-    // Race guard: ignore stale responses that no longer match current input/seq.
-    const meta = rowMeta.value[index]
-    if (!meta || meta.seq !== seq || meta.input !== props.holdings[index]?.code?.trim()) return
+    if (controller.signal.aborted) return
+    if (!isCurrentResolve(index, seq, capturedInput)) return
     Object.assign(holding, resolved)
   } catch (error) {
-    const meta = rowMeta.value[index]
-    if (!meta || meta.seq !== seq || meta.input !== props.holdings[index]?.code?.trim()) return
+    if (controller.signal.aborted || isAbortError(error)) return
+    if (!isCurrentResolve(index, seq, capturedInput)) return
     invalidate(holding, { clearName: false })
     notify.value = errorMessage(error)
   } finally {
-    const next = { ...resolving.value }
-    delete next[index]
-    resolving.value = next
+    if (controllers.get(index) === controller) {
+      controllers.delete(index)
+    }
+    if (isCurrentResolve(index, seq, capturedInput) || rowMeta.value[index]?.seq === seq) {
+      const next = { ...resolving.value }
+      delete next[index]
+      resolving.value = next
+    }
   }
 }
 
 async function rematch(index: number) {
   const holding = props.holdings[index]
-  if (!holding || resolving.value[index]) return
+  if (!holding) return
   const ocrName = typeof holding.extra?.ocr_name === 'string' ? holding.extra.ocr_name : ''
   holding.code = ''
   holding.name = holding.name || ocrName || ''
@@ -182,6 +219,8 @@ function numericInput(value: string): number | null {
 
 onUnmounted(() => {
   for (const index of timers.keys()) clearTimer(index)
+  for (const controller of controllers.values()) controller.abort()
+  controllers.clear()
 })
 </script>
 

@@ -575,7 +575,41 @@ test.describe('V3 Holdings Workstation', () => {
 
     await openHoldings(page)
     await expect(page.getByTestId('v3-holdings-stale-strategy')).toBeVisible()
-    await expect(page.getByTestId('v3-holdings-decision-title')).toContainText('策略基于旧持仓快照')
+    await expect(page.getByTestId('v3-holdings-decision-title')).toContainText('策略基于旧或未绑定持仓快照')
+    await expect(page.getByTestId('v3-holding-row-600519.SH').getByTestId('v3-holding-judgment')).toHaveAttribute('data-status', 'DATA_INSUFFICIENT')
+    await expect(page.getByTestId('v3-holding-row-600519.SH')).not.toContainText('减仓')
+  })
+
+  test('decision portfolio_snapshot_id=null fails closed as unbound', async ({ acceptancePage: page }) => {
+    await mockAuth(page)
+    await mockPortfolios(page, { 1: 101, 2: null })
+    await mockSession(page)
+    await mockSnapshot(page, 101, snapshotPayload({ id: 101 }))
+    await mockDashboard(page, dashboardPayload({
+      decision: {
+        id: 41,
+        decision_at: `${TRADE_DATE}T13:05:42+08:00`,
+        decision_type: 'DAILY',
+        final_rating: 'ACTION',
+        portfolio_action: 'REDUCE',
+        conclusion: 'REDUCE',
+        holding_actions: [{ code: '600519.SH', action: 'REDUCE' }],
+        candidate_actions: [],
+        quality: 'A',
+        confidence: 0.75,
+        analysis_run_id: 41,
+        portfolio_snapshot_id: null,
+      },
+    }))
+    await mockQuotes(page, (codes) => ({
+      items: codes.map((code) => quoteItem(code, 1688, 0.2)),
+      as_of: `${TRADE_DATE}T14:31:05+08:00`,
+    }))
+    await mockBars(page)
+
+    await openHoldings(page)
+    await expect(page.getByTestId('v3-holdings-stale-strategy')).toBeVisible()
+    await expect(page.getByTestId('v3-holdings-decision-title')).toContainText('未绑定')
     await expect(page.getByTestId('v3-holding-row-600519.SH').getByTestId('v3-holding-judgment')).toHaveAttribute('data-status', 'DATA_INSUFFICIENT')
     await expect(page.getByTestId('v3-holding-row-600519.SH')).not.toContainText('减仓')
   })
@@ -681,6 +715,9 @@ test.describe('V3 Holdings Workstation', () => {
 
     await openHoldings(page)
     await expect(page.getByTestId('v3-holdings-table')).toBeVisible()
+    // Wait for observable quote bootstrap completion before asserting request shape.
+    await expect.poll(() => requestCount, { timeout: 10_000 }).toBeGreaterThan(0)
+    await expect(page.getByTestId('v3-holding-row-600519.SH').getByTestId('v3-holding-price')).not.toHaveText('—')
     expect(requestCount).toBe(1)
     expect(codesSeen).toContain('600519.SH')
     expect(codesSeen).toContain('510300.SH')
@@ -964,19 +1001,22 @@ test.describe('V3 Holdings Workstation', () => {
 
     await openHoldings(page)
     await expect(page.getByTestId('v3-holdings-table')).toBeVisible()
+    // Capture baseline only after initial quote + strategy requests complete.
+    await expect.poll(() => quoteCalls, { timeout: 10_000 }).toBeGreaterThan(0)
+    await expect.poll(() => strategyCalls, { timeout: 10_000 }).toBeGreaterThan(0)
     const quotesAfterBoot = quoteCalls
     const strategyAfterBoot = strategyCalls
-    expect(quotesAfterBoot).toBeGreaterThan(0)
-    expect(strategyAfterBoot).toBeGreaterThan(0)
+    const sessionAfterBoot = sessionCalls
 
     // Advance through several session heartbeats (5s) without full strategy cadence (45s).
     await page.clock.fastForward(12_000)
-    await expect.poll(() => sessionCalls, { timeout: 5_000 }).toBeGreaterThan(1)
+    await expect.poll(() => sessionCalls, { timeout: 5_000 }).toBeGreaterThan(sessionAfterBoot)
     // Quotes may refresh; strategy must not fire on every session tick.
     expect(strategyCalls - strategyAfterBoot).toBeLessThanOrEqual(1)
 
     await page.clock.fastForward(50_000)
     await expect.poll(() => strategyCalls, { timeout: 5_000 }).toBeGreaterThan(strategyAfterBoot)
+    expect(quotesAfterBoot).toBeGreaterThan(0)
   })
 
   test('visibility resume is session-first then quotes then strategy', async ({ acceptancePage: page }) => {
@@ -1288,6 +1328,72 @@ test.describe('V3 Holdings Workstation', () => {
     await page.getByTestId('v3-update-confirm').click()
     await expect(page.getByTestId('v3-holdings-stale-strategy')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByTestId('v3-holding-row-600519.SH').getByTestId('v3-holding-judgment')).toHaveAttribute('data-status', 'DATA_INSUFFICIENT')
+  })
+
+  test('identity resolve race: late slow A cannot overwrite fast B', async ({ acceptancePage: page }) => {
+    await mockAuth(page)
+    await mockPortfolios(page, { 1: null, 2: null })
+    await mockSession(page)
+    await mockDashboard(page, dashboardPayload({ decision: null }))
+
+    let resolveACount = 0
+    let resolveBCount = 0
+    await page.route('**/api/v2/holdings/resolve**', async (route) => {
+      const body = route.request().postDataJSON() as { code?: string } | null
+      const code = String(body?.code || '')
+      if (code === '600000') {
+        resolveACount += 1
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            code: '600000',
+            canonical_code: '600000.SH',
+            name: '浦发银行',
+            display_name: '浦发银行',
+            security_id: 12,
+            resolution_status: 'RESOLVED',
+            extra: {},
+          }),
+        })
+      }
+      resolveBCount += 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: '000002',
+          canonical_code: '000002.SZ',
+          name: '万科A',
+          display_name: '万科A',
+          security_id: 13,
+          resolution_status: 'RESOLVED',
+          extra: {},
+        }),
+      })
+    })
+
+    await page.goto('/holdings?action=update')
+    await expect(page.getByTestId('v3-holdings-update-drawer')).toBeVisible()
+    await page.getByTestId('v3-update-manual').click()
+    const codeInput = page.locator('[data-testid="v3-identity-code"]').first()
+    await codeInput.fill('600000')
+    await codeInput.blur()
+    // While A is still pending, switch to B.
+    await page.waitForTimeout(100)
+    await codeInput.fill('000002')
+    await codeInput.blur()
+    await expect.poll(() => resolveBCount, { timeout: 10_000 }).toBeGreaterThan(0)
+    await expect(page.locator('[data-testid="v3-identity-row-0"]')).toContainText('已匹配')
+    await expect(page.locator('[data-testid="v3-identity-code"]').first()).toHaveValue('000002')
+    await expect(page.locator('[data-testid="v3-identity-row-0"] input[placeholder="名称"]').first()).toHaveValue('万科A')
+    expect(resolveACount).toBeGreaterThan(0)
+    // Give late A time to land; it must not overwrite B.
+    await page.waitForTimeout(1500)
+    await expect(page.locator('[data-testid="v3-identity-code"]').first()).toHaveValue('000002')
+    await expect(page.locator('[data-testid="v3-identity-row-0"] input[placeholder="名称"]').first()).toHaveValue('万科A')
+    await expect(page.locator('[data-testid="v3-identity-code"]').first()).not.toHaveValue('600000')
   })
 
   test('identity ambiguous opens candidate dialog and selection resolves row', async ({ acceptancePage: page }) => {

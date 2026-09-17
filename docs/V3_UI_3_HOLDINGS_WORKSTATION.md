@@ -92,12 +92,13 @@ Backend additive read-model：
 "portfolio_snapshot_id": latest.portfolio_snapshot_id,
 ```
 
-绑定规则：
+绑定规则（fail closed）：
 
 - 仅当 `latestDecision.portfolio_snapshot_id === currentSnapshot.id` 时，holding actions 才是「当前系统判断」
-- mismatch：显示「策略基于旧持仓快照 · 待重新分析」
+- `portfolio_snapshot_id = null` 与 mismatch 同等视为 unbound
+- unbound：显示「策略基于旧或未绑定持仓快照 · 待重新分析」
 - 未重新确认的行 judgment = `DATA_INSUFFICIENT`
-- 旧 REDUCE/ADD/EXIT 不得继续套到新 snapshot
+- 旧或未绑定的 REDUCE/ADD/EXIT/HOLD 不得继续套用到新 snapshot
 - decision missing：所有行 `DATA_INSUFFICIENT`，不得默认 HOLD
 - explicit matching `NO_ACTION`：无 per-row action 的持仓显示 `HOLD`，secondary「组合级 NO_ACTION」
 - `quality=BLOCKED` / conclusion BLOCKED：组合「策略暂不可执行」，无具体行 action 时 `RISK_BLOCKED`
@@ -202,7 +203,20 @@ Decision snapshot mismatch 压过旧 action。
 
 ## Identity Resolve Race
 
-每行 `sequence + captured input`。慢旧 resolve 的 late response 不能覆盖新输入。
+每行使用 `AbortController + sequence + captured input`：
+
+- 新编辑会 abort 旧 in-flight resolve
+- 允许 overlapping 请求，latest seq wins
+- late old response 不能覆盖新输入
+- `resolveHolding(..., signal)` 支持取消
+
+## Preview Object URL
+
+默认 **preserve draft on close**：
+
+- 普通关闭不 revoke、不清空 `selectedFile` / `previewUrl`
+- 仅在替换文件 / clear draft / unmount 时 revoke
+- 避免「URL 已 revoke 但仍保留 draft」的不一致状态
 
 ## Confirm Snapshot
 

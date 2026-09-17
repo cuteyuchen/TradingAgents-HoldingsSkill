@@ -282,9 +282,9 @@ export const api = {
     return request<HoldingUpload>(`/api/v2/portfolios/${portfolioId}/uploads`, { method: 'POST', body: form })
   },
   getUpload: (id: number) => request<HoldingUpload>(`/api/v2/uploads/${id}`),
-  resolveHolding: (holding: Holding, portfolioId?: number | null) => request<Holding>(
+  resolveHolding: (holding: Holding, portfolioId?: number | null, signal?: AbortSignal) => request<Holding>(
     `/api/v2/holdings/resolve${portfolioId ? `?portfolio_id=${portfolioId}` : ''}`,
-    { method: 'POST', body: holding },
+    { method: 'POST', body: holding, signal },
   ),
   retryUploadParse: (id: number) => request<HoldingUpload>(`/api/v2/uploads/${id}/parse`, { method: 'POST' }),
   updateParsedHoldings: (id: number, parsed: ParsedHoldings) => request<HoldingUpload>(`/api/v2/uploads/${id}/parsed-holdings`, { method: 'PATCH', body: { parsed } }),

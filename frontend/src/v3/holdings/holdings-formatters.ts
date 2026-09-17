@@ -219,7 +219,8 @@ export function resolveRowJudgment(input: {
   const conclusion = decisionConclusion(dashboard)
   const decisionSnap = decisionSnapshotId(dashboard)
   const decisionTime = decisionAt(dashboard)
-  const mismatch = Boolean(latest && snapshotId && decisionSnap !== null && decisionSnap !== snapshotId)
+  // Fail closed: null or mismatched portfolio_snapshot_id is never a current binding.
+  const unbound = Boolean(latest && snapshotId !== null && decisionSnap !== snapshotId)
   const blocked = String(quality || '').toUpperCase() === 'BLOCKED' || String(conclusion || '').toUpperCase() === 'BLOCKED'
   const riskRow = portfolioRiskHolding(dashboard, code, canonicalCode)
   const riskFlags = Array.isArray(riskRow?.risk_flags)
@@ -239,10 +240,10 @@ export function resolveRowJudgment(input: {
     strategyStatus = 'MISSING'
     status = 'DATA_INSUFFICIENT'
     secondary = '策略数据暂不可用'
-  } else if (mismatch) {
+  } else if (unbound) {
     strategyStatus = 'STALE_SNAPSHOT'
     status = 'DATA_INSUFFICIENT'
-    secondary = '策略基于旧持仓快照 · 待重新分析'
+    secondary = '策略基于旧或未绑定持仓快照 · 待重新分析'
   } else if (blocked) {
     strategyStatus = 'BLOCKED'
     if (keyFromDecision.action || dashboardAction) {
@@ -281,7 +282,7 @@ export function resolveRowJudgment(input: {
     label: HOLDING_STATUS_LABEL[status],
     secondary,
     rawAction,
-    decisionAt: mismatch ? null : decisionTime,
+    decisionAt: unbound ? null : decisionTime,
     strategyQuality: quality,
     decisionSnapshotId: decisionSnap,
     keyTrigger,
@@ -468,7 +469,7 @@ function buildDecisionBar(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3
   const decisionSnap = decisionSnapshotId(dashboard)
   const quality = decisionQuality(dashboard)
   const conclusion = decisionConclusion(dashboard)
-  const mismatch = Boolean(latest && snapshotId && decisionSnap !== null && decisionSnap !== snapshotId)
+  const unbound = Boolean(latest && snapshotId !== null && decisionSnap !== snapshotId)
   const blocked = String(quality || '').toUpperCase() === 'BLOCKED' || String(conclusion || '').toUpperCase() === 'BLOCKED'
   const actionableCount = rows.filter((row) => isActionableStatus(row.judgment.status)).length
   const conditionalCount = rows.filter((row) => isConditionalStatus(row.judgment.status)).length
@@ -518,11 +519,11 @@ function buildDecisionBar(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3
     }
   }
 
-  if (mismatch) {
+  if (unbound) {
     return {
       kind: 'STALE_SNAPSHOT',
-      title: '策略基于旧持仓快照',
-      subtitle: '待重新分析 · 旧动作不得套用到新快照',
+      title: '策略基于旧或未绑定持仓快照',
+      subtitle: '待重新分析 · 旧或未绑定动作不得套用到新快照',
       conclusion: null,
       quality,
       confidence: numOrNull(latest.confidence),
