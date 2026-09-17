@@ -5,7 +5,6 @@ param(
   [switch]$NoBuild
 )
 
-# Optional Docker-based manual UAT. Default local start remains scripts/start_local.ps1.
 $ErrorActionPreference = "Stop"
 
 if ($BackendPort -eq $FrontendPort) {

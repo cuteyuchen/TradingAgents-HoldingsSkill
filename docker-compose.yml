@@ -1,5 +1,3 @@
-# Production / CI image packaging only.
-# Local development default: scripts/start_local.ps1 (backend uvicorn + frontend vite, no Docker).
 services:
   advisor:
     build:
