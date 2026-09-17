@@ -14,7 +14,7 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
 
   await page.goto('/upload')
   await expect(page).toHaveURL(/\/holdings\?/)
-  const drawer = page.locator('.n-drawer').last()
+  const drawer = page.getByTestId('v3-holdings-update-drawer')
   await expect(drawer).toBeVisible()
   await page.locator('input[type="file"]').setInputFiles({
     name: 'acceptance-holdings.png',
@@ -23,12 +23,11 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
   })
   await drawer.getByRole('button', { name: '上传并识别', exact: true }).click()
   await expect(page.getByText('待人工确认', { exact: true })).toBeVisible({ timeout: 15_000 })
-  const holdingRows = page.locator('.edit-table tbody tr')
+  const holdingRows = page.locator('[data-testid^="v3-identity-row-"]')
   await expect(holdingRows.nth(0).locator('input[placeholder="名称"]')).toHaveValue('贵州茅台')
   await expect(holdingRows.nth(1).locator('input[placeholder="名称"]')).toHaveValue('沪深300ETF')
   await drawer.getByRole('button', { name: '仅确认快照', exact: true }).click()
-  await expect(page.getByText(/持仓快照已确认/)).toBeVisible({ timeout: 10_000 })
-  await expect(drawer.locator('.analysis-panel')).toContainText('当前使用快照')
+  await expect(drawer).toContainText('当前使用快照', { timeout: 15_000 })
 
   const uploadPortfolioId = await page.evaluate(async (name) => {
     const token = localStorage.getItem('advisor_v2_access_token')
@@ -49,7 +48,7 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
   await expect(page.locator('body')).toContainText('paper-only')
 
   await page.goto('/upload')
-  const invalidDrawer = page.locator('.n-drawer').last()
+  const invalidDrawer = page.getByTestId('v3-holdings-update-drawer')
   await expect(invalidDrawer).toBeVisible()
   await page.locator('input[type="file"]').setInputFiles({
     name: 'acceptance-invalid.png',

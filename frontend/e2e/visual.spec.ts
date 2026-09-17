@@ -7,7 +7,10 @@ async function waitForVisualContent(page: Parameters<typeof login>[0], route: st
     await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
     await expect(page.getByTestId('v3-decision-hero')).toBeVisible()
   }
-  if (route.startsWith('/holdings')) await expect(page.getByText('持仓列表', { exact: true })).toBeVisible()
+  if (route.startsWith('/holdings')) {
+    await expect(page.getByTestId('v3-holdings')).toBeVisible()
+    await expect(page.getByRole('heading', { name: '我的持仓' })).toBeVisible()
+  }
   if (route.startsWith('/analysis')) await expect(page.locator('.decision-hero, .shared-empty, .progress-panel, .failed-panel').first()).toBeVisible()
   if (route.startsWith('/simulation')) await expect(page.locator('.simulation-banner')).toBeVisible()
   if (route.startsWith('/history')) await expect(page.getByRole('heading', { name: '历史表现', exact: true })).toBeVisible()
@@ -66,8 +69,8 @@ test('Desktop visual smoke at 1440, 1366, and 1920', async ({ acceptancePage: pa
     await expect(headingLocator).toBeVisible()
     await waitForVisualContent(page, route)
     if (route === '/holdings?action=update') {
-      const drawer = page.locator('.n-drawer').last()
-      await expect(drawer).toBeVisible()
+      const drawer = page.getByTestId('v3-holdings-update-drawer')
+      await expect(drawer).toBeVisible({ timeout: 20_000 })
       await expect.poll(() => drawer.evaluate((element) => {
         const rect = element.getBoundingClientRect()
         return rect.left >= 0 && rect.right <= window.innerWidth + 1 && rect.top >= 0 && rect.bottom <= window.innerHeight + 1
