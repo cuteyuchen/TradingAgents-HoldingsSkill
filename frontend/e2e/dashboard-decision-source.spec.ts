@@ -10,11 +10,11 @@ test('dashboard conclusion, evidence, validity and navigation use the same newes
     else if (path.endsWith('/dashboard/today')) body = {
       as_of: '2026-08-21T14:00:00+08:00', trade_date: '2026-08-21', market_open: true,
       portfolio: { snapshot_id: 10 }, market: {}, candidates: {}, data_health: {},
-      decisions: { latest: {
+      decisions: { status: 'AVAILABLE', latest: {
         analysis_run_id: 1, portfolio_snapshot_id: 10, decision_status: 'EXPIRED', validity_status: 'EXPIRED', quality: 'BLOCKED',
         finished_at: '2026-08-21T05:00:00Z', portfolio_conclusion: '旧报告的调整建议', reasons: ['旧报告依据'],
       } },
-      analysis: { latest: {
+      analysis: { status: 'AVAILABLE', latest: {
         analysis_run_id: 2, portfolio_snapshot_id: 10, status: 'SUCCESS', decision_status: 'WAITING', validity_status: 'UNVERIFIED', quality: 'VALID',
         finished_at: '2026-08-21T06:00:00Z', summary: '新报告要求等待条件满足', reasons: ['新报告依据'],
       } },
@@ -23,7 +23,7 @@ test('dashboard conclusion, evidence, validity and navigation use the same newes
   })
 
   await page.goto('/dashboard')
-  const card = page.locator('.decision-card')
+  const card = page.getByTestId('v3-decision-hero')
   await expect(card.getByRole('heading', { name: '等待条件', exact: true })).toBeVisible()
   await expect(card).toContainText('新报告要求等待条件满足')
   await expect(card).toContainText('新报告依据')

@@ -111,8 +111,7 @@ test('每日行动计划展示条件、剩余数量并支持复核与关联成�
   await reduce.getByRole('button', { name: '复核剩余计划' }).click()
   await expect.poll(() => writes.includes('POST /api/v3/triggers/plans/21/recheck')).toBe(true)
 
-  await reduce.locator('.n-base-selection').click()
-  await page.locator('.n-base-select-option').first().click()
+  await reduce.getByLabel('关联 600000 成交').selectOption('91')
   await reduce.getByRole('button', { name: '关联成交' }).click()
   await expect.poll(() => writes.includes('POST /api/v3/triggers/plans/21/fills')).toBe(true)
 })

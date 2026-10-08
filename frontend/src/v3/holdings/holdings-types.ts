@@ -8,6 +8,7 @@ import type {
   InstrumentQuote,
   MarketSessionKind,
   PortfolioSnapshot,
+  PortfolioAccountState,
 } from '../../api/types'
 
 export type V3HoldingStatus =
@@ -120,7 +121,7 @@ export interface V3HoldingsSummaryVM {
 }
 
 export interface V3HoldingsDecisionBarVM {
-  kind: 'NO_ACTION' | 'ACTIONABLE' | 'BLOCKED' | 'MISSING' | 'STALE_SNAPSHOT' | 'NO_PORTFOLIO'
+  kind: 'NO_ACTION' | 'ACTIONABLE' | 'BLOCKED' | 'MISSING' | 'STALE_SNAPSHOT' | 'NO_PORTFOLIO' | 'WAITING' | 'DATA_GAP' | 'INCOMPLETE' | 'EXPIRED' | 'UNKNOWN'
   title: string
   subtitle: string
   conclusion: string | null
@@ -167,6 +168,7 @@ export interface BuildHoldingsInput {
   portfolioId: number | null
   portfolioName: string | null
   snapshot: PortfolioSnapshot | null
+  accountState?: PortfolioAccountState | null
   dashboard: DailyDashboard | null
   quotes: Map<string, V3QuoteVM>
   quotesAsOf: string | null

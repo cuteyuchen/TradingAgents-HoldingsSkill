@@ -1,9 +1,10 @@
 <script setup lang="ts">
-withDefaults(defineProps<{ title?: string; name?: string; defaultOpen?: boolean }>(), { title: '技术详情', name: 'technical', defaultOpen: false })
+withDefaults(defineProps<{ title?: string; name?: string; defaultOpen?: boolean; native?: boolean }>(), { title: '技术详情', name: 'technical', defaultOpen: false, native: false })
 </script>
 
 <template>
-  <n-collapse :default-expanded-names="defaultOpen ? [name] : []" class="technical-details">
+  <details v-if="native" :open="defaultOpen" class="technical-details"><summary>{{ title }}</summary><div class="technical-details-body"><slot /></div></details>
+  <n-collapse v-else :default-expanded-names="defaultOpen ? [name] : []" class="technical-details">
     <n-collapse-item :title="title" :name="name">
       <div class="technical-details-body"><slot /></div>
     </n-collapse-item>

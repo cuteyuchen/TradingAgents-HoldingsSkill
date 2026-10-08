@@ -250,6 +250,11 @@ def condition_state(db: Session, memory: DecisionMemory, target: dict, *, as_of:
 def review_dimensions(db: Session, memories: list[DecisionMemory], *, as_of: datetime) -> dict[str, Any]:
     items = []
     for memory in memories:
+        outcomes = db.scalars(select(DecisionOutcome).where(
+            DecisionOutcome.decision_memory_id == memory.id,
+            DecisionOutcome.horizon_trading_days.in_((1, 5, 20)),
+        ).order_by(DecisionOutcome.horizon_trading_days, DecisionOutcome.id)).all()
+        entries = ledger_facts_at(db, user_id=memory.user_id, portfolio_id=memory.portfolio_id, as_of=as_of)
         for target in [*(memory.holding_decisions_json or []), *(memory.candidate_decisions_json or [])]:
             source = target.get("source") or {}
             condition = condition_state(db, memory, target, as_of=as_of)
@@ -259,11 +264,33 @@ def review_dimensions(db: Session, memories: list[DecisionMemory], *, as_of: dat
             executable = "CONDITION_PENDING" if condition in {"CONDITION_UNOBSERVED", "NOT_TRIGGERED"} else (
                 "NO_ACTION" if action in {"hold", "watch", "no_action"} else
                 "PENDING" if factual == "PENDING" or not target.get("recommended_qty") else "RECORDED_ADVICE")
+            linked = [entry for entry in entries if entry.analysis_run_id == memory.analysis_run_id
+                      and entry.security_code == target.get("target_key") and entry.entry_type == "TRADE"
+                      and entry.executed_at >= memory.decision_at]
+            expected_side = "BUY" if action in {"add", "new_position", "conditional_add"} else "SELL" if action in {"reduce", "sell", "exit"} else None
+            filled = sum(float(entry.quantity or 0) for entry in linked if entry.side == expected_side)
+            if linked:
+                requested = _number(target.get("recommended_qty"))
+                executable = "EXECUTION_MISMATCH" if any(entry.side != expected_side for entry in linked) else (
+                    "PARTIALLY_EXECUTED" if requested and filled < requested else "EXECUTED")
+            market_results = []
+            for outcome in outcomes:
+                if outcome.target_key != target.get("target_key"):
+                    continue
+                value = calculate_decision_outcome(db, memory, outcome, calculation_as_of=as_of)
+                directional = value.get("directional_return")
+                market_results.append({"outcome_id": outcome.id, "horizon": outcome.horizon_trading_days,
+                    "status": value["status"], "market_return": value.get("raw_return"),
+                    "directional_return": directional, "prediction_failed": None
+                    if condition in {"CONDITION_UNOBSERVED", "NOT_TRIGGERED"} or directional is None else directional < 0})
             items.append({"decision_memory_id": memory.id, "analysis_run_id": memory.analysis_run_id,
                           "trade_date": memory.trade_date.isoformat(), "code": target.get("target_key"),
                           "action": action, "fact_status": factual, "logic_status": logic,
                           "execution_status": executable, "condition_status": condition,
-                          "market_result_status": "PENDING", "prediction_failed": None})
+                          "linked_entry_ids": [entry.id for entry in linked], "filled_quantity": filled,
+                          "market_results": market_results,
+                          "market_result_status": "EVALUATED" if any(row["status"] in {"VALID", "DEGRADED"} for row in market_results) else "PENDING",
+                          "prediction_failed": None, "outcome_alone_does_not_prove_reasoning_error": True})
     return {"items": items, "traceable_does_not_mean_correct": True,
             "conditional_untriggered_is_not_failure": True}
 

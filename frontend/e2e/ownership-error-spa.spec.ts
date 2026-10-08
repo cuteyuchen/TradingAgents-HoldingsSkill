@@ -38,7 +38,7 @@ test('Ownership returns a non-leaking not-found response for another user', asyn
 
   await page.goto('/history')
   await expect(page).toHaveURL(/\/history/)
-  await expect(page.getByRole('heading', { name: '历史表现', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '历史', exact: true })).toBeVisible()
   await expect(page.locator('.metric-grid.six .metric-tile').filter({ hasText: '样本天数' }).locator('strong')).toHaveText('—')
 })
 

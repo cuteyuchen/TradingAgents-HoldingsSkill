@@ -157,7 +157,7 @@ function onRowClick(row: V3HoldingRowVM): void {
             >
               {{ row.quote?.changePct == null ? '—' : formatPercentFromPoints(row.quote.changePct) }}
             </td>
-            <td class="v3-number">{{ formatPrice(row.cost) }}</td>
+            <td class="v3-number" data-testid="v3-holding-cost">{{ formatPrice(row.cost) }}</td>
             <td class="v3-number" data-testid="v3-holding-qty">{{ formatQty(row.qty) }}</td>
             <td class="v3-number" data-testid="v3-holding-available">
               {{ formatQty(row.availableQty) }}

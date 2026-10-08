@@ -76,11 +76,10 @@ test('recorded trades update the current account and stay visible on the holding
   const routeReady = ledgerRoutes(page)
   await page.goto('/holdings')
   await expect(page.getByRole('heading', { name: '我的持仓' })).toBeVisible()
-  await expect(page.locator('.n-alert').first()).toContainText('当前账户已叠加 1 笔')
-  await expect(page.locator('.holdings-table td.mono-number').first()).toContainText('700')
-  await expect(page.locator('.holdings-table .qty-note')).toContainText('快照 1000')
+  await expect(page.getByTestId('v3-account-derived')).toContainText('1 条账户记录')
+  await expect(page.getByTestId('v3-holdings-table')).toContainText('700')
 
-  await page.getByRole('button', { name: '记录成交' }).click()
+  await page.getByTestId('v3-holdings-trades').click()
   await expect(page.getByText('已记录事实')).toBeVisible()
   await expect(page.getByText('卖出 贵州茅台')).toBeVisible()
 
@@ -95,7 +94,8 @@ test('recorded trades update the current account and stay visible on the holding
   const posted = await routeReady
   expect(posted).toHaveLength(1)
   expect(posted[0]).toMatchObject({ entry_type: 'TRADE', security_code: '600519', side: 'BUY', quantity: 100, price: 9, fees: 5, source: 'MANUAL' })
-  await expect(page.locator('.n-alert').first()).toContainText('当前账户已叠加 2 笔')
+  await expect(page.getByTestId('v3-account-derived')).toContainText('2 条账户记录')
+  await expect(page.getByTestId('v3-holdings-table')).toContainText('800')
 })
 
 test('statement import previews mapping, duplicates and commits ready rows only', async ({ acceptancePage: page }) => {
@@ -138,7 +138,7 @@ test('statement import previews mapping, duplicates and commits ready rows only'
   })
 
   await page.goto('/holdings')
-  await page.getByRole('button', { name: '记录成交' }).click()
+  await page.getByTestId('v3-holdings-trades').click()
   await page.getByText('导入流水', { exact: true }).click()
   await page.locator('.import-drop input[type="file"]').setInputFiles({
     name: 'trades.csv',

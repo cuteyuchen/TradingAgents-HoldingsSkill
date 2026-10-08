@@ -13,6 +13,17 @@ from ..market.instruments import InstrumentMarketService
 from ..market.models import _coerce_float
 from ..market.quality import _worst_grade
 from .unified_evidence import build_unified_evidence, collect_supplemental_evidence, merge_unified_evidence
+from .market_snapshot_service import get_market_data_cache, put_market_data_cache
+
+
+def _cached_context(service, name, loader, ttl=300):
+    key = f"holdings-context:{service.cache_scope}:{name}"
+    cached = get_market_data_cache(key)
+    if cached is not None:
+        return cached["items"]
+    items = loader()
+    put_market_data_cache(key, {"items": items}, ttl=ttl)
+    return items
 
 
 def _legacy_quote(quote: InstrumentQuoteResponse) -> dict[str, Any]:
@@ -125,7 +136,7 @@ def collect_market_snapshot(
     else:
         for code in quotes:
             try:
-                announcements[code] = market_data.fetch_announcements(code, limit=20)
+                announcements[code] = _cached_context(service, f"announcements:{code}", lambda: market_data.fetch_announcements(code, limit=20), 900)
             except Exception:
                 announcements[code] = []
                 errors.append(f"announcements:{code}:unavailable")
@@ -139,7 +150,7 @@ def collect_market_snapshot(
                 extras[name] = []
                 continue
             try:
-                extras[name] = loader()
+                extras[name] = _cached_context(service, name, loader)
             except Exception:
                 extras[name] = []
                 errors.append(f"{name}:unavailable")

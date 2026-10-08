@@ -208,6 +208,8 @@ function dashboardPayload(options: {
 }
 
 async function mockAuth(page: Page): Promise<void> {
+  await page.route('**/api/v3/portfolios/*/state**', route => route.fulfill({ json: null }))
+  await page.route('**/api/v3/portfolios/*/memory/performance**', route => route.fulfill({ json: { account_return: {}, day_comparison: { changes: [] } } }))
   await page.addInitScript(() => {
     localStorage.setItem('advisor_v2_access_token', 'acceptance-v3-holdings')
     localStorage.setItem('advisor_v2_refresh_token', 'acceptance-v3-holdings-refresh')
@@ -359,6 +361,35 @@ async function openHoldings(page: Page, query = ''): Promise<void> {
 }
 
 test.describe('V3 Holdings Workstation', () => {
+  test('ledger-only positions receive resolved quotes and changed quantities discard old cost estimates', async ({ acceptancePage: page }) => {
+    await mockAuth(page)
+    await mockPortfolios(page, { 1: 100, 2: 200 })
+    await mockSession(page)
+    await mockSnapshot(page, 100, snapshotPayload({ id: 100 }))
+    await mockDashboard(page, dashboardPayload({ decision: null }))
+    await page.route('**/api/v3/portfolios/1/state', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      portfolio_id: 1, snapshot_id: 100, cash: 10000, positions: [
+        { code: '600519', canonical_code: '600519.SH', qty: 200, available_qty: 100, qty_delta: 100 },
+        { code: '159915', canonical_code: '159915.SZ', name: '新增创业板ETF', qty: 100, available_qty: 0, qty_delta: 100, security_type: 'ETF' },
+        { code: '600999', name: '未解析新持仓', qty: 100, available_qty: 0, qty_delta: 100 },
+      ],
+    }) }))
+    const batches: string[][] = []
+    await mockQuotes(page, codes => {
+      batches.push(codes)
+      return { items: codes.map(code => quoteItem(code, code === '159915.SZ' ? 2.55 : 1688.5, 1.25)) }
+    })
+    await mockBars(page)
+    await openHoldings(page)
+    const added = page.getByTestId('v3-holding-row-159915.SZ')
+    await expect(added.getByTestId('v3-holding-price')).toContainText('2.55')
+    expect(batches.some(codes => codes.includes('159915.SZ'))).toBe(true)
+    expect(batches.flat().some(code => code.startsWith('600999'))).toBe(false)
+    const changed = page.getByTestId('v3-holding-row-600519.SH')
+    await expect(changed.getByTestId('v3-holding-qty')).toContainText('200')
+    await expect(changed.getByTestId('v3-holding-cost')).toContainText('—')
+  })
+
   test('route migration: /holdings is V3 shell, name holdings, no Naive Holdings DOM', async ({ acceptancePage: page }) => {
     await mockAuth(page)
     await mockPortfolios(page, { 1: null, 2: null })

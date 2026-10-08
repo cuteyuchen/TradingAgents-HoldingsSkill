@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-WORKFLOW_VERSION = "v3-holdings-p4-1"
+WORKFLOW_VERSION = "v3-holdings-p4-2"
 LEGACY_WORKFLOW_VERSION = "v3-holdings-p4-legacy-1"
 DEFAULT_NODE_MAX_ATTEMPTS = 3
 

@@ -38,7 +38,7 @@ const kindLabel = computed(() => {
     case 'NO_PORTFOLIO':
       return 'NO_PORTFOLIO'
     default:
-      return 'MISSING'
+      return props.decision.kind
   }
 })
 </script>
@@ -69,8 +69,8 @@ const kindLabel = computed(() => {
     </div>
     <div class="decision-hero__side">
       <slot name="actions">
-        <button v-if="decision.kind === 'ACTIONABLE' || decision.kind === 'NO_ACTION'" type="button" class="ghost-btn" @click="emit('goAnalysis')">
-          查看分析
+        <button v-if="decision.analysisRunId" type="button" class="ghost-btn" @click="emit('goAnalysis')">
+          查看完整分析
         </button>
       </slot>
     </div>

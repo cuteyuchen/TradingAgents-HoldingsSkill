@@ -173,6 +173,7 @@ def build_portfolio_state(
         flags.extend(derived.get("flags") or [])
         positions.append({
             "code": code,
+            "canonical_code": master.symbol if master is not None else None,
             "name": derived.get("name") or (item.name if item is not None else None) or (master.name if master is not None else None),
             "security_type": security_type,
             "etf_category": etf_category,
@@ -185,6 +186,8 @@ def build_portfolio_state(
             "is_st": bool(master.is_st if master is not None else False),
             "qty": qty,
             "available_qty": available_qty,
+            "qty_delta": derived.get("qty_delta"),
+            "available_delta": derived.get("available_delta"),
             "pending_buy_qty": derived.get("open_buy_qty") or None,
             "account_source": derived.get("source"),
             "account_flags": list(derived.get("flags") or []),

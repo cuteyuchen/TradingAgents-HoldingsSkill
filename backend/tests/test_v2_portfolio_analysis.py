@@ -120,12 +120,18 @@ def test_v2_portfolio_flow(monkeypatch):
     assert snapshot_payload["holdings"][0]["extra"]["unavailable_qty"] == 20
     assert [item["code"] for item in snapshot_payload["holdings"]] == ["600519", "600002", "510002"]
 
+    def quotes(codes):
+        now = analysis_engine.utc_now().isoformat()
+        return {code: {"code": code, "price": 1601 if code == "600519" else 1,
+            "source": "test", "quality_status": "VALID", "fetched_at": now,
+            "observed_at": now, "stale": False} for code in codes}
+
     monkeypatch.setattr(
         analysis_engine,
         "collect_market_snapshot",
         lambda codes: {
-            "captured_at": "2026-07-19T10:00:00+08:00",
-            "quotes": {"600519": {"code": "600519", "price": 1601, "source": "test"}},
+            "captured_at": analysis_engine.utc_now().isoformat(),
+            "quotes": quotes(codes),
             "technicals": {"600519": {"trend": "up", "source": "test"}},
             "indices": {},
             "quality_grade": "A",
@@ -133,6 +139,10 @@ def test_v2_portfolio_flow(monkeypatch):
             "source_chain": ["test-source"],
         },
     )
+    monkeypatch.setattr(analysis_engine, "refresh_snapshot_quotes", lambda market, codes, **kwargs: {
+        **market, "quotes": quotes(codes), "final_quote_refresh_status": "ok",
+        "final_quote_refresh_at": analysis_engine.utc_now().isoformat(), "final_quote_unavailable_codes": [],
+    })
 
     def fake_call(_profile, _system, _payload, instruction):
         if "匹配六位证券代码" in instruction:
@@ -164,7 +174,9 @@ def test_v2_portfolio_flow(monkeypatch):
                     "stop_loss": "趋势失效",
                     "take_profit": "放量突破",
                     "risk": "估值风险",
-                }
+                },
+                {"code": "600002", "name": "验收股票A", "action": "hold", "reason": "保持原仓位"},
+                {"code": "510002", "name": "验收ETF", "action": "hold", "reason": "保持原仓位"},
             ],
             "candidates": [],
             "history_consistency": "首次分析",

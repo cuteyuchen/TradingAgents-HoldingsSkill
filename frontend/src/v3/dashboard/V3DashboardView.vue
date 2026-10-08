@@ -24,6 +24,8 @@ import { useV3Dashboard } from './useV3Dashboard'
 const V3InstrumentDetailDrawer = defineAsyncComponent(
   () => import('../instrument-detail/V3InstrumentDetailDrawer.vue'),
 )
+const DailyActionPlan = defineAsyncComponent(() => import('../../components/DailyActionPlan.vue'))
+const PortfolioReviewPanel = defineAsyncComponent(() => import('../../components/PortfolioReviewPanel.vue'))
 
 const router = useRouter()
 const {
@@ -74,7 +76,7 @@ function goHoldings(): void {
 }
 
 function goAnalysis(): void {
-  void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined } })
+  void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined, run: viewModel.value.decision.analysisRunId || undefined } })
 }
 </script>
 
@@ -182,7 +184,7 @@ function goAnalysis(): void {
 
       <!-- 6. Actions + Latest analysis -->
       <div class="v3-dashboard__row v3-dashboard__row--half">
-        <V3Section title="今日行动" description="仅展示 backend structured decision，不在前端创造买卖建议。" compact>
+        <V3Section title="今日行动" description="按最新分析核对持仓动作和执行条件。" compact>
           <V3ActionList
             :holding-actions="viewModel.decision.holdingActions"
             :candidate-actions="viewModel.decision.candidateActions"
@@ -194,6 +196,9 @@ function goAnalysis(): void {
           <V3LatestAnalysis :analysis="viewModel.latestAnalysis" @go-analysis="goAnalysis" />
         </V3Section>
       </div>
+
+      <DailyActionPlan v-if="selectedPortfolioId" :key="selectedPortfolioId" :portfolio-id="selectedPortfolioId" @changed="loadPortfolioDashboard(false)" />
+      <PortfolioReviewPanel v-if="selectedPortfolioId" :key="`review-${selectedPortfolioId}`" :portfolio-id="selectedPortfolioId" compact />
 
       <!-- 7. Important events -->
       <V3Section compact>

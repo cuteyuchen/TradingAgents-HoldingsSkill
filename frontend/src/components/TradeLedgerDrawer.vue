@@ -225,7 +225,7 @@ watch(() => props.show, (show) => {
     voidingId.value = null
     void loadEntries()
   }
-})
+}, { immediate: true })
 </script>
 
 <template>

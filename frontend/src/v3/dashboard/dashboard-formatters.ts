@@ -2,6 +2,7 @@
  * Dashboard pure formatters and adapter helpers.
  * Missing/unknown never becomes 0.
  */
+import { dashboardDecisionSource, dashboardDecisionState, decisionLabel, decisionSummary } from '../../utils/decision'
 import type {
   DailyDashboard,
   DashboardSection,
@@ -334,7 +335,7 @@ function mapActionRows(rows: Array<Record<string, unknown>>, kind: 'holding' | '
   }))
 }
 
-const NO_ACTION_SET = new Set(['NO_ACTION', 'HOLD', 'HOLD_ONLY', 'WATCH', 'WATCH_ONLY'])
+const NO_ACTION_SET = new Set(['NO_ACTION', 'HOLD', 'HOLD_ONLY'])
 const ACTION_SET = new Set(['ACTION', 'ADD', 'BUY', 'REDUCE', 'SELL', 'EXIT', 'REBALANCE', 'TRIM', 'INCREASE'])
 
 function normalizeConclusion(raw: unknown): string {
@@ -388,10 +389,8 @@ export function mapDecision(
   const hasValidDecision = decisionStatus === 'AVAILABLE' && !!latestDecision && Object.keys(latestDecision).length > 0
   const hasValidAnalysis = analysisStatus === 'AVAILABLE' && !!latestAnalysis && Object.keys(latestAnalysis).length > 0
 
-  const quality = normalizeConclusion(
-    (latestDecision as Record<string, unknown> | null)?.quality
-      ?? (latestAnalysis as Record<string, unknown> | null)?.quality,
-  ) || null
+  const source = dashboardDecisionSource(dashboard)
+  const quality = normalizeConclusion(source.quality) || null
 
   if (!hasValidDecision && !hasValidAnalysis) {
     return {
@@ -413,13 +412,22 @@ export function mapDecision(
   }
 
   const holdingActions = mapActionList(
-    (latestDecision as Record<string, unknown> | null)?.holding_actions,
-    (latestAnalysis as Record<string, unknown> | null)?.holding_actions,
-  )
-  const candidateActions = mapActionList(
-    (latestDecision as Record<string, unknown> | null)?.candidate_actions,
+    source.holding_actions,
     null,
   )
+  const candidateActions = mapActionList(
+    source.candidate_actions,
+    null,
+  )
+  const state = dashboardDecisionState(dashboard)
+  if (['WAITING', 'DATA_GAP', 'INCOMPLETE', 'EXPIRED', 'UNKNOWN'].includes(state)) {
+    const subtitle = [source.summary || source.portfolio_conclusion || decisionSummary(state),
+      source.validity_status === 'UNVERIFIED' ? '建议时效待核对' : ''].filter(Boolean).join(' · ')
+    return { kind: state as V3DecisionKind, title: decisionLabel(state), subtitle,
+      tone: 'warning', actionCount: 0, holdingActions: [], candidateActions: [],
+      reasons: collectReasons(source, null, []), conclusion: strOrNull(source.conclusion || source.portfolio_action),
+      quality, decisionAt: strOrNull(source.decision_at || source.finished_at), analysisRunId: numOrNull(source.analysis_run_id || source.id) }
+  }
 
   if (quality === 'BLOCKED' || quality === 'DATA_GAP') {
     return {
@@ -430,18 +438,16 @@ export function mapDecision(
       actionCount: 0,
       holdingActions,
       candidateActions,
-      reasons: collectReasons(latestDecision, latestAnalysis, ['数据质量不足', quality || 'BLOCKED']),
+      reasons: collectReasons(source, null, ['数据质量不足', quality || 'BLOCKED']),
       conclusion: 'BLOCKED',
       quality,
-      decisionAt: strOrNull((latestDecision as Record<string, unknown> | null)?.decision_at),
-      analysisRunId: numOrNull((latestDecision as Record<string, unknown> | null)?.analysis_run_id),
+      decisionAt: strOrNull(source.decision_at || source.finished_at),
+      analysisRunId: numOrNull(source.analysis_run_id || source.id),
     }
   }
 
   const rawConclusion =
-    (latestDecision as Record<string, unknown> | null)?.conclusion
-    ?? (latestAnalysis as Record<string, unknown> | null)?.portfolio_action
-    ?? (latestAnalysis as Record<string, unknown> | null)?.final_rating
+    source.portfolio_action ?? source.conclusion ?? source.final_rating ?? source.decision_status
     // Backend final_action fallbacks to NO_ACTION when no decision exists — never trust it as explicit NO_ACTION.
     ?? (decisionStatus === 'AVAILABLE' ? sectionField(decisions, 'final_action') : null)
   const conclusion = normalizeConclusion(rawConclusion)
@@ -455,11 +461,11 @@ export function mapDecision(
       actionCount: 0,
       holdingActions,
       candidateActions,
-      reasons: collectReasons(latestDecision, latestAnalysis, ['策略受阻']),
+      reasons: collectReasons(source, null, ['策略受阻']),
       conclusion: 'BLOCKED',
       quality,
-      decisionAt: strOrNull((latestDecision as Record<string, unknown> | null)?.decision_at),
-      analysisRunId: numOrNull((latestDecision as Record<string, unknown> | null)?.analysis_run_id),
+      decisionAt: strOrNull(source.decision_at || source.finished_at),
+      analysisRunId: numOrNull(source.analysis_run_id || source.id),
     }
   }
 
@@ -476,11 +482,11 @@ export function mapDecision(
       actionCount: 0,
       holdingActions: [],
       candidateActions: [],
-      reasons: collectReasons(latestDecision, latestAnalysis, ['当前没有足够的新信息改变组合决策。']),
+      reasons: collectReasons(source, null, ['当前没有足够的新信息改变组合决策。']),
       conclusion,
       quality,
-      decisionAt: strOrNull((latestDecision as Record<string, unknown> | null)?.decision_at),
-      analysisRunId: numOrNull((latestDecision as Record<string, unknown> | null)?.analysis_run_id),
+      decisionAt: strOrNull(source.decision_at || source.finished_at),
+      analysisRunId: numOrNull(source.analysis_run_id || source.id),
     }
   }
 
@@ -493,11 +499,11 @@ export function mapDecision(
       actionCount: actionCount || 1,
       holdingActions,
       candidateActions,
-      reasons: collectReasons(latestDecision, latestAnalysis, ['组合层已给出调整建议。']),
+      reasons: collectReasons(source, null, ['组合层已给出调整建议。']),
       conclusion,
       quality,
-      decisionAt: strOrNull((latestDecision as Record<string, unknown> | null)?.decision_at),
-      analysisRunId: numOrNull((latestDecision as Record<string, unknown> | null)?.analysis_run_id),
+      decisionAt: strOrNull(source.decision_at || source.finished_at),
+      analysisRunId: numOrNull(source.analysis_run_id || source.id),
     }
   }
 
@@ -515,8 +521,8 @@ export function mapDecision(
     reasons: [],
     conclusion: conclusion || null,
     quality,
-    decisionAt: strOrNull((latestDecision as Record<string, unknown> | null)?.decision_at),
-    analysisRunId: numOrNull((latestDecision as Record<string, unknown> | null)?.analysis_run_id),
+    decisionAt: strOrNull(source.decision_at || source.finished_at),
+    analysisRunId: numOrNull(source.analysis_run_id || source.id),
   }
 }
 

@@ -13,7 +13,7 @@ async function waitForVisualContent(page: Parameters<typeof login>[0], route: st
   }
   if (route.startsWith('/analysis')) await expect(page.locator('.decision-hero, .shared-empty, .progress-panel, .failed-panel').first()).toBeVisible()
   if (route.startsWith('/simulation')) await expect(page.locator('.simulation-banner')).toBeVisible()
-  if (route.startsWith('/history')) await expect(page.getByRole('heading', { name: '历史表现', exact: true })).toBeVisible()
+  if (route.startsWith('/history')) await expect(page.getByRole('heading', { name: '历史', exact: true })).toBeVisible()
   if (route.startsWith('/settings')) {
     if (route.includes('section=system')) {
       await expect(page.getByRole('heading', { name: '系统运维', exact: true })).toBeVisible()

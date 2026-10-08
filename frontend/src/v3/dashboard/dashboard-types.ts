@@ -24,6 +24,11 @@ export type V3DecisionKind =
   | 'BLOCKED'
   | 'MISSING'
   | 'NO_PORTFOLIO'
+  | 'WAITING'
+  | 'DATA_GAP'
+  | 'INCOMPLETE'
+  | 'EXPIRED'
+  | 'UNKNOWN'
 
 export type V3RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME' | 'UNKNOWN'
 

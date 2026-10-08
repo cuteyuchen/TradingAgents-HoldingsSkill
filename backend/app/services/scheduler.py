@@ -592,6 +592,15 @@ def start_scheduler() -> None:
     except Exception:
         logger.exception("initial research backtest worker dispatch failed")
     _scheduler = BackgroundScheduler(timezone="UTC", daemon=True)
+    if settings.HOLDINGS_EVIDENCE_PREFETCH_ENABLED and not settings.ACCEPTANCE_MODE:
+        from .holdings_evidence_prefetch import prefetch_holdings_evidence
+
+        _scheduler.add_job(
+            prefetch_holdings_evidence, "interval",
+            seconds=settings.HOLDINGS_EVIDENCE_PREFETCH_SECONDS,
+            id="holdings-evidence-prefetch", max_instances=1,
+            coalesce=True, replace_existing=True,
+        )
     _scheduler.add_job(
         tick_schedules,
         "interval",

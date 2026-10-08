@@ -27,6 +27,12 @@ from .market_snapshot_service import get_market_data_cache, put_market_data_cach
 
 SCHEMA_VERSION = "holdings-evidence-v1"
 _INTERNATIONAL = ("美国", "美联储", "美股", "欧盟", "欧洲", "欧央行", "日本", "日央行", "英国", "俄罗斯", "乌克兰", "伊朗", "以色列", "中东", "OPEC", "美债", "美元")
+# A transparent relevance shortlist, never a verified causal effect or trading rule.
+_EVENT_CHANNELS = (
+    (("原油", "OPEC", "中东", "能源"), ("石油", "能源", "航空", "航运", "化工"), "能源价格与供给", "需核对能源报价、成本占比及供给变化"),
+    (("美联储", "利率", "美债", "美元", "汇率"), ("银行", "金融", "出口", "科技", "有色"), "利率、汇率与估值", "需核对利率汇率、融资成本及收入币种"),
+    (("关税", "贸易", "制裁", "出口", "禁令"), ("半导体", "汽车", "机械", "电子", "出口"), "贸易成本与订单", "需核对政策原文、适用产品及出口收入"),
+)
 _TTL = {"quote": 90, "bars": 7 * 86400, "capital_flow": 86400, "factors": 86400,
         "valuation": 86400, "financials": 180 * 86400, "metadata": 30 * 86400,
         "announcement": 7 * 86400, "news": 3 * 86400, "international_event": 3 * 86400,
@@ -172,7 +178,9 @@ def project_unified_evidence(pack: dict[str, Any], as_of: Any) -> dict[str, Any]
     result["records"] = retained
     result["excluded"] = rejected
     result["as_of"] = cutoff.isoformat()
-    result["event_links"] = [link for link in result.get("event_links", []) if link.get("event_id") in retained and link.get("metadata_id") in retained]
+    result["event_links"] = [link for link in result.get("event_links", [])
+                             if retained.get(link.get("event_id"), {}).get("status") in {"available", "degraded"}
+                             and retained.get(link.get("metadata_id"), {}).get("status") in {"available", "degraded"}]
     result["gaps"] = [
         {"record_id": key, "code": row.get("code"), "kind": row["kind"], "reason": reason}
         for key, row in retained.items() for reason in row.get("gaps", [])
@@ -368,8 +376,41 @@ def _event_links(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             if direct or sectors:
                 links.append({"event_id": row["id"], "metadata_id": metadata["id"], "code": code,
                               "sectors": (sectors or metadata["sectors"]) if direct else sectors,
-                              "evidence_type": "inference", "method": "explicit_security_or_sector_mention", "causal_effect": "unverified"})
+                              "evidence_type": "inference", "method": "explicit_security_or_sector_mention", "causal_effect": "unverified",
+                              "impact_channel": "直接公司或行业事件", "required_checks": ["核对原始公告、事件时点及业务敞口"],
+                              "source_url": row.get("source_url"), "published_at": row.get("published_at")})
+            exposure_text = " ".join([str(name or ""), *metadata["sectors"]])
+            for triggers, affected, channel, checks in _EVENT_CHANNELS:
+                matched = [sector for sector in affected if sector in exposure_text]
+                if matched and any(trigger.casefold() in text.casefold() for trigger in triggers):
+                    links.append({"event_id": row["id"], "metadata_id": metadata["id"], "code": code,
+                                  "sectors": matched, "evidence_type": "inference", "method": "declared_transmission_channel",
+                                  "impact_channel": channel, "required_checks": [checks], "causal_effect": "unverified",
+                                  "direction": "requires_corroboration", "source_url": row.get("source_url"),
+                                  "published_at": row.get("published_at")})
     return links
+
+
+def attach_portfolio_exposures(snapshot: dict, holdings: list[dict], *, portfolio_context: dict | None = None) -> dict:
+    """Bind event hypotheses to this analysis's confirmed derived positions."""
+    pack = snapshot.get("unified_evidence")
+    if not isinstance(pack, dict):
+        return snapshot
+    positions = {normalize_security_code(row.get("code")): row for row in holdings}
+    weights = {normalize_security_code(row.get("code")): row.get("weight")
+               for row in (portfolio_context or {}).get("position_constraints", [])}
+    for link in pack.get("event_links", []):
+        position = positions.get(normalize_security_code(link.get("code")))
+        link["portfolio_exposure"] = {
+            "held": bool(position and (position.get("qty") or 0) > 0), "quantity": position.get("qty") if position else None,
+            "weight": weights.get(normalize_security_code(link.get("code"))),
+            "basis": "CONFIRMED_DERIVED_QUANTITY; FROZEN_CONSTRAINT_WEIGHT",
+            "weight_status": "available" if weights.get(normalize_security_code(link.get("code"))) is not None else "unknown",
+        }
+    pack = project_unified_evidence(pack, snapshot["captured_at"])
+    snapshot["unified_evidence"] = pack
+    snapshot["evidence_version"] = pack["evidence_version"]
+    return snapshot
 
 
 def merge_unified_evidence(first: dict[str, Any], addition: dict[str, Any], *, as_of: Any) -> dict[str, Any]:

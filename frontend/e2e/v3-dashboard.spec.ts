@@ -330,6 +330,9 @@ const ANALYSIS_DONE = {
 }
 
 async function mockAuthAndShell(page: Page): Promise<void> {
+  await page.route('**/api/v3/triggers/daily-plan**', route => route.fulfill({ json: { decision_status: 'INCOMPLETE', actions: [] } }))
+  await page.route('**/api/v3/portfolios/*/ledger**', route => route.fulfill({ json: [] }))
+  await page.route('**/api/v3/portfolios/*/memory/performance**', route => route.fulfill({ json: { account_return: {}, day_comparison: { changes: [] } } }))
   await page.addInitScript(() => {
     localStorage.setItem('advisor_v2_access_token', 'acceptance-v3-dashboard')
     localStorage.setItem('advisor_v2_refresh_token', 'acceptance-v3-dashboard-refresh')
@@ -637,7 +640,7 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByText('上一交易日收盘')).toHaveCount(0)
   })
 
-  test('blank analysis conclusion is MISSING, never NO_ACTION', async ({ acceptancePage: page }) => {
+  test('blank analysis conclusion is incomplete, never NO_ACTION', async ({ acceptancePage: page }) => {
     await mockAuthAndShell(page)
     await mockMarket(page)
     const blankAnalysis = {
@@ -664,8 +667,8 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     )
     await openDashboard(page)
     const hero = page.getByTestId('v3-decision-hero')
-    await expect(hero).toHaveAttribute('data-decision-kind', 'MISSING')
-    await expect(page.getByTestId('v3-decision-title')).toHaveText('暂无有效策略结论')
+    await expect(hero).toHaveAttribute('data-decision-kind', 'INCOMPLETE')
+    await expect(page.getByTestId('v3-decision-title')).toHaveText('分析未完成')
     await expect(page.getByText('今日无需操作')).toHaveCount(0)
   })
 

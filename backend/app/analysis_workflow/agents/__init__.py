@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..dag import ANALYST_ROLES, DEBATE_NODES, RISK_ROLES
 from ..resume import hash_input
 
-PROMPT_VERSION = "v3-core-3.2"
+PROMPT_VERSION = "v3-holdings-p4.2"
 
 ROLE_BOUNDARIES = {
     "market_analyst": (
@@ -67,11 +67,20 @@ ROLE_BOUNDARIES = {
 }
 
 
+class LearningUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hypothesis_id: int
+    applied: bool
+    effect: str = Field(min_length=1, max_length=1200)
+
+
 class PublicOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    learning_usage: list[LearningUsage] = Field(default_factory=list)
 
 
-class Finding(PublicOutput):
+class Finding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     instrument: str | None = None
     statement: str = Field(min_length=1)
     direction: Literal["positive", "negative", "neutral"]
@@ -96,7 +105,8 @@ class AnalystReport(PublicOutput):
     missing_checklist_fields: list[str] = Field(default_factory=list)
 
 
-class Claim(PublicOutput):
+class Claim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     statement: str = Field(min_length=1)
     evidence_refs: list[str] = Field(min_length=1, max_length=3)
     confidence: float = Field(ge=0, le=1)
@@ -110,7 +120,8 @@ class Position(PublicOutput):
     claims: list[Claim]
 
 
-class Resolution(PublicOutput):
+class Resolution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     claim_id: str
     status: Literal["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "UNRESOLVED"]
     rationale_summary: str
@@ -166,6 +177,7 @@ def agent_instruction(key: str) -> str:
         "evidence_refs must be exact entries from the supplied evidence_refs list. "
         "learning_context contains advisory historical hypotheses, not current market facts. "
         "Identify the hypothesis IDs you applied, their effect on your reasoning, and counterexamples or reasons they do not apply. "
+        "In learning_usage account for EVERY supplied hypothesis_id, applied true/false, and a concise public effect or non-applicability reason. "
         "An empty learning_context means no applicable experience; never invent learned rules or override current trading gates. "
         "Report conclusions in Chinese, with public rationale summaries only. "
         "Never output hidden chain-of-thought, scratchpads, orders or other roles' answers. "
@@ -200,6 +212,11 @@ def validate_output(key: str, raw: Any, payload: dict[str, Any]) -> bool:
     if "role" in parsed and parsed["role"] != role_for_node(key):
         return False
     references = set(payload.get("evidence_refs") or [])
+    learning = (payload.get("input") or {}).get("learning_context") or {}
+    expected = {item["id"] for item in learning.get("hypotheses", [])}
+    actual = [item["hypothesis_id"] for item in parsed.get("learning_usage", [])]
+    if set(actual) != expected or len(actual) != len(set(actual)):
+        return False
     for item in parsed.get("findings", parsed.get("claims", [])):
         if not set(item["evidence_refs"]) <= references:
             return False

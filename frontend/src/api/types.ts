@@ -1342,6 +1342,8 @@ export interface TradeLedgerEntry {
 }
 
 export interface PortfolioAccountPosition {
+  canonical_code?: string | null
+  security_type?: string | null
   code?: string | null
   name?: string | null
   qty?: number | null

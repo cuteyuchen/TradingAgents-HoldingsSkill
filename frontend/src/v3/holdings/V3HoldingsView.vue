@@ -3,7 +3,7 @@
  * V3 Holdings Workstation
  * 我持有什么？每个标的现在怎么样？什么条件下需要行动？
  */
-import { computed, defineAsyncComponent } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { Camera, RefreshCw } from 'lucide-vue-next'
 import V3EmptyState from '../components/V3EmptyState.vue'
 import V3ErrorState from '../components/V3ErrorState.vue'
@@ -19,6 +19,9 @@ import { useV3Holdings } from './useV3Holdings'
 const V3InstrumentDetailDrawer = defineAsyncComponent(
   () => import('../instrument-detail/V3InstrumentDetailDrawer.vue'),
 )
+const TradeLedgerDrawer = defineAsyncComponent(() => import('../../components/TradeLedgerDrawer.vue'))
+const PortfolioReviewPanel = defineAsyncComponent(() => import('../../components/PortfolioReviewPanel.vue'))
+const ledgerOpen = ref(false)
 
 const {
   portfolios,
@@ -28,6 +31,8 @@ const {
   portfoliosLoading,
   refreshing,
   currentSnapshotError,
+  accountState,
+  accountError,
   viewModel,
   setFilter,
   setSort,
@@ -45,6 +50,7 @@ const {
   sparklines,
   requestVisibleSparklines,
 } = useV3Holdings()
+watch(selectedPortfolioId, () => { ledgerOpen.value = false })
 
 const showInitialError = computed(() => Boolean(currentSnapshotError.value) && !viewModel.value.snapshotId)
 
@@ -94,6 +100,7 @@ async function onConfirmed(snapshotId: number): Promise<void> {
         />
       </template>
       <template #actions>
+        <button type="button" class="refresh-btn" data-testid="v3-holdings-trades" :disabled="!hasPortfolio" @click="ledgerOpen = true">记录实际成交</button>
         <button
           type="button"
           class="refresh-btn"
@@ -120,6 +127,8 @@ async function onConfirmed(snapshotId: number): Promise<void> {
     </V3PageHeader>
 
     <div class="holdings-meta">
+      <p v-if="accountState?.account_derivation?.entry_count" data-testid="v3-account-derived">数量与现金已按确认成交更新 · {{ accountState.account_derivation.entry_count }} 条账户记录 · 截至 {{ accountState.as_of }}</p>
+      <p v-if="accountError" role="alert" data-testid="v3-account-error">账户更新读取失败，当前数量来自最近确认快照，请刷新核对。</p>
       <V3HoldingContextStrip
         :snapshot-at="viewModel.timestamps.snapshotAt"
         :quote-at="viewModel.timestamps.quoteAt"
@@ -200,6 +209,8 @@ async function onConfirmed(snapshotId: number): Promise<void> {
       v-model="instrumentDrawerOpen"
       :code="selectedInstrumentCode"
     />
+    <PortfolioReviewPanel v-if="selectedPortfolioId" :key="selectedPortfolioId" :portfolio-id="selectedPortfolioId" :account-version="accountState?.account_version" />
+    <TradeLedgerDrawer v-if="ledgerOpen" :key="selectedPortfolioId || 0" v-model:show="ledgerOpen" :portfolio-id="selectedPortfolioId" @changed="refreshAll" />
   </div>
 </template>
 

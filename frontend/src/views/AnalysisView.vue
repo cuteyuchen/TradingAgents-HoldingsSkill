@@ -368,6 +368,12 @@ onUnmounted(() => {
           <div v-if="candidateVetoes.length" class="candidate-veto"><div><strong>Candidate Veto</strong><StatusBadge status="VETO" label="组合层未批准" /></div><p>候选达到行动标准，但组合层未批准。</p><ul><li v-for="(veto, index) in candidateVetoes" :key="veto.code || index">{{ veto.code || '候选' }}：{{ textValue(veto.reason || veto.message) || '组合约束未通过' }}</li></ul></div>
         </SectionCard>
 
+        <SectionCard title="历史经验如何影响本次分析" description="区分经验已提供与已采用；公开影响说明不代表因果证明。" data-testid="learning-usage-report">
+          <p v-if="!result.learning_usage_report?.supplied_ids?.length">本次没有适用的历史经验。</p>
+          <p v-else-if="!result.learning_usage_report?.items?.length">历史经验已提供，但本次未返回可核对的采用说明。</p>
+          <article v-for="(item, index) in result.learning_usage_report?.items || []" :key="`${item.hypothesis_id}-${item.role}-${index}`"><strong>{{ item.role }} · 修订 {{ item.revision }} · {{ item.applied ? '采用' : '未采用' }}</strong><p>{{ item.statement }}</p><p>{{ item.effect }}</p></article>
+        </SectionCard>
+
         <TechnicalDetails title="查看详细证据与量化指标" name="analysis-technical">
           <div class="advanced-list"><div v-for="([key, value]) in advancedEntries" :key="key"><span>{{ key }}</span><strong>{{ typeof value === 'object' ? JSON.stringify(value) : value }}</strong></div></div>
           <pre>{{ JSON.stringify({ result, market_snapshot: market, quality_gate: qualityGate }, null, 2) }}</pre>

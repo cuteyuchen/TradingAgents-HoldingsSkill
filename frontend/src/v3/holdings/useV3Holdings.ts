@@ -13,6 +13,7 @@ import type {
   DailyDashboard,
   MarketSessionResponse,
   PortfolioSnapshot,
+  PortfolioAccountState,
 } from '../../api/types'
 import { usePortfolioContext } from '../../composables/portfolio'
 import type {
@@ -82,6 +83,8 @@ export function useV3Holdings() {
 
   const session = ref<MarketSessionResponse | null>(null)
   const snapshot = ref<PortfolioSnapshot | null>(null)
+  const accountState = ref<PortfolioAccountState | null>(null)
+  const accountError = ref<unknown>(null)
   const snapshotOwnerId = ref<number | null>(null)
   const snapshotError = ref<unknown>(null)
   const snapshotErrorOwnerId = ref<number | null>(null)
@@ -135,16 +138,14 @@ export function useV3Holdings() {
   const quoteCoverage = computed<number | null>(() => {
     const snap = snapshotOwnerId.value === selectedPortfolioId.value ? snapshot.value : null
     if (!snap) return null
-    const holdings = snap.holdings || []
-    const resolved = holdings.filter((item) => item.resolution_status === 'RESOLVED' && (item.canonical_code || item.code))
-    if (!resolved.length) return null
+    const codes = resolvedQuoteCodes()
+    if (!codes.length) return null
     const map = quotesOwnerId.value === selectedPortfolioId.value ? quotes.value : new Map<string, V3QuoteVM>()
-    const covered = resolved.filter((item) => {
-      const key = item.canonical_code || item.code || ''
+    const covered = codes.filter((key) => {
       const quote = map.get(key) || map.get(String(key).split('.')[0])
       return Boolean(quote && quote.last !== null && quote.status !== 'MISSING')
     })
-    return covered.length / resolved.length
+    return covered.length / codes.length
   })
 
   const currentSnapshot = computed<PortfolioSnapshot | null>(() => {
@@ -180,6 +181,7 @@ export function useV3Holdings() {
       portfolioId: selectedPortfolioId.value,
       portfolioName: selectedPortfolio.value?.name || null,
       snapshot: currentSnapshot.value,
+      accountState: accountState.value?.portfolio_id === selectedPortfolioId.value && accountState.value?.snapshot_id === currentSnapshot.value?.id ? accountState.value : null,
       dashboard: currentDashboard.value,
       quotes: currentQuotes.value,
       quotesAsOf: quotesOwnerId.value === selectedPortfolioId.value ? quotesAsOf.value : null,
@@ -253,10 +255,15 @@ export function useV3Holdings() {
     }
     if (!silent) snapshotLoading.value = true
     try {
-      const data = await api.getSnapshot(portfolio.latest_snapshot_id, ctx.signal)
+      const [data, state] = await Promise.all([
+        api.getSnapshot(portfolio.latest_snapshot_id, ctx.signal),
+        api.getPortfolioState(portfolioId, ctx.signal).then(value => ({ value, error: null as unknown })).catch(error => ({ value: null, error })),
+      ])
       if (!isCurrent(slotSnapshot, ctx.seq)) return
       if (selectedPortfolioId.value !== portfolioId) return
       snapshot.value = data
+      accountState.value = state.value
+      accountError.value = state.error
       snapshotOwnerId.value = portfolioId
       snapshotError.value = null
       snapshotErrorOwnerId.value = null
@@ -311,6 +318,14 @@ export function useV3Holdings() {
       const code = (item.canonical_code || item.code || '').trim()
       if (!code) continue
       if (seen.has(code)) continue
+      seen.add(code)
+      codes.push(code)
+    }
+    const state = accountState.value?.portfolio_id === selectedPortfolioId.value && accountState.value?.snapshot_id === snap.id ? accountState.value : null
+    for (const position of state?.positions || []) {
+      // Only the server's resolved identity can add a ledger-only instrument.
+      const code = position.canonical_code?.trim()
+      if (!code || !position.qty || position.qty < 0 || seen.has(code)) continue
       seen.add(code)
       codes.push(code)
     }
@@ -566,6 +581,8 @@ export function useV3Holdings() {
     if (id === previous) return
     // Drop prior portfolio errors so A never surfaces as B.
     snapshotError.value = null
+    accountState.value = null
+    accountError.value = null
     snapshotErrorOwnerId.value = null
     dashboardError.value = null
     dashboardErrorOwnerId.value = null
@@ -626,6 +643,8 @@ export function useV3Holdings() {
     sessionError,
     snapshotLoading,
     currentSnapshotError,
+    accountState,
+    accountError,
     dashboardLoading,
     currentDashboardError,
     quotesLoading,

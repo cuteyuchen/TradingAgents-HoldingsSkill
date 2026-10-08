@@ -57,8 +57,8 @@ onUnmounted(() => { sequence++; controller?.abort() })
 
 <template>
   <SectionCard :title="compact ? '昨日执行与今日变化' : '真实账户与建议复盘'" :description="review ? `${review.previous_trade_date || '上一交易日'} → ${review.trade_date} · 截至 ${fmtDateTime(review.as_of)}` : '根据已确认持仓与成交核算，缺少事实时保留待补齐状态。'">
-    <template #actions><n-button size="small" secondary @click="load">刷新复盘</n-button><n-button v-if="!compact" size="small" :loading="busy" @click="refreshLearning">评估到期建议</n-button></template>
-    <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
+    <template #actions><q-btn size="sm" outline @click="load">刷新复盘</q-btn><q-btn v-if="!compact" size="sm" outline :loading="busy" @click="refreshLearning">评估到期建议</q-btn></template>
+    <q-banner v-if="error" role="alert">{{ error }}</q-banner>
     <template v-else-if="review">
       <div class="review-metrics"><MetricTile label="当日账户净收益" :value="money(account.net_pnl)" helper="剔除出入金" /><MetricTile label="当日收益率" :value="percent(account.return_rate)" /><MetricTile label="已实现盈亏" :value="money(account.realized_pnl)" helper="自成本基准起，移动加权成本" /><MetricTile label="未实现盈亏" :value="money(account.unrealized_pnl)" /></div>
       <p v-if="account.status !== 'COMPLETE' && account.status !== 'READY' && account.status !== 'VALID'" class="review-note">账户资料尚不完整，缺失指标保持待补齐。{{ (account.reason_codes || []).join(' · ') }}</p>
@@ -68,10 +68,13 @@ onUnmounted(() => { sequence++; controller?.abort() })
         <div class="review-metrics secondary-metrics"><MetricTile label="交易费用" :value="money(account.fees)" /><MetricTile label="税费" :value="money(account.taxes)" /><MetricTile label="股息" :value="money(account.dividends)" /><MetricTile label="转入 / 转出" :value="`${money(account.cash_in)} / ${money(account.cash_out)}`" /></div>
         <h3>建议效果</h3><p class="review-note">建议后的市场表现单独评估；未成交不计入真实收益，条件未触发不直接视为预测失败。</p>
         <div v-if="review.recommendation_effect?.items?.length" class="outcome-list"><article v-for="(item, index) in review.recommendation_effect.items" :key="item.id || index"><strong>{{ item.code || item.target_key || '组合' }}</strong><span>{{ item.horizon_days || item.horizon || '—' }} 交易日</span><span>{{ percent(item.direction_adjusted_return ?? item.raw_return ?? item.market_return) }}</span><span>{{ item.status || item.quality_status || '等待评估' }}</span></article></div><p v-else class="review-note">暂无到期且数据完整的建议样本。</p>
-        <h3>自学习经验</h3><p class="review-note">经验通过后续独立样本检验后调整参考状态。经验不会自动修改模型权重和仓位上限。</p>
-        <article v-for="item in hypotheses" :key="item.id || item.hypothesis_id" class="learning-item"><div><strong>{{ hypothesisTitle(item) }}</strong><n-tag size="small" :bordered="false">{{ learningStatus(item.status) }}</n-tag></div><p>{{ scopeText(item) }}</p><small>版本 {{ item.version ?? '—' }} · 可用时间 {{ item.available_at ? fmtDateTime(item.available_at) : '待确认' }}</small><TechnicalDetails title="支持证据、反例与检验结果"><pre>{{ JSON.stringify(item, null, 2) }}</pre></TechnicalDetails></article>
+        <h3>四维复盘</h3><p class="review-note">可追溯不代表正确；建议后的涨跌不能单独证明当时逻辑错误。</p>
+        <article v-for="item in review.review_dimensions?.items || []" :key="`${item.decision_memory_id}-${item.code}`" class="learning-item"><strong>{{ item.code }} · {{ action(item.action) }}</strong><p>事实 {{ item.fact_status }} · 逻辑 {{ item.logic_status }} · 执行 {{ item.execution_status }} · 市场结果 {{ item.market_result_status }}</p><small>已关联成交 {{ item.filled_quantity ?? 0 }} 股 · 条件 {{ item.condition_status }}</small></article>
+        <h3>自学习经验</h3><p class="review-note">经验通过后续独立样本检验后调整参考状态。经验不会自动修改模型权重和仓位上限。成对决策回放使用冻结证据，对比有经验与无经验的公开决策；展示的毛收益贡献未计费用，不是真实账户收益或因果证明。</p>
+        <article v-for="item in hypotheses" :key="item.id || item.hypothesis_id" class="learning-item"><div><strong>{{ hypothesisTitle(item) }}</strong><q-badge outline color="primary">{{ learningStatus(item.status) }}</q-badge></div><p>{{ scopeText(item) }}</p><small>版本 {{ item.version ?? '—' }} · 可用时间 {{ item.available_at ? fmtDateTime(item.available_at) : '待确认' }}</small><TechnicalDetails native title="支持证据、反例与检验结果"><pre>{{ JSON.stringify(item, null, 2) }}</pre></TechnicalDetails></article>
+        <p v-for="item in hypotheses" :key="`validation-${item.id}`" class="review-note">修订 {{ item.revision }} · 独立样本 {{ item.validation?.sample_count ?? 0 }} · 无经验 {{ percent(item.validation?.baseline_mean_return) }} · 有经验 {{ percent(item.validation?.learned_mean_return) }}<span v-if="item.validation?.pending_reason"> · 待补齐：{{ item.validation.pending_reason }}</span></p>
         <p v-if="!hypotheses.length" class="review-note">暂无可用经验，继续积累复盘样本。</p>
-        <TechnicalDetails title="模拟对照、复盘维度与账户核算明细"><pre>{{ JSON.stringify({ account, simulation: review.simulation_comparison, dimensions: review.review_dimensions, weekly: review.weekly_review }, null, 2) }}</pre></TechnicalDetails>
+        <TechnicalDetails native title="模拟对照、复盘维度与账户核算明细"><pre>{{ JSON.stringify({ account, simulation: review.simulation_comparison, dimensions: review.review_dimensions, weekly: review.weekly_review }, null, 2) }}</pre></TechnicalDetails>
       </template>
     </template>
     <p v-else>正在读取账户与复盘记录…</p>

@@ -26,7 +26,7 @@ from ..decision_contract import (
     should_normalize_no_action,
 )
 from ..memory.service import current_memory_features, memory_context_for_analysis
-from ..memory.learning import build_learning_context, record_learning_references
+from ..memory.learning import build_learning_context, record_learning_references, learning_usage_report
 from ..portfolio.account import build_account_state
 from ..portfolio.decision_gate import apply_portfolio_decision_gate
 from ..portfolio.service import portfolio_context_for_analysis
@@ -34,6 +34,7 @@ from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapsho
 from .holding_identity import UnresolvedSecurityIdentityError, snapshot_identity_issues
 from .market_data import normalize_code
 from .instrument_market_evidence import collect_market_snapshot, enrich_candidate_evidence, refresh_snapshot_quotes
+from .unified_evidence import attach_portfolio_exposures
 from .model_client import StructuredModelResult, call_model, call_model_json, model_cancellation, parse_json_result
 from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_metadata, runtime_prompt
@@ -1408,6 +1409,12 @@ def render_markdown(result: dict[str, Any], market: dict[str, Any], snapshot: di
     else:
         lines.append("| 未提供 | 不通过 |")
 
+    usage = result.get("learning_usage_report") or {}
+    lines.extend(["", "## 历史经验如何影响本次分析", ""])
+    for item in usage.get("items", []):
+        lines.append(f"- 经验 #{item['hypothesis_id']} · {item['role']} · {'参考' if item['applied'] else '未采用'}：{_md(item['effect'])}")
+    if not usage.get("items"):
+        lines.append("暂无适用经验。" if not usage.get("supplied_ids") else "经验已提供给分析，使用效果尚未明确报告。")
     lines.extend(["", "## 多空辩论", ""])
     for round_item in _as_items(investment.get("round_summaries")):
         if isinstance(round_item, dict):
@@ -1752,7 +1759,7 @@ def run_analysis_job(job_id: int) -> None:
             market = audit.load_node_output("market_snapshot_collector") or {}
         else:
             _job_stage(db, job, "market_collecting", 20)
-            market = copy.deepcopy(frozen_input["market"]) if frozen_input is not None else collect_market_snapshot(codes)
+            market = copy.deepcopy(frozen_input["market"]) if frozen_input is not None else attach_portfolio_exposures(collect_market_snapshot(codes), snapshot["holdings"])
             audit.record_artifact(ArtifactType.MARKET_SNAPSHOT, market, artifact_key="market_snapshot")
             _audit_simple_node(audit, "market_snapshot_collector", output=market, artifact_type=ArtifactType.MARKET_SNAPSHOT)
             captured_at = market.get("captured_at") if isinstance(market, dict) else None
@@ -1804,6 +1811,8 @@ def run_analysis_job(job_id: int) -> None:
                 for row in candidate_context.get(stage) or [] if row.get("code")
             ))
             market = enrich_candidate_evidence(market, candidate_codes)
+        if frozen_input is None:
+            market = attach_portfolio_exposures(market, snapshot["holdings"], portfolio_context=portfolio_context)
         workflow["evidence_version"] = market.get("evidence_version")
         memory_context = frozen_input["memory_context"] if frozen_input is not None else memory_context_for_analysis(
             db,
@@ -2394,6 +2403,7 @@ def run_analysis_job(job_id: int) -> None:
         final["evidence_version"] = market.get("evidence_version")
         final["learning_context_id"] = learning_context.get("context_id")
         final["learning_references"] = learning_context.get("ref_ids", [])
+        final["learning_usage_report"] = learning_usage_report(db, analysis_job_id=job.id, context=learning_context)
         final["account_version"] = (
             (workflow.get("portfolio_context") or {}).get("account_version")
             or snapshot.get("account_version")

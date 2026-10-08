@@ -4,6 +4,7 @@
  * Missing never becomes 0. Frontend never invents BUY/SELL/REDUCE/ADD.
  */
 import type { DailyDashboard, Holding, PortfolioSnapshot } from '../../api/types'
+import { dashboardDecisionSource, dashboardDecisionState, decisionLabel, decisionSummary } from '../../utils/decision'
 import type {
   BuildHoldingsInput,
   V3HoldingDecisionVM,
@@ -78,6 +79,8 @@ export function normalizeHoldingStatus(raw: unknown): V3HoldingStatus {
     case 'no-action':
       return 'HOLD'
     case 'watch':
+    case 'watch_only':
+    case 'waiting':
       return 'WATCH'
     case 'conditional_add':
       return 'CONDITIONAL_ADD'
@@ -137,24 +140,24 @@ export function judgmentRank(status: V3HoldingStatus): number {
 }
 
 function decisionConclusion(dashboard: DailyDashboard | null): string | null {
-  const latest = dashboard?.decisions?.latest
-  if (!latest) return null
+  const latest = dashboardDecisionSource(dashboard)
   return strOrNull(latest.conclusion)
 }
 
 function decisionQuality(dashboard: DailyDashboard | null): string | null {
-  return strOrNull(dashboard?.decisions?.latest?.quality)
+  return strOrNull(dashboardDecisionSource(dashboard).quality)
 }
 
 function decisionSnapshotId(dashboard: DailyDashboard | null): number | null {
-  return numOrNull(dashboard?.decisions?.latest?.portfolio_snapshot_id)
+  return numOrNull(dashboardDecisionSource(dashboard).portfolio_snapshot_id)
 }
 
 function decisionAt(dashboard: DailyDashboard | null): string | null {
-  return strOrNull(dashboard?.decisions?.latest?.decision_at)
+  return strOrNull(dashboardDecisionSource(dashboard).decision_at)
 }
 
 function portfolioHoldingAction(dashboard: DailyDashboard | null, code: string, canonicalCode: string | null): string | null {
+  if (dashboardDecisionSource(dashboard) !== dashboard?.decisions?.latest) return null
   const holdings = (dashboard?.portfolio as { holdings?: Array<Record<string, any>> } | undefined)?.holdings || []
   const short = code.split('.')[0]
   const candidates = holdings.filter((row) => {
@@ -171,8 +174,7 @@ function portfolioHoldingAction(dashboard: DailyDashboard | null, code: string, 
 }
 
 function decisionHoldingAction(dashboard: DailyDashboard | null, code: string, canonicalCode: string | null): { action: string | null; trigger: string | null; reason: string | null } {
-  const latest = dashboard?.decisions?.latest
-  if (!latest) return { action: null, trigger: null, reason: null }
+  const latest = dashboardDecisionSource(dashboard)
   const actions = Array.isArray(latest.holding_actions) ? latest.holding_actions as Array<Record<string, any>> : []
   const short = code.split('.')[0]
   const matched = actions.filter((row) => {
@@ -214,7 +216,8 @@ export function resolveRowJudgment(input: {
   const { holding, dashboard, snapshotId } = input
   const canonicalCode = strOrNull(holding.canonical_code)
   const code = strOrNull(holding.code) || ''
-  const latest = dashboard?.decisions?.latest || null
+  const source = dashboardDecisionSource(dashboard)
+  const latest = Object.keys(source).length ? source : null
   const quality = decisionQuality(dashboard)
   const conclusion = decisionConclusion(dashboard)
   const decisionSnap = decisionSnapshotId(dashboard)
@@ -230,6 +233,12 @@ export function resolveRowJudgment(input: {
   const dashboardAction = portfolioHoldingAction(dashboard, code, canonicalCode)
   const hardCap = numOrNull(riskRow?.hard_cap)
   const headroom = numOrNull(riskRow?.headroom)
+  const decisionState = dashboardDecisionState(dashboard)
+  if (latest && !unbound && ['EXPIRED', 'DATA_GAP', 'INCOMPLETE', 'UNKNOWN'].includes(decisionState)) {
+    return { status: 'DATA_INSUFFICIENT', label: decisionLabel(decisionState), secondary: decisionSummary(decisionState),
+      rawAction: null, decisionAt: decisionTime, strategyQuality: quality, decisionSnapshotId: decisionSnap,
+      keyTrigger: null, riskFlags, hardCap, headroom, strategyStatus: decisionState === 'EXPIRED' ? 'STALE_SNAPSHOT' : 'MISSING' }
+  }
 
   let strategyStatus: V3StrategyStatus = 'MISSING'
   let status: V3HoldingStatus = 'DATA_INSUFFICIENT'
@@ -386,7 +395,7 @@ function buildSummary(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3Hold
   if (!snapshot) return null
   const portfolio = dashboard?.portfolio
   const totalAssets = numOrNull(snapshot.total_assets) ?? numOrNull(portfolio?.total_assets)
-  const cash = numOrNull(snapshot.broker_available_cash) ?? numOrNull(portfolio?.spendable_cash)
+  const cash = input.accountState ? numOrNull(input.accountState.cash) : numOrNull(snapshot.broker_available_cash) ?? numOrNull(portfolio?.spendable_cash)
   const snapshotMv = numOrNull(snapshot.total_market_value)
   const resolvedRows = rows.filter((row) => !row.unresolved)
   const quotedRows = resolvedRows.filter((row) => row.quote && row.quote.status !== 'MISSING')
@@ -421,7 +430,7 @@ function buildSummary(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3Hold
 
   const actionable = rows.filter((row) => isActionableStatus(row.judgment.status)).length
   const strategyState = dashboard?.decisions?.latest
-    ? (actionable ? `需处理 ${actionable}` : '无需处理')
+    ? (actionable ? `需处理 ${actionable}` : decisionLabel(dashboardDecisionState(dashboard)))
     : '策略不可用'
 
   return {
@@ -465,7 +474,8 @@ function buildDecisionBar(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3
       riskFlags: [],
     }
   }
-  const latest = dashboard?.decisions?.latest || null
+  const source = dashboardDecisionSource(dashboard)
+  const latest = Object.keys(source).length ? source : null
   const decisionSnap = decisionSnapshotId(dashboard)
   const quality = decisionQuality(dashboard)
   const conclusion = decisionConclusion(dashboard)
@@ -619,7 +629,19 @@ function sortRows(rows: V3HoldingRowVM[], sort: V3HoldingSort): V3HoldingRowVM[]
 
 export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsViewModel {
   const snapshot = input.snapshot
-  const holdings: Holding[] = Array.isArray(snapshot?.holdings) ? snapshot!.holdings : []
+  const originals: Holding[] = Array.isArray(snapshot?.holdings) ? snapshot!.holdings : []
+  const state = input.accountState
+  const key = (value: unknown) => String(value || '').toUpperCase().split('.')[0]
+  const holdings: Holding[] = originals.map(holding => {
+    const derived = state?.positions.find(item => key(item.code) === key(holding.canonical_code || holding.code))
+    return derived ? { ...holding, qty: derived.qty, available_qty: derived.available_qty } : holding
+  })
+  for (const position of state?.positions || []) {
+    if (!position.code || holdings.some(item => key(item.code) === key(position.code)) || position.qty === 0) continue
+    holdings.push({ code: position.code, name: position.name, qty: position.qty, available_qty: position.available_qty,
+      canonical_code: typeof position.canonical_code === 'string' ? position.canonical_code : null,
+      resolution_status: position.canonical_code ? 'RESOLVED' : 'UNRESOLVED', asset_type: String(position.security_type || 'UNKNOWN') })
+  }
   const portfolioCanonicals = new Map<string, number>()
   for (const holding of holdings) {
     const key = (strOrNull(holding.canonical_code) || strOrNull(holding.code) || '').split('.')[0]
@@ -632,15 +654,16 @@ export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsVie
     const unresolved = holding.resolution_status !== 'RESOLVED' || !canonicalCode
     const qty = numOrNull(holding.qty)
     const availableQty = numOrNull(holding.available_qty)
-    const cost = numOrNull(holding.cost)
-    const snapshotMarketValue = numOrNull(holding.market_value)
-    const snapshotWeight = numOrNull(holding.weight)
-    const snapshotPnlRatio = numOrNull(holding.pnl)
-    const snapshotPnlAmount = numOrNull(holding.pnl_amount)
+    const changed = Boolean(state && Number(state.positions.find(item => key(item.code) === key(code))?.qty_delta || 0) !== 0)
+    const cost = changed ? null : numOrNull(holding.cost)
+    const snapshotMarketValue = changed ? null : numOrNull(holding.market_value)
+    const snapshotWeight = changed ? null : numOrNull(holding.weight)
+    const snapshotPnlRatio = changed ? null : numOrNull(holding.pnl)
+    const snapshotPnlAmount = changed ? null : numOrNull(holding.pnl_amount)
     const quote = joinQuote(holding, input.quotes, portfolioCanonicals)
     const usableQuote = Boolean(quote && quote.last !== null && !unresolved)
     const liveMarketValueEstimate = usableQuote && qty !== null ? (quote!.last as number) * qty : null
-    const dayPnlEstimate = usableQuote && qty !== null && quote!.prevClose !== null && quote!.last !== null
+    const dayPnlEstimate = !changed && usableQuote && qty !== null && quote!.prevClose !== null && quote!.last !== null
       ? (quote!.last - quote!.prevClose) * qty
       : null
     const markedPnlEstimate = usableQuote && qty !== null && cost !== null && quote!.last !== null
@@ -694,6 +717,15 @@ export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsVie
   const sorted = sortRows(rows, input.sort)
   const filtered = filterRows(sorted, input.filter)
   const identityIncomplete = Boolean(snapshot?.identity_status && snapshot.identity_status !== 'RESOLVED')
+  const decision = buildDecisionBar(input, rows)
+  const decisionState = dashboardDecisionState(input.dashboard)
+  if (decision.kind !== 'NO_PORTFOLIO' && decision.kind !== 'STALE_SNAPSHOT' && decision.kind !== 'MISSING'
+    && ['WAITING', 'EXPIRED', 'DATA_GAP', 'INCOMPLETE', 'UNKNOWN'].includes(decisionState)) {
+    decision.kind = decisionState as typeof decision.kind
+    decision.title = decisionLabel(decisionState)
+    decision.subtitle = decisionSummary(decisionState)
+    decision.actionableCount = 0
+  }
 
   return {
     hasPortfolio: input.hasPortfolio,
@@ -706,7 +738,7 @@ export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsVie
     noSnapshot: Boolean(input.hasPortfolio && !snapshot),
     timestamps: buildTimestamps(input),
     summary: buildSummary(input, rows),
-    decision: buildDecisionBar(input, rows),
+    decision,
     rows: filtered,
     filter: input.filter,
     sort: input.sort,

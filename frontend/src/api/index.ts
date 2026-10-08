@@ -297,7 +297,7 @@ export const api = {
   listSnapshots: (portfolioId: number) => request<PortfolioSnapshot[]>(`/api/v2/portfolios/${portfolioId}/snapshots`),
   getSnapshot: (id: number, signal?: AbortSignal) => request<PortfolioSnapshot>(`/api/v2/snapshots/${id}`, { signal }),
 
-  getPortfolioState: (portfolioId: number) => request<PortfolioAccountState>(`/api/v3/portfolios/${portfolioId}/state`),
+  getPortfolioState: (portfolioId: number, signal?: AbortSignal) => request<PortfolioAccountState>(`/api/v3/portfolios/${portfolioId}/state`, { signal }),
   listLedgerEntries: (portfolioId: number) => request<TradeLedgerEntry[]>(`/api/v3/portfolios/${portfolioId}/ledger`),
   createLedgerEntry: (portfolioId: number, payload: Record<string, unknown>) =>
     request<TradeLedgerEntry>(`/api/v3/portfolios/${portfolioId}/ledger`, { method: 'POST', body: payload }),

@@ -60,7 +60,7 @@ def _watch(row: dict[str, Any], reason: str) -> None:
     _append_reason(row, reason)
 
 
-def _candidate_quote_reasons(code: str, quote: dict[str, Any]) -> list[str]:
+def _candidate_quote_reasons(code: str, quote: dict[str, Any], *, as_of=None) -> list[str]:
     if not quote:
         return ["QUOTE_MISSING"]
     if not code or normalize_security_code(quote.get("canonical_code") or quote.get("code")) != code:
@@ -85,7 +85,7 @@ def _candidate_quote_reasons(code: str, quote: dict[str, Any]) -> list[str]:
     fetched = _coerce_datetime(quote.get("fetched_at"))
     if observed is None or fetched is None:
         return ["QUOTE_TIME_MISSING"]
-    now = utc_now()
+    now = as_of or utc_now()
     observed_age = (now - observed).total_seconds()
     fetched_age = (now - fetched).total_seconds()
     if observed_age < -5 or fetched_age < -5:
@@ -113,6 +113,7 @@ def apply_portfolio_decision_gate(
     result: dict[str, Any],
     *,
     portfolio_context: dict[str, Any],
+    as_of=None,
 ) -> dict[str, Any]:
     """Constrain normalized LLM actions while preserving requested values for audit."""
 
@@ -375,7 +376,7 @@ def apply_portfolio_decision_gate(
             if execution_quotes_required:
                 quote = execution_quotes.get(code) if isinstance(execution_quotes, dict) else None
                 quote = quote if isinstance(quote, dict) else {}
-                reasons.extend(_candidate_quote_reasons(code, quote))
+                reasons.extend(_candidate_quote_reasons(code, quote, as_of=as_of))
                 candidate.update(
                     price=quote.get("price"), current_price=quote.get("price"),
                     security_type=quote.get("security_type"), instrument_status=quote.get("instrument_status"),
