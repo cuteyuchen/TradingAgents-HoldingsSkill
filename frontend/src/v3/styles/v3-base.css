@@ -1,0 +1,55 @@
+/**
+ * V3 base styles — 仅作用于 .v3-root 作用域，避免破坏 Legacy Naive 页面。
+ */
+
+.v3-root {
+  min-height: 100dvh;
+  background: var(--v3-bg);
+  color: var(--v3-text);
+  font-family: var(--v3-font-sans);
+  font-size: var(--v3-font-size-lg);
+  line-height: var(--v3-line-height);
+}
+
+/* 金融数字：等宽数字，避免跳动 */
+.v3-number,
+.v3-root .v3-number {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* 方向色语义类 */
+.v3-root .text-market-up { color: var(--v3-market-up); }
+.v3-root .text-market-down { color: var(--v3-market-down); }
+.v3-root .text-market-flat { color: var(--v3-market-flat); }
+.v3-root .text-status-info { color: var(--v3-status-info); }
+.v3-root .text-status-success { color: var(--v3-status-success); }
+.v3-root .text-status-warning { color: var(--v3-status-warning); }
+.v3-root .text-status-danger { color: var(--v3-status-danger); }
+.v3-root .text-status-blocked { color: var(--v3-status-blocked); }
+.v3-root .text-risk-low { color: var(--v3-risk-low); }
+.v3-root .text-risk-medium { color: var(--v3-risk-medium); }
+.v3-root .text-risk-high { color: var(--v3-risk-high); }
+.v3-root .text-risk-unknown { color: var(--v3-risk-unknown); }
+
+/* 可访问性：跳过链接 */
+.v3-root .v3-skip-link {
+  position: fixed;
+  z-index: var(--v3-z-tooltip);
+  top: -50px;
+  left: 14px;
+  border-radius: var(--v3-radius-sm);
+  background: var(--v3-primary);
+  padding: 8px 12px;
+  color: var(--v3-text-inverse);
+  text-decoration: none;
+}
+.v3-root .v3-skip-link:focus {
+  top: 10px;
+}
+
+/* 焦点可见 */
+.v3-root :focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--v3-primary) 70%, transparent);
+  outline-offset: 2px;
+}

@@ -42,7 +42,7 @@ test('Ownership returns a non-leaking not-found response for another user', asyn
   await expect(page.locator('.metric-grid.six .metric-tile').filter({ hasText: '样本天数' }).locator('strong')).toHaveText('—')
 })
 
-test('Backend error renders ErrorState and retry recovers without clearing the session', async ({ acceptancePage: page, facts }) => {
+test('Backend error renders localized portfolio failure and retry recovers without clearing the session', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   allowExpectedHttpError(page, 500)
   let shouldFail = true
@@ -52,11 +52,16 @@ test('Backend error renders ErrorState and retry recovers without clearing the s
   })
   await page.goto('/holdings')
   await page.goto('/dashboard')
-  await expect(page.getByRole('alert').filter({ hasText: '数据暂时加载失败' })).toBeVisible()
+  // Localized portfolio failure — market modules remain visible; no legacy full-page ErrorState.
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
+  await expect(page.getByTestId('v3-portfolio-error')).toBeVisible()
+  await expect(page.getByTestId('v3-error-state')).toHaveCount(0)
   shouldFail = false
-  await page.getByRole('button', { name: '重试', exact: true }).click()
+  await page.getByTestId('v3-portfolio-retry').click()
   await expect(page.getByRole('heading', { name: /今天/ })).toBeVisible()
+  await expect(page.getByTestId('v3-portfolio-total-assets')).toBeVisible({ timeout: 15_000 })
   await expect(page.evaluate(() => Boolean(localStorage.getItem('advisor_v2_refresh_token')))).resolves.toBe(true)
+  await expect(page.getByTestId('v3-session-label')).toBeVisible()
   await page.unroute('**/api/v3/portfolios/*/dashboard/today')
 })
 

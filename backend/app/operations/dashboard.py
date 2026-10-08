@@ -644,6 +644,8 @@ def _decision_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
             "confidence": latest.confidence,
             "analysis_run_id": latest.analysis_run_id,
             "decision_source": "DECISION_MEMORY",
+            # Additive read-model: UI must not apply holding actions to a different snapshot.
+            "portfolio_snapshot_id": latest.portfolio_snapshot_id,
         }
     if analysis is None:
         analysis = _analysis_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff)

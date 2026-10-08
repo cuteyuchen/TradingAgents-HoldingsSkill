@@ -918,6 +918,7 @@ def test_dashboard_historical_as_of_does_not_expose_later_analysis_or_review_com
             portfolio_id=portfolio.id,
             analysis_run_id=run.id,
             analysis_job_id=job.id,
+            portfolio_snapshot_id=snapshot.id,
             trade_date=date(2026, 8, 20),
             decision_at=_utc_naive(decision_at),
             available_at=_utc_naive(decision_at),
@@ -969,6 +970,7 @@ def test_dashboard_historical_as_of_does_not_expose_later_analysis_or_review_com
         )
         assert after_completion["analysis"]["latest"]["analysis_run_id"] == run.id
         assert after_completion["decisions"]["latest"]["analysis_run_id"] == run.id
+        assert after_completion["decisions"]["latest"]["portfolio_snapshot_id"] == snapshot.id
         assert after_completion["memory"]["review"]["status"] == "COMPLETED"
         assert after_completion["quote_as_of"] == _utc_naive(quote_at).isoformat()
         assert after_completion["strategy_analysis_at"] == _utc_naive(completed_at).isoformat()

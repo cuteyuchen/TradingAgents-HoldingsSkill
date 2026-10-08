@@ -6,8 +6,8 @@ test('Auth happy path, logout, and both session expiry branches', async ({ accep
   await captureScreenshot(page, 'login')
 
   await login(page, facts.users.a)
-  await expect(page.locator('header.topbar')).not.toContainText(facts.users.a.email)
-  await expect(page.getByText('今日市场', { exact: true })).toBeVisible()
+  await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).not.toContainText(facts.users.a.email)
+  await expect(page.getByRole('heading', { name: '六大指数' })).toBeVisible()
   await captureScreenshot(page, 'dashboard-authenticated')
 
   await page.getByRole('button', { name: '退出登录' }).click()
