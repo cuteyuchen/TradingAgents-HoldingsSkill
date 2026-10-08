@@ -8,8 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-WORKFLOW_VERSION = "v3-core-3"
-LEGACY_WORKFLOW_VERSION = "v3-core-2"
+WORKFLOW_VERSION = "v3-holdings-p4-1"
+LEGACY_WORKFLOW_VERSION = "v3-holdings-p4-legacy-1"
 DEFAULT_NODE_MAX_ATTEMPTS = 3
 
 
@@ -245,15 +245,8 @@ LEGACY_PHASES: tuple[PhaseSpec, ...] = (
         nodes=(_node("risk_debate_legacy", node_type="debate", agent_role="risk_committee", criticality=Criticality.IMPORTANT, llm=True, retryable=True),),
     ),
     PhaseSpec(
-        phase_key="final_quote_refresh",
-        phase_order=100,
-        display_name="Final Quote Refresh",
-        criticality=Criticality.MANDATORY,
-        nodes=(_node("final_quote_refresh", node_type="market", agent_role="system", criticality=Criticality.MANDATORY),),
-    ),
-    PhaseSpec(
         phase_key="candidate_screening",
-        phase_order=110,
+        phase_order=100,
         display_name="Candidate Screening",
         criticality=Criticality.MANDATORY,
         checkpoint=CheckpointName.CANDIDATES_DONE,
@@ -264,10 +257,17 @@ LEGACY_PHASES: tuple[PhaseSpec, ...] = (
     ),
     PhaseSpec(
         phase_key="portfolio_synthesis",
-        phase_order=120,
+        phase_order=110,
         display_name="Portfolio Manager",
         criticality=Criticality.MANDATORY,
         nodes=(_node("portfolio_manager", node_type="manager", agent_role="portfolio_manager", criticality=Criticality.MANDATORY, llm=True, retryable=True),),
+    ),
+    PhaseSpec(
+        phase_key="final_quote_refresh",
+        phase_order=120,
+        display_name="Final Quote Refresh",
+        criticality=Criticality.MANDATORY,
+        nodes=(_node("final_quote_refresh", node_type="market", agent_role="system", criticality=Criticality.MANDATORY),),
     ),
     PhaseSpec(
         phase_key="portfolio_decision_gate",

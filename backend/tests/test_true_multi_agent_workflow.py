@@ -184,7 +184,7 @@ def test_deep_has_parallel_independent_nodes_and_artifact_ownership(environment)
     }
     run = _run(make_job())
     assert run.status == "completed", run.error_message
-    assert run.workflow_version == "v3-core-3"
+    assert run.workflow_version == "v3-holdings-p4-1"
     assert run.structured_result_json["workflow_execution"]["legacy_fallback_used"] is False
     assert 2 <= harness.peak <= 3
     expected = {*ANALYST_ROLES, *DEBATE_NODES, *RISK_ROLES, "risk_synthesis", "research_manager", "trader", "risk_manager", "portfolio_manager"}

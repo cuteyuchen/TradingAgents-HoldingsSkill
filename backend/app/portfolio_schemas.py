@@ -58,6 +58,12 @@ class TradeLedgerConfirm(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class LedgerImportCommit(BaseModel):
+    source_ref: str = Field(min_length=4, max_length=64)
+    rows: list[TradeLedgerCreate] = Field(default_factory=list, max_length=2000)
+    label: str | None = Field(default=None, max_length=128)
+
+
 class TradeLedgerEntryResponse(BaseModel):
     id: int
     portfolio_id: int

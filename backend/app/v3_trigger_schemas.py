@@ -36,3 +36,12 @@ class TriggerPlanUpdate(BaseModel):
 class MonitorRunOnceRequest(BaseModel):
     portfolio_id: int | None = None
     dry_run: bool = False
+
+
+class DailyPlanRefresh(BaseModel):
+    portfolio_id: int = Field(gt=0)
+    analysis_run_id: int | None = Field(default=None, gt=0)
+
+
+class DailyPlanFillLink(BaseModel):
+    ledger_entry_id: int = Field(gt=0)

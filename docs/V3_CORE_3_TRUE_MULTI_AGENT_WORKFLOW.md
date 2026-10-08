@@ -1,5 +1,14 @@
 # V3-CORE-3 True Multi-Agent Workflow
 
+2026-10-03 update: the active workflow is `v3-holdings-p4-1` (legacy fallback
+`v3-holdings-p4-legacy-1`). P0 moved Final Quote Refresh after Candidate Review
+and Portfolio Manager, separated content quality from action eligibility, and
+added decision validity/status presentation; P4 adds per-role learning context
+injection with recorded references. The CORE-3 description below records the
+earlier baseline; see
+[current optimization progress](HOLDINGS_OPTIMIZATION_PROGRESS.md) for the
+implementation and acceptance status. Old workflow checkpoints require a new run.
+
 ## Status
 
 - IMPLEMENTED: independent nodes on the existing V3-CORE-2 NodeExecutor.

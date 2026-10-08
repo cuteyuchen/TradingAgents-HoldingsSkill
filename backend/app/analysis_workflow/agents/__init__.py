@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..dag import ANALYST_ROLES, DEBATE_NODES, RISK_ROLES
 from ..resume import hash_input
 
-PROMPT_VERSION = "v3-core-3.1"
+PROMPT_VERSION = "v3-core-3.2"
 
 ROLE_BOUNDARIES = {
     "market_analyst": (
@@ -164,6 +164,9 @@ def agent_instruction(key: str) -> str:
         f"Independent Agent Node: {key}\nRole: {role}\n{ROLE_BOUNDARIES[role]}\n"
         "Consume ONLY the supplied frozen evidence snapshot. No fetching, refreshing or invented facts. "
         "evidence_refs must be exact entries from the supplied evidence_refs list. "
+        "learning_context contains advisory historical hypotheses, not current market facts. "
+        "Identify the hypothesis IDs you applied, their effect on your reasoning, and counterexamples or reasons they do not apply. "
+        "An empty learning_context means no applicable experience; never invent learned rules or override current trading gates. "
         "Report conclusions in Chinese, with public rationale summaries only. "
         "Never output hidden chain-of-thought, scratchpads, orders or other roles' answers. "
         "Respect T+1, available quantity, cash, lot size, hard caps and data quality. "
@@ -172,8 +175,11 @@ def agent_instruction(key: str) -> str:
     if key in ANALYST_ROLES:
         common += (
             "Use the stable analyst envelope. Include a data_table and missing_checklist_fields. "
-            "Cover your Skill checklist, with at least 200 characters of substantive public conclusions "
-            "when evidence permits; never pad missing evidence to obtain a grade. "
+            "Cover your Skill checklist with substantive public conclusions and exact evidence_refs. "
+            "Concise conclusions are valid when supported; never pad missing evidence to obtain a grade. "
+            "Keep report completeness separate from action prerequisites: missing optional domain data "
+            "must not by itself veto evidence-supported risk reduction. Identity, quotes, available quantity "
+            "and cash constraints remain mandatory for the relevant action. "
             "For core holdings distinguish short tactical conditions from medium-term thesis. "
         )
     elif "_round_" in key:

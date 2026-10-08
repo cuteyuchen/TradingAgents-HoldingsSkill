@@ -86,7 +86,7 @@ test('Analysis structured retry succeeds after one malformed/truncated response'
   await expect(page.locator('body')).not.toContainText('acceptance truncation fixture')
   await expect(page.locator('body')).not.toContainText('模型没有返回有效 JSON')
   const workflow = await auditedWorkflow(page, jobId)
-  expect(workflow.run.workflow_version).toBe('v3-core-3')
+  expect(workflow.run.workflow_version).toBe('v3-p0-1')
   expect(workflow.run.legacy_fallback_used).toBe(false)
   const nodes = workflow.stages.flatMap((stage) => stage.nodes)
   const analysts = nodes.filter((node) => node.node_key.endsWith('_analyst'))

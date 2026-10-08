@@ -95,7 +95,7 @@ def test_final_normalizer_caps_sales_and_exposes_today_modules():
         workflow,
     )
 
-    assert result["holdings"][0]["quantity"] == "80"
+    assert result["holdings"][0]["quantity"] == 80
     assert result["today_actions"] == result["holdings"]
     assert result["buy_candidates"] == result["candidates"]
     assert result["buy_candidates"][0]["buyable"] is True

@@ -19,16 +19,21 @@ from ..database import SessionLocal
 from ..decision_contract import (
     CANDIDATE_MAX_COUNT,
     DEFAULT_PORTFOLIO_ACTION,
+    apply_decision_status,
     canonicalize_analysis_mode,
+    normalize_action_sizing,
+    parse_share_quantity,
     should_normalize_no_action,
 )
 from ..memory.service import current_memory_features, memory_context_for_analysis
+from ..memory.learning import build_learning_context, record_learning_references
+from ..portfolio.account import build_account_state
 from ..portfolio.decision_gate import apply_portfolio_decision_gate
 from ..portfolio.service import portfolio_context_for_analysis
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, PortfolioSnapshot
 from .holding_identity import UnresolvedSecurityIdentityError, snapshot_identity_issues
 from .market_data import normalize_code
-from .instrument_market_evidence import collect_market_snapshot, refresh_snapshot_quotes
+from .instrument_market_evidence import collect_market_snapshot, enrich_candidate_evidence, refresh_snapshot_quotes
 from .model_client import StructuredModelResult, call_model, call_model_json, model_cancellation, parse_json_result
 from .analysis_lease import AnalysisLeaseHeartbeat
 from .skill_runtime import runtime_metadata, runtime_prompt
@@ -102,9 +107,9 @@ FINAL_SCHEMA = {
                 "priority": "P0/P1/P2/P3",
                 "action_context": "触发后复核的动作语义",
             },
-            "quantity": "数量或比例；卖出不得超过 available_qty",
+            "quantity": "非负整数股数或 null；禁止填写比例，卖出不得超过 available_qty",
             "current_weight": 0.0,
-            "target_weight": 0.0,
+            "target_weight": "0 到 1 的数值仓位比例或 null，与 quantity 股数分开",
             "adjustment_weight": 0.0,
             "max_sellable_qty": 0,
             "hard_cap": 0.0,
@@ -345,6 +350,76 @@ def _holdings(snapshot: PortfolioSnapshot) -> list[dict[str, Any]]:
     return result
 
 
+def _current_account_holdings(
+    db: Session,
+    snapshot: PortfolioSnapshot,
+    *,
+    portfolio_id: int,
+    as_of: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Overlay confirmed ledger facts on the snapshot holdings evidence."""
+
+    account = build_account_state(db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=as_of)
+    base_rows = _holdings(snapshot)
+    by_code: dict[str, dict[str, Any]] = {}
+    for row in base_rows:
+        key = normalize_code(row.get("canonical_code") or row.get("code") or "")
+        if key:
+            by_code[key] = row
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for derived in account["positions"]:
+        code = normalize_code(derived.get("code") or "")
+        row = by_code.get(code) if code else None
+        if row is not None:
+            merged = dict(row)
+            seen.add(code)
+        else:
+            merged = {
+                "code": derived.get("code"),
+                "canonical_code": None,
+                "name": derived.get("name"),
+                "display_name": derived.get("name"),
+                "asset_type": None,
+                "exchange": None,
+                "security_id": None,
+                "resolution_status": "LEDGER_ONLY",
+                "resolution_source": "trade_ledger",
+                "resolution_confidence": None,
+                "market": "CN",
+                "qty": None,
+                "available_qty": None,
+                "unavailable_qty": None,
+                "cost": None,
+                "screenshot_price": None,
+                "market_value": None,
+                "pnl": None,
+                "pnl_amount": None,
+                "weight": None,
+            }
+        merged["qty"] = derived.get("qty")
+        merged["available_qty"] = derived.get("available_qty")
+        merged["account_source"] = derived.get("source")
+        merged["account_qty_delta"] = derived.get("qty_delta")
+        merged["account_available_delta"] = derived.get("available_delta")
+        if derived.get("flags"):
+            merged["account_flags"] = list(derived.get("flags") or [])
+        rows.append(merged)
+    for code, row in by_code.items():
+        if code not in seen:
+            rows.append(row)
+    summary = {
+        "version": account["version"],
+        "account_version": account["account_version"],
+        "snapshot_id": account["snapshot_id"],
+        "entry_count": account["entry_count"],
+        "applied_entry_ids": account["applied_entry_ids"],
+        "cash": account["cash"],
+        "flags": account["flags"],
+    }
+    return rows, summary
+
+
 def _history(db: Session, job: AnalysisJob) -> list[dict[str, Any]]:
     rows = (
         db.query(AnalysisRun)
@@ -464,14 +539,20 @@ def _quality_gate(snapshot: dict[str, Any], market: dict[str, Any], evidence: di
     quotes = market.get("quotes") or {}
     missing: list[str] = []
     coded_holdings = [item for item in holdings if item.get("code")]
-    complete_quote_coverage = all((quotes.get(item.get("code"), {}) or {}).get("price") is not None for item in coded_holdings)
-    collector_asserts_coverage = str(market.get("quality_grade") or "F").upper() in {"A", "B"} and not any(
-        str(error).startswith("quote") for error in market.get("errors") or []
-    )
+    complete_quote_coverage = True
+    for item in coded_holdings:
+        quote = quotes.get(item.get("code"), {}) or {}
+        price = _numeric_score(quote.get("price"))
+        if (
+            isinstance(quote.get("price"), bool) or price is None or price <= 0
+            or quote.get("stale")
+            or str(quote.get("quality_status") or "VALID").upper() not in {"VALID", "DEGRADED"}
+        ):
+            complete_quote_coverage = False
     checks = {
         "confirmed_holdings": bool(holdings),
         "instrument_code": all(bool(normalize_code(item.get("code") or "")) for item in holdings),
-        "quote_coverage": bool(coded_holdings) and (complete_quote_coverage or collector_asserts_coverage),
+        "quote_coverage": bool(coded_holdings) and complete_quote_coverage,
         "available_quantity_semantics": all("available_qty" in item for item in holdings),
     }
     for key, passed in checks.items():
@@ -479,7 +560,10 @@ def _quality_gate(snapshot: dict[str, Any], market: dict[str, Any], evidence: di
             missing.append(key)
     market_grade = market.get("quality_grade") or "F"
     evidence_grade = (evidence or {}).get("quality_grade") or (evidence or {}).get("data_quality_grade")
-    grade = _worst_grade(market_grade, evidence_grade or market_grade)
+    action_grade = (evidence or {}).get("action_quality_grade") or evidence_grade or market_grade
+    grade = _worst_grade(market_grade, action_grade)
+    if (evidence or {}).get("action_quality_grade") and evidence_grade in {"C", "D", "F"}:
+        grade = _worst_grade(grade, "C")
     # Missing holdings, codes, or quote coverage is a hard block regardless of
     # a provider's optimistic self-assessment.
     if any(key in missing for key in ("confirmed_holdings", "instrument_code", "quote_coverage")):
@@ -487,7 +571,9 @@ def _quality_gate(snapshot: dict[str, Any], market: dict[str, Any], evidence: di
     agent_statuses = (evidence or {}).get("agent_statuses") or {}
     important_failures = [key for key, status in agent_statuses.items() if key != "lockup_supply_analyst" and status not in {"SUCCEEDED", "COMPLETED"}]
     if important_failures:
-        grade = _worst_grade(grade, "D" if "market_analyst" in important_failures or len(important_failures) >= 2 else "C")
+        grade = _worst_grade(grade, "D" if "market_analyst" in important_failures else "C")
+    elif (evidence or {}).get("agent_failures"):
+        grade = _worst_grade(grade, "B")
     result = {
         "grade": grade,
         "status": "blocked" if grade in {"D", "F"} else "pass",
@@ -495,6 +581,7 @@ def _quality_gate(snapshot: dict[str, Any], market: dict[str, Any], evidence: di
         "missing_fields": missing,
         "market_grade": market_grade,
         "evidence_grade": evidence_grade,
+        "content_quality_grade": (evidence or {}).get("content_quality_grade") or evidence_grade,
         "action_bias": "watch_only" if grade in {"C", "D", "F"} else "normal",
     }
     if agent_statuses:
@@ -504,7 +591,7 @@ def _quality_gate(snapshot: dict[str, Any], market: dict[str, Any], evidence: di
             agent_failures=(evidence or {}).get("agent_failures") or {},
             data_gaps=(evidence or {}).get("data_gaps") or [],
             degraded=bool(important_failures),
-            risk_increase_allowed=not important_failures and grade in {"A", "B"},
+            risk_increase_allowed=(evidence or {}).get("risk_increase_allowed", not important_failures) and grade in {"A", "B"},
         )
     return result
 
@@ -751,10 +838,12 @@ def _require_current_final_quote(market: dict[str, Any]) -> None:
         raise ResumeRejected("final_quote_snapshot_expired_create_new_run")
 
 
-def _audit_final_refresh(audit, db, job, market, codes):
-    if not _phase_skipped(audit, db, job, "final_quote_refresh", 82):
+def _audit_final_refresh(audit, db, job, market, codes, *, required_codes=None):
+    if not _phase_skipped(audit, db, job, "final_quote_refresh", 94):
         def refresh():
-            output = refresh_snapshot_quotes(copy.deepcopy(market), codes)
+            refresh_input = copy.deepcopy(market)
+            refresh_input["final_quote_required_codes"] = codes if required_codes is None else required_codes
+            output = refresh_snapshot_quotes(refresh_input, codes)
             if audit.plan is not None:
                 audit.record_artifact(ArtifactType.MARKET_SNAPSHOT, output, artifact_key="final_quote_refresh.response")
                 _require_current_final_quote(output)
@@ -763,7 +852,7 @@ def _audit_final_refresh(audit, db, job, market, codes):
         result = audit.executor.execute(
             "final_quote_refresh",
             refresh,
-            input_payload={"codes": codes, **audit.evidence_binding},
+            input_payload={"codes": codes, "required_codes": required_codes, **audit.evidence_binding},
             output_artifact_type=ArtifactType.MARKET_SNAPSHOT,
         )
         market = result.output
@@ -777,12 +866,7 @@ def _audit_final_refresh(audit, db, job, market, codes):
 
 
 def _numeric_quantity(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        return float(value)
-    if not isinstance(value, str) or "%" in value:
-        return None
-    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:股|份)?\s*", value)
-    return float(match.group(1)) if match else None
+    return parse_share_quantity(value)
 
 
 def _numeric_score(value: Any) -> float | None:
@@ -985,18 +1069,34 @@ def _normalize_final(
             "观察": "watch",
         }
         action = action_aliases.get(action, action)
-        if action not in {"add", "conditional_add", "hold", "reduce", "sell", "watch"}:
+        action_known = action in {"add", "conditional_add", "hold", "reduce", "sell", "watch"}
+        if not action_known:
             action = "watch"
         row["action"] = action
+        sizing = normalize_action_sizing(row)
+        if not sizing.errors:
+            row["quantity"] = sizing.quantity
+            if "proposed_qty" in row:
+                row["proposed_qty"] = sizing.quantity
+            row["target_weight"] = sizing.target_weight
+        row["decision_status"] = (
+            "INCOMPLETE" if not raw.get("action") or not action_known else
+            "NO_ACTION" if action == "hold" else
+            "WAITING" if action in {"watch", "conditional_add"} else "ACTION"
+        )
         if action in {"reduce", "sell"}:
             if available in (None, 0):
                 row["action"] = "watch"
                 row["quantity"] = None
+                row["proposed_qty"] = None
+                row["decision_status"] = "DATA_GAP"
                 row["reason"] = (str(row.get("reason") or "") + " 当前无可卖数量，动作降级为观察。").strip()
             else:
-                numeric = _numeric_quantity(row.get("quantity"))
+                numeric = sizing.quantity if not sizing.errors else None
                 if numeric is not None and numeric > float(available):
-                    row["quantity"] = str(available)
+                    row["quantity"] = available
+                    if "proposed_qty" in row:
+                        row["proposed_qty"] = available
                     row["reason"] = (str(row.get("reason") or "") + " 卖出数量已按当前可用数量上限修正。").strip()
         output_rows.append(row)
 
@@ -1007,6 +1107,7 @@ def _normalize_final(
                     "code": code,
                     "name": source.get("name"),
                     "action": "watch",
+                    "decision_status": "INCOMPLETE",
                     "reason": "模型未返回该持仓的明确结论。",
                     "trigger": None,
                     "quantity": None,
@@ -1575,6 +1676,12 @@ def run_analysis_job(job_id: int) -> None:
             parameter_set_version=parameter_lineage.get("parameter_set_version"),
         )
 
+        account_holdings, account_summary = _current_account_holdings(
+            db,
+            snapshot_row,
+            portfolio_id=job.portfolio_id,
+            as_of=utc_now(),
+        )
         snapshot = {
             "id": snapshot_row.id,
             "snapshot_time": snapshot_row.snapshot_time.isoformat(),
@@ -1583,7 +1690,11 @@ def run_analysis_job(job_id: int) -> None:
             "broker_available_cash": snapshot_row.broker_available_cash,
             "corrected_unused_funds": snapshot_row.corrected_unused_funds,
             "repo_or_standard_bond_value": snapshot_row.repo_or_standard_bond_value,
-            "holdings": _holdings(snapshot_row),
+            "holdings": account_holdings,
+            "account_version": account_summary["account_version"],
+            "account_derivation": account_summary,
+            "derived_cash": account_summary["cash"]["available"],
+            "pending_sell_proceeds": account_summary["cash"]["pending_sell_proceeds"],
         }
 
         analysis_mode = canonicalize_analysis_mode(job.mode)
@@ -1687,6 +1798,13 @@ def run_analysis_job(job_id: int) -> None:
             parameter_lineage=parameter_lineage,
         )
         workflow["candidate_context"] = candidate_context
+        if frozen_input is None:
+            candidate_codes = list(dict.fromkeys(
+                row["code"] for stage in ("action", "ready")
+                for row in candidate_context.get(stage) or [] if row.get("code")
+            ))
+            market = enrich_candidate_evidence(market, candidate_codes)
+        workflow["evidence_version"] = market.get("evidence_version")
         memory_context = frozen_input["memory_context"] if frozen_input is not None else memory_context_for_analysis(
             db,
             user_id=job.user_id,
@@ -1698,6 +1816,15 @@ def run_analysis_job(job_id: int) -> None:
             ),
         )
         workflow["memory_context"] = memory_context
+        learning_context = frozen_input.get("learning_context", {}) if frozen_input is not None else build_learning_context(
+            db, user_id=job.user_id, portfolio_id=job.portfolio_id,
+            as_of=job.started_at or utc_now(),
+            current_features=current_memory_features(portfolio_context=portfolio_context, candidate_context=candidate_context),
+        )
+        workflow["learning_context"] = learning_context
+        if not true_multi_agent and learning_context:
+            record_learning_references(db, user_id=job.user_id, portfolio_id=job.portfolio_id,
+                                       analysis_job_id=job.id, role="all", context=learning_context)
         input_payload = {
             "snapshot": snapshot,
             "market": market,
@@ -1708,6 +1835,7 @@ def run_analysis_job(job_id: int) -> None:
             "portfolio_context": portfolio_context,
             "candidate_context": candidate_context,
             "memory_context": memory_context,
+            "learning_context": learning_context,
         }
         orchestrator = None
         if true_multi_agent:
@@ -1770,7 +1898,6 @@ def run_analysis_job(job_id: int) -> None:
                 "candidate_status",
                 "candidate_blocked_reason",
             )})
-            market = _audit_final_refresh(audit, db, job, market, codes)
             final_profile = None
             run_blocked = True
         else:
@@ -1848,7 +1975,6 @@ def run_analysis_job(job_id: int) -> None:
                     "candidate_status",
                     "candidate_blocked_reason",
                 )})
-                market = _audit_final_refresh(audit, db, job, market, codes)
                 final_profile = None
                 run_blocked = True
             else:
@@ -2053,9 +2179,6 @@ def run_analysis_job(job_id: int) -> None:
                     )
                     audit.finish_stage(output=risk_debate)
 
-                market = _audit_final_refresh(audit, db, job, market, codes)
-                input_payload["final_quote_snapshot" if true_multi_agent else "market"] = market
-
                 if _phase_skipped(audit, db, job, "candidate_screening", 87):
                     candidate_raw = audit.load_artifact_content("candidate_screening.output") or _restore_output(
                         audit, "deterministic_candidate_gate", "candidate_screening.output"
@@ -2197,7 +2320,8 @@ def run_analysis_job(job_id: int) -> None:
                             "buy_candidate_plan": candidate_raw,
                             "required_schema": FINAL_SCHEMA,
                         },
-                        "Phase 5 组合经理最终决策：基于最终刷新行情综合全部阶段，严格按 required_schema 返回 JSON。"
+                        "Phase 5 组合经理最终决策：基于本次固定证据综合全部阶段，严格按 required_schema 返回 JSON。"
+                        "模型完成后后端会刷新最终行情，重新校验数量、现金和交易限制。"
                         "每个当前持仓都必须出现，today_actions 与 holdings 一致，buy_candidates 与 candidates 一致，"
                         "不得遗漏调仓计划、检查点计划、未解决论点和风险约束。trigger 保留报告用自然语言；"
                         "trigger_plan 仅在存在明确机器可读阈值时输出对象，否则必须为 null。",
@@ -2222,6 +2346,11 @@ def run_analysis_job(job_id: int) -> None:
             final = _normalize_final(final, snapshot["holdings"], quality_gate.get("grade", market.get("quality_grade", "C")), workflow)
         else:
             final = _normalize_final(final, snapshot["holdings"], final.get("data_quality_grade", "F"), workflow)
+        final_codes = list(dict.fromkeys([
+            *codes,
+            *(row["code"] for row in final.get("candidates") or [] if row.get("code")),
+        ]))
+        market = _audit_final_refresh(audit, db, job, market, final_codes, required_codes=codes)
         if _phase_skipped(audit, db, job, "portfolio_decision_gate", None):
             restored_final = audit.restore_output("portfolio_decision_gate")
             if isinstance(restored_final, dict) and restored_final:
@@ -2231,11 +2360,14 @@ def run_analysis_job(job_id: int) -> None:
 
             def _apply_portfolio_gate() -> dict[str, Any]:
                 try:
-                    if true_multi_agent:
+                    if true_multi_agent or market.get("final_quote_refresh_status") == "failed":
                         _require_current_final_quote(market)
                     # Rebuild from the final quote refresh so the Gate sees the same
                     # server-owned price facts as the persisted visible decision.
                     gated_context = portfolio_context_for_analysis(db, snapshot=snapshot_row, market=market)
+                    gated_context["execution_quotes"] = market.get("quotes") or {}
+                    gated_context["execution_quotes_required"] = True
+                    gated_context["execution_candidates"] = candidate_context.get("action") or []
                     workflow["portfolio_context"] = gated_context
                     return apply_portfolio_decision_gate(current_final, portfolio_context=gated_context)
                 except Exception as exc:  # noqa: BLE001
@@ -2257,6 +2389,29 @@ def run_analysis_job(job_id: int) -> None:
             "calculation_version": "portfolio-engine-v1",
         }
         final["outcome"] = (final.get("decision_gate") or {}).get("portfolio_action", "WATCH_ONLY")
+        apply_decision_status(final)
+        final["portfolio_snapshot_id"] = snapshot_row.id
+        final["evidence_version"] = market.get("evidence_version")
+        final["learning_context_id"] = learning_context.get("context_id")
+        final["learning_references"] = learning_context.get("ref_ids", [])
+        final["account_version"] = (
+            (workflow.get("portfolio_context") or {}).get("account_version")
+            or snapshot.get("account_version")
+        )
+        final["generated_at"] = utc_now().isoformat()
+        final["quote_verified_at"] = market.get("final_quote_refresh_at")
+        if final["decision_status"] == "INCOMPLETE":
+            final["portfolio_conclusion"] = "部分持仓尚未形成明确结论，请补全分析后再判断是否操作。"
+        elif final["decision_status"] == "WAITING":
+            final["portfolio_conclusion"] = "当前建议等待触发条件，条件满足后需要重新核对行情和账户约束。"
+        if final["decision_status"] in {"INCOMPLETE", "WAITING"} or (
+            final["decision_status"] == "DATA_GAP" and final["outcome"] != "ACTION"
+        ):
+            final["final_rating"] = "watch_only"
+            final["portfolio_action"] = "WATCH_ONLY"
+            final["outcome"] = "WATCH_ONLY"
+            final["decision_gate"]["portfolio_action"] = "WATCH_ONLY"
+            final["portfolio_manager_final"]["portfolio_rating"] = "watch_only"
         final["candidate_actions"] = [row for row in final.get("candidates") or [] if row.get("buyable") is True]
         for key in (
             "evidence_pack",
@@ -2298,6 +2453,7 @@ def run_analysis_job(job_id: int) -> None:
             markdown = render_markdown(final, market, snapshot, job)
         structured_payload = {
             "result": final,
+            "account_version": final.get("account_version"),
             "market_snapshot": market,
             "input_snapshot": snapshot,
             "history_used": history,

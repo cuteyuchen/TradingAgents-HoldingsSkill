@@ -10,6 +10,7 @@ import ErrorState from '../components/ErrorState.vue'
 import LoadingState from '../components/LoadingState.vue'
 import MetricTile from '../components/MetricTile.vue'
 import PageHeader from '../components/PageHeader.vue'
+import PortfolioReviewPanel from '../components/PortfolioReviewPanel.vue'
 import ResearchView from './ResearchView.vue'
 import SectionCard from '../components/SectionCard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -152,7 +153,7 @@ onMounted(async () => { await load(); mounted = true })
 
 <template>
   <section class="workbench-page history-page">
-    <PageHeader title="历史" description="复盘已经发生的决策，了解模拟跟随和研究证据。">
+    <PageHeader title="历史" description="查看真实账户收益、建议效果、自学习经验与模拟对照。">
       <template #actions>
         <n-button secondary :loading="loading" @click="load"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
       </template>
@@ -164,7 +165,8 @@ onMounted(async () => { await load(); mounted = true })
     <n-tabs :value="activeTab" type="line" @update:value="changeTab">
       <n-tab-pane name="performance" tab="历史表现">
         <div class="history-stack">
-          <SectionCard title="历史表现" :description="selectedPortfolio ? `${selectedPortfolio.name} · 只展示真实 Shadow 记录与已保存分析` : '选择组合后查看真实记录'">
+          <PortfolioReviewPanel v-if="selectedPortfolioId" :portfolio-id="selectedPortfolioId" />
+          <SectionCard title="模拟与对照" :description="selectedPortfolio ? `${selectedPortfolio.name} · 独立模拟账户的结果` : '选择组合后查看模拟记录'">
             <template #actions>
               <n-select v-if="accounts.length > 1" :value="selectedAccountId" size="small" :options="accounts.map((item) => ({ label: item.name, value: item.id }))" aria-label="选择模拟账户" @update:value="changeAccount" />
               <StatusBadge v-if="selectedAccount" :status="selectedAccount.status" :label="historyStatus" />

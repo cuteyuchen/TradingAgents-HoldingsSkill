@@ -172,6 +172,68 @@ class DailyReviewRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class LearningHypothesis(Base):
+    """Append-only hypothesis versions; old contexts retain exactly their evidence."""
+
+    __tablename__ = "learning_hypotheses"
+    __table_args__ = (UniqueConstraint("portfolio_id", "hypothesis_key", "revision", name="uq_learning_hypothesis_revision"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    hypothesis_key: Mapped[str] = mapped_column(String(128), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[dict] = mapped_column(JSON)
+    support_json: Mapped[list] = mapped_column(JSON, default=list)
+    counterexamples_json: Mapped[list] = mapped_column(JSON, default=list)
+    validation_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    weight: Mapped[float] = mapped_column(Float, default=0.25)
+    extraction_cutoff: Mapped[datetime] = mapped_column(DateTime, index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    reason: Mapped[str] = mapped_column(String(128))
+    calculation_version: Mapped[str] = mapped_column(String(64), default="learning-p4-v1")
+
+
+class LearningValidation(Base):
+    """Later independent day/security samples, evaluated once against the frozen hypothesis."""
+
+    __tablename__ = "learning_validations"
+    __table_args__ = (UniqueConstraint("portfolio_id", "hypothesis_key", "trade_date", "target_key", name="uq_learning_validation_sample"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    hypothesis_id: Mapped[int] = mapped_column(ForeignKey("learning_hypotheses.id", ondelete="CASCADE"), index=True)
+    hypothesis_key: Mapped[str] = mapped_column(String(128), index=True)
+    decision_memory_id: Mapped[int] = mapped_column(ForeignKey("decision_memories.id", ondelete="CASCADE"), index=True)
+    outcome_id: Mapped[int] = mapped_column(ForeignKey("decision_outcomes.id", ondelete="CASCADE"), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    target_key: Mapped[str] = mapped_column(String(64))
+    baseline_return: Mapped[float] = mapped_column(Float)
+    learned_return: Mapped[float] = mapped_column(Float)
+    difference: Mapped[float] = mapped_column(Float)
+    available_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    source_refs_json: Mapped[dict] = mapped_column(JSON)
+
+
+class LearningContextReference(Base):
+    """Audit which frozen experience context was supplied to each analysis role."""
+
+    __tablename__ = "learning_context_references"
+    __table_args__ = (UniqueConstraint("analysis_job_id", "role", "context_id", name="uq_learning_context_role"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"), index=True)
+    analysis_job_id: Mapped[int] = mapped_column(ForeignKey("analysis_jobs.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(64))
+    context_id: Mapped[str] = mapped_column(String(64), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime)
+    context_json: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 def _immutable_update(_mapper, _connection, _target) -> None:
     raise RuntimeError("decision_memory_is_immutable")
 
@@ -182,6 +244,9 @@ def _immutable_delete(_mapper, _connection, _target) -> None:
 
 event.listen(DecisionMemory, "before_update", _immutable_update)
 event.listen(DecisionMemory, "before_delete", _immutable_delete)
+event.listen(LearningHypothesis, "before_update", _immutable_update)
+event.listen(LearningValidation, "before_update", _immutable_update)
+event.listen(LearningContextReference, "before_update", _immutable_update)
 
 
-__all__ = ["DailyReviewRun", "DecisionMemory", "DecisionOutcome"]
+__all__ = ["DailyReviewRun", "DecisionMemory", "DecisionOutcome", "LearningHypothesis", "LearningValidation", "LearningContextReference"]

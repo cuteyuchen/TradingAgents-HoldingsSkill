@@ -2,10 +2,21 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any
 
-from ..decision_contract import DEFAULT_PORTFOLIO_ACTION, has_actionable_portfolio_change
+from ..clock import utc_now
+from ..config import settings
+from ..decision_contract import (
+    DEFAULT_PORTFOLIO_ACTION,
+    has_actionable_portfolio_change,
+    normalize_action_sizing,
+    parse_share_quantity,
+    parse_target_weight,
+)
 from ..market.engine.metrics import is_price_limit
+from ..market.codes import normalize_security_code
+from ..market.models import _coerce_datetime
 from .config import PORTFOLIO_GATE_VERSION
 
 
@@ -23,12 +34,12 @@ def _weight(value: Any) -> float | None:
 
 
 def _quantity(value: Any) -> float | None:
-    if value is None or value == "":
+    if isinstance(value, bool) or value is None or value == "":
         return None
     try:
         number = float(str(value).replace(",", "").strip())
         return number if math.isfinite(number) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -47,6 +58,55 @@ def _watch(row: dict[str, Any], reason: str) -> None:
     row["adjustment_weight"] = None
     row["portfolio_gate"] = "BLOCKED"
     _append_reason(row, reason)
+
+
+def _candidate_quote_reasons(code: str, quote: dict[str, Any]) -> list[str]:
+    if not quote:
+        return ["QUOTE_MISSING"]
+    if not code or normalize_security_code(quote.get("canonical_code") or quote.get("code")) != code:
+        return ["INSTRUMENT_IDENTITY_MISMATCH"]
+    if quote.get("security_type") not in {"STOCK", "ETF"} or str(quote.get("instrument_status") or "").upper() != "ACTIVE":
+        return ["INSTRUMENT_NOT_TRADABLE"]
+    if quote.get("is_suspended") is True:
+        return ["SECURITY_SUSPENDED"]
+    if quote.get("is_suspended") is not False or not isinstance(quote.get("is_st"), bool):
+        return ["TRADING_STATUS_UNAVAILABLE"]
+    quality = str(quote.get("quality_status") or "MISSING").upper()
+    if quality not in {"VALID", "DEGRADED"}:
+        return [f"QUOTE_{quality}"]
+    if quote.get("stale"):
+        return ["QUOTE_STALE"]
+    price = _quantity(quote.get("price"))
+    if price is None or price <= 0:
+        return ["PRICE_INVALID"]
+    if not quote.get("source") and not quote.get("provider"):
+        return ["QUOTE_SOURCE_MISSING"]
+    observed = _coerce_datetime(quote.get("source_timestamp") or quote.get("observed_at"))
+    fetched = _coerce_datetime(quote.get("fetched_at"))
+    if observed is None or fetched is None:
+        return ["QUOTE_TIME_MISSING"]
+    now = utc_now()
+    observed_age = (now - observed).total_seconds()
+    fetched_age = (now - fetched).total_seconds()
+    if observed_age < -5 or fetched_age < -5:
+        return ["QUOTE_TIME_INVALID"]
+    basis = quote.get("data_basis") or "live"
+    if basis not in {"live", "session_close", "previous_session_close"}:
+        return ["QUOTE_TIME_INVALID"]
+    if fetched_age > settings.QUOTE_FRESHNESS_SECONDS or basis == "live" and observed_age > settings.QUOTE_FRESHNESS_SECONDS:
+        return ["QUOTE_STALE"]
+    lot = parse_share_quantity(quote.get("lot_size"))
+    if lot is None or lot <= 0:
+        return ["LOT_SIZE_UNAVAILABLE"]
+    change = _quantity(quote.get("pct_change"))
+    previous = _quantity(quote.get("prev_close"))
+    if change is None and previous is not None and previous > 0:
+        change = (price / previous - 1) * 100
+    if change is None or not math.isfinite(change):
+        return ["PRICE_LIMIT_INPUT_MISSING"]
+    if is_price_limit(change, code, board=quote.get("board"), is_st=quote["is_st"], direction="up"):
+        return ["LIMIT_UP"]
+    return []
 
 
 def apply_portfolio_decision_gate(
@@ -86,10 +146,12 @@ def apply_portfolio_decision_gate(
         constraint = constraints.get(code)
         action = str(row.get("action") or "watch").lower()
         requested_action = action
-        requested_target = _weight(row.get("target_weight"))
-        requested_quantity = _quantity(row.get("quantity") if row.get("proposed_qty") is None else row.get("proposed_qty"))
+        sizing = normalize_action_sizing(row)
+        requested_target = sizing.target_weight
+        requested_quantity = sizing.quantity
         row["requested_target_weight"] = requested_target
         row["requested_qty"] = requested_quantity
+        row["target_weight"] = requested_target
         if requested_quantity is not None:
             row["quantity"] = str(requested_quantity)
             row["proposed_qty"] = requested_quantity
@@ -102,6 +164,12 @@ def apply_portfolio_decision_gate(
             _watch(row, reason)
             statuses.append("BLOCKED")
             blocked_reasons.append(reason)
+        elif action in {"add", "conditional_add", "reduce", "sell"} and sizing.errors:
+            _watch(row, sizing.errors[0])
+            for reason in sizing.errors[1:]:
+                _append_reason(row, reason)
+            statuses.append("BLOCKED")
+            blocked_reasons.extend(sizing.errors)
         elif action in {"add", "conditional_add"}:
             reasons = list(constraint.get("blocking_reasons") or []) if constraint else ["POSITION_CONSTRAINT_UNAVAILABLE"]
             if market_frozen and "MARKET_STATE_FROZEN" not in reasons:
@@ -146,7 +214,7 @@ def apply_portfolio_decision_gate(
                 statuses.append("BLOCKED")
                 blocked_reasons.append("POSITION_CONSTRAINT_UNAVAILABLE")
             else:
-                available = _quantity(constraint.get("max_sellable_qty"))
+                available = parse_share_quantity(constraint.get("max_sellable_qty"))
                 quote_quality = str(constraint.get("quote_quality") or "MISSING").upper()
                 if quote_quality not in {"VALID", "DEGRADED"}:
                     _watch(row, f"QUOTE_{quote_quality}")
@@ -191,14 +259,14 @@ def apply_portfolio_decision_gate(
                 direction="up" if buy else "down",
             ):
                 reason = "LIMIT_UP" if buy else "LIMIT_DOWN"
-            quantity = _quantity(row.get("quantity"))
+            quantity = parse_share_quantity(row.get("quantity"))
             if row.get("quantity") is not None and row.get("quantity") != "" and (quantity is None or quantity <= 0):
                 reason = reason or "QUANTITY_INVALID"
             lot = _quantity(constraint.get("lot_size"))
             if lot is None or lot <= 0 or not lot.is_integer():
                 reason = reason or "LOT_SIZE_UNAVAILABLE"
             if reason is None and not buy and quantity is not None and lot is not None and lot > 0:
-                available = _quantity(constraint.get("max_sellable_qty"))
+                available = parse_share_quantity(constraint.get("max_sellable_qty"))
                 # The remaining odd lot may be sold as a single whole balance.
                 rounded = quantity if quantity == available else math.floor(quantity / lot) * lot
                 if rounded <= 0:
@@ -253,16 +321,29 @@ def apply_portfolio_decision_gate(
             "requested_target_weight": requested_target,
             "allowed_target_weight": row.get("target_weight"),
             "requested_qty": requested_quantity,
-            "allowed_qty": _quantity(row.get("quantity")),
+            "allowed_qty": parse_share_quantity(row.get("quantity")),
             "reason_codes": row.get("portfolio_gate_reasons") or [],
         })
         updated_holdings.append(row)
 
+    execution_quotes_required = bool(portfolio_context.get("execution_quotes_required"))
+    execution_quotes = portfolio_context.get("execution_quotes") or {}
+    execution_candidates = {
+        normalize_security_code(row.get("code")): row
+        for row in portfolio_context.get("execution_candidates") or []
+        if isinstance(row, dict) and normalize_security_code(row.get("code"))
+    }
     updated_candidates: list[dict[str, Any]] = []
     for raw in result.get("candidates") or []:
         if not isinstance(raw, dict):
             continue
         candidate = dict(raw)
+        code = normalize_security_code(candidate.get("code"))
+        server_candidate = execution_candidates.get(code, {})
+        if execution_quotes_required:
+            candidate.update(quantity=None, proposed_qty=None, target_weight=None, adjustment_weight=None)
+            for field in ("probe_weight", "funding_mode", "portfolio_fit", "candidate_engine_stage", "stage"):
+                candidate[field] = server_candidate.get(field)
         is_phase_f_action = str(candidate.get("candidate_engine_stage") or candidate.get("stage") or "").upper() == "ACTION"
         candidate["candidate_portfolio_fit_status"] = "RECHECKED_V3" if is_phase_f_action else "NOT_EVALUATED_V3"
         if analysis_blocked or no_risk_increase or risk_rejected or market_frozen or market_unavailable or quality in {"BLOCKED", "FROZEN"} or portfolio_context.get("cash_ratio") is None:
@@ -275,19 +356,58 @@ def apply_portfolio_decision_gate(
             ]
             blocked_reasons.extend(candidate["portfolio_gate_reasons"])
             statuses.append("BLOCKED")
-        elif is_phase_f_action:
+        elif is_phase_f_action or execution_quotes_required:
             fit = candidate.get("portfolio_fit") if isinstance(candidate.get("portfolio_fit"), dict) else {}
             reasons: list[str] = []
+            adjustments: list[str] = []
+            if execution_quotes_required and (not server_candidate or not is_phase_f_action):
+                reasons.append("CANDIDATE_CONTEXT_UNAVAILABLE")
             if fit.get("hard_cap_violation"):
                 reasons.append("HARD_CAP_CONSTRAINT")
             if candidate.get("funding_mode") != "CASH_FUNDED":
                 reasons.append("REPLACEMENT_REVIEW_REQUIRED" if candidate.get("funding_mode") == "REPLACEMENT_REVIEW" else "UNFUNDED")
-            weight = _weight(candidate.get("probe_weight"))
+            weight = parse_target_weight(candidate.get("probe_weight"))
             cost = weight * assets if weight is not None and assets is not None else None
             if cost is None or remaining_cash is None or assets is None or assets <= 0:
                 reasons.append("EXECUTION_INPUT_MISSING")
-            elif cost <= 0 or cost > remaining_cash:
+            elif cost <= 0 or remaining_cash <= 0 or not execution_quotes_required and cost > remaining_cash:
                 reasons.append("CASH_LIMIT")
+            if execution_quotes_required:
+                quote = execution_quotes.get(code) if isinstance(execution_quotes, dict) else None
+                quote = quote if isinstance(quote, dict) else {}
+                reasons.extend(_candidate_quote_reasons(code, quote))
+                candidate.update(
+                    price=quote.get("price"), current_price=quote.get("price"),
+                    security_type=quote.get("security_type"), instrument_status=quote.get("instrument_status"),
+                    is_suspended=quote.get("is_suspended"), is_st=quote.get("is_st"), board=quote.get("board"),
+                    lot_size=quote.get("lot_size"), quote_quality=quote.get("quality_status"),
+                    quote_source=quote.get("source") or quote.get("provider"),
+                    quote_timestamp=quote.get("source_timestamp") or quote.get("observed_at"),
+                    requested_probe_weight=weight,
+                )
+                if not reasons:
+                    price_decimal = Decimal(str(_quantity(quote["price"])))
+                    lot = int(parse_share_quantity(quote["lot_size"]))
+                    budget = Decimal(str(min(cost, remaining_cash)))
+                    quantity = int((budget / (price_decimal * lot)).to_integral_value(rounding=ROUND_FLOOR)) * lot
+                    if quantity <= 0:
+                        reasons.append("CASH_OR_LOT_SIZE_LIMIT")
+                    elif parse_share_quantity(quantity) is None:
+                        reasons.append("QUANTITY_INVALID")
+                    else:
+                        actual_cost = float(Decimal(quantity) * price_decimal)
+                        if actual_cost > min(cost, remaining_cash):
+                            reasons.append("CASH_LIMIT")
+                        else:
+                            if cost > remaining_cash:
+                                adjustments.append("CASH_LIMIT")
+                            if actual_cost < min(cost, remaining_cash):
+                                adjustments.append("LOT_SIZE")
+                            cost = actual_cost
+                            candidate.update(
+                                quantity=str(quantity), proposed_qty=quantity,
+                                target_weight=actual_cost / assets, adjustment_weight=actual_cost / assets,
+                            )
             if reasons:
                 candidate["buyable"] = False
                 candidate["actionable"] = False
@@ -299,9 +419,11 @@ def apply_portfolio_decision_gate(
             else:
                 candidate["buyable"] = True
                 candidate["actionable"] = True
-                candidate["portfolio_gate"] = "PASS"
+                candidate["portfolio_gate"] = "ADJUSTED" if adjustments else "PASS"
+                candidate["portfolio_gate_reasons"] = adjustments
                 candidate["gate_status"] = "buyable"
-                statuses.append("PASS")
+                statuses.append(candidate["portfolio_gate"])
+                adjusted_reasons.extend(adjustments)
                 if cost is not None and remaining_cash is not None:
                     remaining_cash -= cost
         else:

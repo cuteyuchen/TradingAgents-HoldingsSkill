@@ -10,8 +10,9 @@ from typing import Any, Callable
 from sqlalchemy.orm import joinedload
 
 from ..config import settings
+from ..memory.learning import for_role, record_learning_references
 from ..services import model_client
-from ..v2_models import ModelProfile
+from ..v2_models import AnalysisJob, ModelProfile
 from .agents import agent_instruction, normalise_output, prompt_metadata, validate_output
 from .constants import ArtifactType, DebateType, NodeStatus, StageStatus
 from .context import compress_payload
@@ -28,29 +29,37 @@ def _worst(*grades: str) -> str:
 
 
 def analyst_evidence(results: dict[str, NodeExecuteResult]) -> dict[str, Any]:
-    reports, failures, gaps, grades = [], {}, [], ["A"]
+    reports, failures, gaps, grades, content_grades = [], {}, [], ["A"], ["A"]
     for role, result in results.items():
         if role not in ANALYST_ROLES:
             continue
         if result.status not in NodeStatus.SUCCESS:
             failures[role] = {"status": result.status.upper(), "failure_class": result.failure_class, "warning": result.warning}
             gaps.append(f"{role}:{result.status}")
-            grades.append("B" if role == "lockup_supply_analyst" else "C")
+            failure_grade = "B" if role == "lockup_supply_analyst" else "C"
+            grades.append(failure_grade)
+            content_grades.append(failure_grade)
             continue
         report = copy.deepcopy(result.output)
         grade = report["quality_grade"]
+        content_grade = grade
         text = report["summary"] + "".join(item["statement"] for item in report["findings"])
         checks = []
+        content_checks = []
         if len(text) < 200:
-            grade = _worst(grade, "D")
-            checks.append("report_min_chars")
+            content_grade = _worst(content_grade, "B")
+            content_checks.append("report_min_chars")
         fields_missing = report.get("missing_checklist_fields") or []
         if len(fields_missing) >= 3:
-            grade = _worst(grade, "B")
-            checks.append("mandatory_fields_missing")
+            content_grade = _worst(content_grade, "B")
+            content_checks.append("mandatory_fields_missing")
         if not report.get("data_table"):
-            grade = _worst(grade, "B")
-            checks.append("summary_data_table_missing")
+            content_grade = _worst(content_grade, "B")
+            content_checks.append("summary_data_table_missing")
+        unsupported_findings = sum(not finding.get("evidence_refs") for finding in report["findings"])
+        if unsupported_findings:
+            grade = _worst(grade, "D" if unsupported_findings == len(report["findings"]) else "C")
+            checks.append("findings_without_evidence")
         missing_count = len(report["data_gaps"])
         total = missing_count + len(report["findings"])
         missing_ratio = missing_count / total if total else 1.0
@@ -61,9 +70,12 @@ def analyst_evidence(results: dict[str, NodeExecuteResult]) -> dict[str, Any]:
             grade = _worst(grade, "C")
             checks.append("data_missing_ratio_max")
         report["quality_grade"] = grade
-        report["quality_checks"] = checks
+        report["content_quality_grade"] = _worst(grade, content_grade)
+        report["quality_checks"] = content_checks + checks
+        report["content_quality_checks"] = content_checks
         reports.append(report)
         grades.append(grade)
+        content_grades.append(report["content_quality_grade"])
         gaps.extend(f"{role}:{gap}" for gap in report["data_gaps"])
     market_report = next((report for report in reports if report["role"] == "market_analyst"), {})
     return {
@@ -76,6 +88,9 @@ def analyst_evidence(results: dict[str, NodeExecuteResult]) -> dict[str, Any]:
         "portfolio_risks": [risk for report in reports for risk in report["portfolio_risks"]],
         "data_gaps": list(dict.fromkeys(gaps)),
         "quality_grade": _worst(*grades),
+        "content_quality_grade": _worst(*content_grades),
+        "action_quality_grade": market_report.get("quality_grade", "D"),
+        "risk_increase_allowed": bool(market_report) and not failures and not gaps and _worst(*grades) in {"A", "B"},
     }
 
 
@@ -105,6 +120,16 @@ class AgentOrchestrator:
                 if hash_input(model_profile_identity(profile)) != hash_input(self.profile_contract.get(profile.id)):
                     raise ResumeRejected("model_profile_changed_create_new_run")
                 body = compress_payload(payload, context_mode)
+                learning = (body.get("input") or {}).get("learning_context")
+                if learning:
+                    with audit.write_lock:
+                        run = audit._run()
+                        job = audit.db.get(AnalysisJob, run.job_id)
+                        record_learning_references(
+                            audit.db, user_id=job.user_id, portfolio_id=job.portfolio_id,
+                            analysis_job_id=run.job_id, role=key, context=learning,
+                        )
+                        audit.db.commit()
                 instruction = agent_instruction(key)
                 messages = [
                     {"role": "system", "content": system},
@@ -152,6 +177,8 @@ class AgentOrchestrator:
                     ready = [node for node in pending.values() if set(node.dependencies).intersection(phase_keys) <= results.keys()]
                     for node in ready[:max(0, self.max_parallel - len(running))]:
                         payload = self.frozen.payload(**copy.deepcopy(context))
+                        if payload["input"].get("learning_context"):
+                            payload["input"]["learning_context"] = for_role(payload["input"]["learning_context"], node.node_key)
                         prior = _claims(results)
                         if "_round_" in node.node_key or node.node_key == "claim_resolver":
                             payload["prior_claims"] = prior

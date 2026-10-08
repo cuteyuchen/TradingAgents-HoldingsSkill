@@ -6,9 +6,81 @@ from ..market.codes import normalize_security_code
 from ..trigger_models import TriggerEvent, TriggerPlan
 from ..v2_dependencies import get_current_user
 from ..v2_models import Portfolio, User
-from ..v3_trigger_schemas import TriggerPlanCreate, TriggerPlanUpdate
+from ..v3_trigger_schemas import DailyPlanFillLink, DailyPlanRefresh, TriggerPlanCreate, TriggerPlanUpdate
 
 router = APIRouter(prefix="/api/v3/triggers", tags=["v3-triggers"])
+
+
+@router.get("/daily-plan")
+def get_daily_plan(portfolio_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..triggers.daily_actions import daily_plan_view
+
+    _portfolio(db, current_user.id, portfolio_id)
+    try:
+        return daily_plan_view(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/daily-plan/refresh")
+def refresh_daily_plan(payload: DailyPlanRefresh, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..analysis_workflow.constants import RunStatus
+    from ..triggers.daily_actions import daily_plan_view, latest_plan_run, refresh_daily_action_plans
+    from ..v2_models import AnalysisJob, AnalysisRun
+
+    _portfolio(db, current_user.id, payload.portfolio_id)
+    run = latest_plan_run(db, user_id=current_user.id, portfolio_id=payload.portfolio_id)
+    if payload.analysis_run_id is not None:
+        run = db.query(AnalysisRun).join(AnalysisJob).filter(
+            AnalysisRun.id == payload.analysis_run_id, AnalysisRun.user_id == current_user.id,
+            AnalysisJob.portfolio_id == payload.portfolio_id, AnalysisRun.status.in_(RunStatus.REPORTABLE),
+        ).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="reportable_analysis_not_found")
+    try:
+        refresh_daily_action_plans(db, run)
+        db.commit()
+        return daily_plan_view(db, user_id=current_user.id, portfolio_id=payload.portfolio_id)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _daily_plan(db: Session, user_id: int, plan_id: int) -> TriggerPlan:
+    from ..triggers.daily_actions import SOURCE
+
+    plan = db.query(TriggerPlan).filter(TriggerPlan.id == plan_id, TriggerPlan.user_id == user_id, TriggerPlan.source_type == SOURCE).first()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="daily_plan_not_found")
+    return plan
+
+
+@router.post("/plans/{plan_id}/fills")
+def associate_daily_plan_fill(plan_id: int, payload: DailyPlanFillLink, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..triggers.daily_actions import link_plan_fill
+
+    plan = _daily_plan(db, current_user.id, plan_id)
+    try:
+        link_plan_fill(db, plan, ledger_entry_id=payload.ledger_entry_id)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"plan_id": plan.id, "fill_entry_ids": plan.metadata_json.get("fill_entry_ids", []), "review_required": True}
+
+
+@router.post("/plans/{plan_id}/recheck")
+def recheck_action_plan(plan_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from ..triggers.daily_actions import recheck_daily_plan
+
+    plan = _daily_plan(db, current_user.id, plan_id)
+    try:
+        result = recheck_daily_plan(db, plan)
+        db.commit()
+        return result
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _portfolio(db: Session, user_id: int, portfolio_id: int) -> Portfolio:
@@ -68,6 +140,8 @@ def create_plan(payload: TriggerPlanCreate, db: Session = Depends(get_db), curre
 def update_plan(plan_id: int, payload: TriggerPlanUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     row = db.query(TriggerPlan).filter(TriggerPlan.id == plan_id, TriggerPlan.user_id == current_user.id).first()
     if row is None: raise HTTPException(status_code=404, detail="Trigger plan not found.")
+    if row.source_type == "DAILY_ANALYSIS" and payload.model_dump(exclude_unset=True) != {"enabled": False}:
+        raise HTTPException(status_code=409, detail="daily_plan_changes_require_new_analysis")
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(row, key, value)
     db.commit(); db.refresh(row)

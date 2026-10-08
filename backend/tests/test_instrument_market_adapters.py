@@ -375,6 +375,43 @@ def test_final_refresh_bypasses_cache_without_mutating_frozen_market(market):
     assert failed["quotes"]["600519"]["price"] is None
 
 
+@pytest.mark.parametrize("returned_count", [0, 1])
+def test_final_refresh_requires_every_requested_code(market, monkeypatch, returned_count):
+    from app.services.instrument_market_evidence import refresh_snapshot_quotes
+
+    batch = market.service.batch_quotes(["600519", "159915"])
+    partial = batch.model_copy(update={"items": batch.items[:returned_count]})
+    monkeypatch.setattr(market.service, "batch_quotes", lambda *args, **kwargs: partial)
+    refreshed = refresh_snapshot_quotes({"quotes": {}}, ["600519", "159915"], service=market.service)
+    assert refreshed["final_quote_refresh_status"] == "failed"
+    assert refreshed["final_quote_refresh_error"] == "FINAL_QUOTE_UNAVAILABLE"
+
+
+def test_final_refresh_projects_trading_constraints(market):
+    from app.services.instrument_market_evidence import refresh_snapshot_quotes
+
+    refreshed = refresh_snapshot_quotes({}, ["600519"], service=market.service)
+    quote_row = refreshed["quotes"]["600519"]
+    assert quote_row["lot_size"] == 100
+    assert quote_row["instrument_status"] == "ACTIVE"
+    assert quote_row["is_suspended"] is False
+    assert quote_row["is_st"] is False
+
+
+def test_missing_optional_candidate_quote_does_not_discard_required_holdings(market, monkeypatch):
+    from app.services.instrument_market_evidence import refresh_snapshot_quotes
+
+    batch = market.service.batch_quotes(["600519"])
+    monkeypatch.setattr(market.service, "batch_quotes", lambda *args, **kwargs: batch)
+    refreshed = refresh_snapshot_quotes(
+        {"final_quote_required_codes": ["600519"]}, ["600519", "159915"], service=market.service,
+    )
+    assert refreshed["final_quote_refresh_status"] == "ok"
+    assert refreshed["final_quote_unavailable_codes"] == ["159915"]
+    assert refreshed["quotes"]["600519"]["price"] == 100
+    assert "159915" not in refreshed["quotes"]
+
+
 def test_core3_retries_reuse_same_facade_evidence(market):
     from app.analysis_workflow.evidence import freeze_evidence
     from app.analysis_workflow.resume import hash_input

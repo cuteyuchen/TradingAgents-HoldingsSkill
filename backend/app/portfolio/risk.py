@@ -17,6 +17,7 @@ from ..market_models import SecurityMaster
 from ..services.daily_bar_cache import load_daily_bars
 from ..services.market_snapshot_service import collect_snapshot_quotes
 from ..v2_models import HoldingItem, PortfolioSnapshot
+from .account import build_account_state
 from .config import KEEP_SCORE_MIN_AVAILABLE_WEIGHT, KEEP_SCORE_WEIGHTS
 from .constraints import hard_cap_for_security
 from .snapshot_diff import snapshot_reserve_assets
@@ -99,7 +100,16 @@ def build_portfolio_state(
     snapshot = snapshot or latest_confirmed_snapshot(db, portfolio_id=portfolio_id, as_of=as_of)
     if snapshot is None:
         raise ValueError("confirmed_snapshot_not_found")
-    codes = [normalize_security_code(item.code) for item in snapshot.holdings if normalize_security_code(item.code)]
+    # Current account facts: the confirmed snapshot is the baseline; confirmed
+    # ledger events after it adjust quantities and spendable cash.  A newer
+    # screenshot moves the baseline, so older ledger rows are never re-applied.
+    account = build_account_state(db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=as_of)
+    snapshot_items: dict[str, HoldingItem] = {}
+    for item in snapshot.holdings:
+        item_code = normalize_security_code(item.code)
+        snapshot_items[item_code or f"name:{str(item.name or '').strip()}"] = item
+    derived_rows = account["positions"]
+    codes = [row["code"] for row in derived_rows if row.get("code")]
     raw_quotes = quote_rows
     historical_snapshot_valuation = not allow_live_quotes and raw_quotes is None
     if raw_quotes is None and codes and allow_live_quotes:
@@ -113,14 +123,21 @@ def build_portfolio_state(
     risk_flags: list[str] = []
     accepted_quotes = 0
     classification_count = 0
-    for item in snapshot.holdings:
-        code = normalize_security_code(item.code)
+    for derived in derived_rows:
+        code = derived.get("code")
+        item = snapshot_items.get(code or f"name:{str(derived.get('name') or '').strip()}")
+        qty = derived.get("qty") if derived.get("qty") is not None else (item.qty if item is not None else None)
+        available_qty = (
+            derived.get("available_qty")
+            if derived.get("available_qty") is not None
+            else (item.available_qty if item is not None else None)
+        )
         if not code:
             positions.append({
                 "code": None,
-                "name": item.name,
-                "qty": item.qty,
-                "available_qty": item.available_qty,
+                "name": derived.get("name") or (item.name if item is not None else None),
+                "qty": qty,
+                "available_qty": available_qty,
                 "market_value": None,
                 "weight": None,
                 "hard_cap": None,
@@ -150,12 +167,13 @@ def build_portfolio_state(
         flags.extend(cap_flags)
         # Historical replay may only use contemporaneous snapshot valuation or
         # explicitly supplied archived quotes; it must never fetch live data.
-        market_value = item.qty * price if quote_usable and item.qty is not None else (
-            item.market_value if historical_snapshot_valuation else None
+        market_value = qty * price if quote_usable and qty is not None else (
+            (item.market_value if item is not None else None) if historical_snapshot_valuation else None
         )
+        flags.extend(derived.get("flags") or [])
         positions.append({
             "code": code,
-            "name": item.name or (master.name if master is not None else None),
+            "name": derived.get("name") or (item.name if item is not None else None) or (master.name if master is not None else None),
             "security_type": security_type,
             "etf_category": etf_category,
             "current_price": price if quote_usable else None,
@@ -165,20 +183,27 @@ def build_portfolio_state(
             "pct_change": _number(_quote_value(quote, "pct_change")) if quote is not None else None,
             "board": master.board if master is not None else None,
             "is_st": bool(master.is_st if master is not None else False),
-            "qty": item.qty,
-            "available_qty": item.available_qty,
-            "screenshot_price": item.screenshot_price,
-            "snapshot_market_value": item.market_value,
+            "qty": qty,
+            "available_qty": available_qty,
+            "pending_buy_qty": derived.get("open_buy_qty") or None,
+            "account_source": derived.get("source"),
+            "account_flags": list(derived.get("flags") or []),
+            "screenshot_price": item.screenshot_price if item is not None else None,
+            "snapshot_market_value": item.market_value if item is not None else None,
             "market_value": market_value,
-            "cost": item.cost,
+            "cost": item.cost if item is not None else derived.get("cost"),
             "hard_cap": hard_cap,
             "flags": flags,
         })
     # ``cash`` is spendable broker cash. Corrected unused funds may contain
     # reverse-repo assets, so it is reserve-only when broker cash is absent.
-    cash = snapshot.broker_available_cash
+    cash = account["cash"]["available"]
     repo_or_standard_bond_value = snapshot.repo_or_standard_bond_value
-    reserve_assets = snapshot_reserve_assets(snapshot)
+    reserve_assets = (
+        cash + (repo_or_standard_bond_value or 0.0)
+        if cash is not None
+        else snapshot_reserve_assets(snapshot)
+    )
     valued_positions = [float(row["market_value"]) for row in positions if row.get("market_value") is not None]
     complete_valuation = len(valued_positions) == len(positions)
     market_value = sum(valued_positions) if complete_valuation else None
@@ -187,7 +212,7 @@ def build_portfolio_state(
     total_assets = snapshot_total_assets if historical_snapshot_valuation else current_estimated_total_assets
     if total_assets is None and historical_snapshot_valuation:
         total_assets = current_estimated_total_assets
-    flags = list(dict.fromkeys(risk_flags))
+    flags = list(dict.fromkeys([*risk_flags, *account["flags"]]))
     if historical_snapshot_valuation:
         flags.append("HISTORICAL_SNAPSHOT_VALUATION")
     if (
@@ -238,6 +263,18 @@ def build_portfolio_state(
         "classification_coverage": classification_count / len(positions) if positions else 1.0,
         "risk_flags": list(dict.fromkeys(flags)),
         "quality_status": quality,
+        "account_version": account["account_version"],
+        "account_derivation": {
+            "version": account["version"],
+            "snapshot_id": account["snapshot_id"],
+            "entry_count": account["entry_count"],
+            "applied_entry_ids": account["applied_entry_ids"],
+            "unapplied_entries": account["unapplied_entries"],
+            "cash_delta": account["cash"]["net_ledger_cash_delta"],
+            "flags": account["flags"],
+        },
+        "pending_sell_proceeds": account["cash"]["pending_sell_proceeds"],
+        "frozen_cash": account["cash"]["frozen"],
         "data_quality": {
             "quote_coverage": accepted_quotes / len(codes) if codes else 1.0,
             "missing_quote_count": missing_quotes,

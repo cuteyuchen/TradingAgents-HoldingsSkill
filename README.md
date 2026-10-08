@@ -289,6 +289,8 @@ pytest tests -q
 uvicorn app.main:app --reload
 ```
 
+后端 `pytest` 在收集测试模块前自动设置独立临时数据库、分析产物和备份目录，并关闭调度器。显式指定的隔离测试路径会保留；指向默认用户数据库 `backend/data/advisor.db` 或默认产物、备份目录的配置会拒绝启动。测试结束保留诊断目录，路径显示在 pytest 输出末尾，不自动删除。
+
 ```bash
 cd frontend
 npm install

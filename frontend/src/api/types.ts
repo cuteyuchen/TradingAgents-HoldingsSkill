@@ -1311,3 +1311,101 @@ export interface ShadowValidation {
   historical_backtest_included: false
   limitations: string[]
 }
+
+export interface TradeLedgerEntry {
+  id: number
+  portfolio_id: number
+  entry_type: string
+  security_code?: string | null
+  security_name?: string | null
+  side?: string | null
+  quantity?: number | null
+  price?: number | null
+  gross_amount?: number | null
+  fees?: number | null
+  taxes?: number | null
+  net_amount?: number | null
+  currency: string
+  executed_at: string
+  trade_date: string
+  available_at: string
+  source: string
+  source_ref?: string | null
+  broker_order_id?: string | null
+  idempotency_key?: string | null
+  status: string
+  notes?: string | null
+  analysis_run_id?: number | null
+  trigger_event_id?: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface PortfolioAccountPosition {
+  code?: string | null
+  name?: string | null
+  qty?: number | null
+  available_qty?: number | null
+  qty_delta?: number | null
+  available_delta?: number | null
+  open_buy_qty?: number | null
+  source?: string | null
+  flags?: string[]
+}
+
+export interface PortfolioAccountState {
+  portfolio_id: number
+  snapshot_id: number
+  snapshot_time: string
+  as_of: string
+  cash?: number | null
+  pending_sell_proceeds?: number | null
+  frozen_cash?: number | null
+  account_version?: string | null
+  account_derivation?: {
+    version?: string
+    snapshot_id?: number
+    entry_count?: number
+    applied_entry_ids?: number[]
+    cash_delta?: number | null
+    flags?: string[]
+  } | null
+  positions: PortfolioAccountPosition[]
+  [key: string]: unknown
+}
+
+export interface LedgerImportIssue {
+  field: string
+  code: string
+  message: string
+}
+
+export interface LedgerImportRow {
+  row_number: number
+  status: 'READY' | 'DUPLICATE' | 'INVALID' | string
+  raw: Record<string, string>
+  normalized?: Record<string, any> | null
+  issues?: LedgerImportIssue[]
+  duplicate_kind?: string | null
+  duplicate_of_entry_id?: number | null
+}
+
+export interface LedgerImportPreview {
+  source_ref: string
+  encoding: string
+  delimiter: string
+  headers: string[]
+  mapping: Record<string, string>
+  mapping_issues?: string[]
+  rows: LedgerImportRow[]
+  summary: { total: number; ready: number; duplicates: number; invalid: number }
+}
+
+export interface LedgerImportCommitResult {
+  source_ref: string
+  created_entry_ids: number[]
+  skipped_entry_ids: number[]
+  errors: Array<{ row: number; error: string }>
+  created: number
+  skipped: number
+}

@@ -435,6 +435,15 @@ def run_daily_review(
             trade_date=trade_date,
             as_of=as_of,
         )
+        # Existing 15:30 maintenance also produces auditable P4 review and
+        # forward validation; no independent scheduler or account source.
+        from .learning import refresh_learning
+        from .performance import performance_report
+
+        refresh_learning(db, user_id=user_id, portfolio_id=portfolio_id, as_of=as_of)
+        payload["outcome_summary"]["performance"] = performance_report(
+            db, user_id=user_id, portfolio_id=portfolio_id, trade_date=trade_date, as_of=as_of,
+        )
         refreshed = force and existing.completed_at is not None
         _apply_review(existing, payload, refreshed=refreshed)
         if refreshed:

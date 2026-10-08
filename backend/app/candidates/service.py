@@ -16,6 +16,7 @@ from ..config import settings
 from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
 from ..market_runtime_models import MarketSnapshot
+from ..portfolio.account import build_account_state
 from ..portfolio.risk import latest_confirmed_snapshot
 from ..portfolio.service import calculate_portfolio_risk
 from ..v2_models import HoldingItem, PortfolioSnapshot
@@ -859,8 +860,12 @@ def scan_candidates(
         if existing is not None:
             return _run_payload(existing)
 
-    holdings = list(snapshot.holdings)
-    held_codes = [_code(row.code) for row in holdings if _code(row.code)]
+    account_state = build_account_state(db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=moment)
+    held_codes = [
+        _code(row.get("code"))
+        for row in account_state["positions"]
+        if _code(row.get("code")) and (row.get("qty") or 0.0) > 0
+    ]
     all_securities = list(
         db.execute(
             select(SecurityMaster)

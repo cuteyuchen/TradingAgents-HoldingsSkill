@@ -285,6 +285,12 @@ def fetch_announcements(code: str, limit: int = 5) -> list[dict[str, Any]]:
                 "notice_date": row.get("notice_date") or row.get("display_time"),
                 "art_code": row.get("art_code"),
                 "source": "Eastmoney announcements",
+                "source_url": (
+                    f"https://data.eastmoney.com/notices/detail/{normalize_code(code)}/{row['art_code']}.html"
+                    if str(row.get("art_code") or "").isalnum() else None
+                ),
+                "published_at": row.get("display_time") or row.get("notice_date"),
+                "fetched_at": utc_now().isoformat(),
             }
         )
     return output
@@ -306,6 +312,9 @@ def fetch_market_news(limit: int = 8) -> list[dict[str, Any]]:
                 "title": row.get("title") or row.get("brief"),
                 "time": row.get("ctime"),
                 "source": "CLS telegraph",
+                "source_url": f"https://www.cls.cn/detail/{row['id']}" if str(row.get("id") or "").isdigit() else None,
+                "published_at": row.get("ctime"),
+                "fetched_at": utc_now().isoformat(),
                 "kind": "market_news",
             }
             for row in rows[:limit]
@@ -337,6 +346,9 @@ def fetch_market_news(limit: int = 8) -> list[dict[str, Any]]:
             "title": row.get("title"),
             "time": row.get("showTime"),
             "source": "Eastmoney 7x24",
+            "source_url": row.get("uniqueUrl") or row.get("url"),
+            "published_at": row.get("showTime"),
+            "fetched_at": utc_now().isoformat(),
             "kind": "market_news",
         }
         for row in rows[:limit]
@@ -357,10 +369,29 @@ def fetch_sector_heat(limit: int = 10) -> list[dict[str, Any]]:
         "fs": "m:90+t:2+f:!50",
         "fields": "f12,f14,f3,f62,f104,f105,f106,f184",
     }
-    payload = _em_get("https://push2.eastmoney.com/api/qt/clist/get", params=params).json()
-    rows = ((payload.get("data") or {}).get("diff") or [])
+    # The provider can cap a page below pz. Continue by its reported total so
+    # portfolio context includes weak industries as well as today's leaders.
+    rows = []
+    total = None
+    while len(rows) < limit:
+        payload = _em_get("https://push2.eastmoney.com/api/qt/clist/get", params=params).json()
+        data = payload.get("data") or {}
+        total = int(data["total"]) if data.get("total") is not None else total
+        page_rows = data.get("diff") or []
+        if isinstance(page_rows, dict):
+            page_rows = list(page_rows.values())
+        if not page_rows:
+            break
+        seen = {row.get("f12") for row in rows}
+        fresh = [row for row in page_rows if row.get("f12") not in seen]
+        if not fresh:
+            break
+        rows.extend(fresh)
+        if len(rows) >= int(data.get("total") or len(rows)):
+            break
+        params["pn"] = str(int(params["pn"]) + 1)
     output: list[dict[str, Any]] = []
-    for rank, row in enumerate(rows, start=1):
+    for rank, row in enumerate(rows[:limit], start=1):
         output.append(
             {
                 "rank": rank,
@@ -374,6 +405,11 @@ def fetch_sector_heat(limit: int = 10) -> list[dict[str, Any]]:
                 "unchanged": _float(row.get("f106")),
                 "rotation_stage": "intraday_leader" if rank <= 5 else "watch",
                 "source": "Eastmoney sector ranking",
+                "source_url": "https://quote.eastmoney.com/center/boardlist.html#industry_board",
+                "fetched_at": utc_now().isoformat(),
+                "coverage_total": total,
+                "coverage_returned": min(len(rows), limit),
+                "coverage_complete": total is not None and min(len(rows), limit) >= total,
             }
         )
     return output

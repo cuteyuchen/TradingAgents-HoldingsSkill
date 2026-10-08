@@ -1,19 +1,22 @@
 """Phase E Portfolio Operating System API, scoped to the authenticated user."""
 from __future__ import annotations
 
+import json
 from datetime import UTC
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..portfolio.imports import import_idempotency_key, preview_import
 from ..portfolio.ledger import confirm_ledger_entry, create_ledger_entry, revise_ledger_entry, void_ledger_entry
 from ..portfolio.service import calculate_portfolio_risk
 from ..portfolio.snapshot_diff import refresh_affected_snapshot_reconciliations
 from ..portfolio_models import PortfolioRiskSnapshot, PortfolioSnapshotDiff, TradeLedgerEntry, TradeLedgerRevision
 from ..portfolio_schemas import (
     PortfolioRiskCalculateRequest,
+    LedgerImportCommit,
     TradeLedgerCreate,
     TradeLedgerConfirm,
     TradeLedgerEntryResponse,
@@ -191,6 +194,73 @@ def create_ledger(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/portfolios/{portfolio_id}/ledger/import/preview")
+async def preview_ledger_import(
+    portfolio_id: int,
+    file: UploadFile = File(...),
+    mapping_json: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="Empty import file.")
+    overrides = None
+    if mapping_json:
+        try:
+            parsed = json.loads(mapping_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail="mapping_json is not valid JSON.") from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=422, detail="mapping_json must be an object.")
+        overrides = parsed
+    return preview_import(db, portfolio_id=portfolio_id, content=content, mapping_overrides=overrides)
+
+
+@router.post("/portfolios/{portfolio_id}/ledger/import")
+def commit_ledger_import(
+    portfolio_id: int,
+    payload: LedgerImportCommit,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    created_ids: list[int] = []
+    skipped_ids: list[int] = []
+    errors: list[dict] = []
+    moments = []
+    for index, row in enumerate(payload.rows):
+        data = row.model_dump()
+        data["source"] = "CSV_IMPORT"
+        data["source_ref"] = payload.source_ref
+        data["idempotency_key"] = import_idempotency_key(payload.source_ref, data)
+        if payload.label:
+            data["notes"] = (data.get("notes") or "") or payload.label
+        try:
+            entry, created = create_ledger_entry(
+                db, user_id=current_user.id, portfolio_id=portfolio_id, payload=data
+            )
+        except ValueError as exc:
+            errors.append({"row": index, "error": str(exc)})
+            continue
+        (created_ids if created else skipped_ids).append(entry.id)
+        moments.append(entry.executed_at)
+    if moments:
+        refresh_affected_snapshot_reconciliations(
+            db, portfolio_id=portfolio_id, executed_at_values=moments
+        )
+    db.commit()
+    return {
+        "source_ref": payload.source_ref,
+        "created_entry_ids": created_ids,
+        "skipped_entry_ids": skipped_ids,
+        "errors": errors,
+        "created": len(created_ids),
+        "skipped": len(skipped_ids),
+    }
 
 
 @router.post("/portfolios/{portfolio_id}/ledger/{entry_id}/revise", response_model=TradeLedgerEntryResponse)

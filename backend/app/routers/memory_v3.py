@@ -27,6 +27,8 @@ from ..memory.service import (
     serialize_daily_review,
 )
 from ..memory.models import DailyReviewRun, DecisionMemory
+from ..memory.performance import performance_report
+from ..memory.learning import learning_summary, refresh_learning
 from ..portfolio_models import TradeLedgerEntry
 from ..services.trading_calendar import TradingCalendarService
 from ..v2_dependencies import get_current_user
@@ -77,6 +79,45 @@ def _memory(db: Session, *, user_id: int, portfolio_id: int, decision_id: int) -
     if row is None:
         raise HTTPException(status_code=404, detail="Decision Memory not found.")
     return row
+
+
+@router.get("/portfolios/{portfolio_id}/memory/performance")
+def performance(
+    portfolio_id: int,
+    trade_date: date | None = Query(default=None),
+    as_of: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    return performance_report(db, user_id=current_user.id, portfolio_id=portfolio_id,
+                              trade_date=trade_date, as_of=as_of)
+
+
+@router.get("/portfolios/{portfolio_id}/memory/learning")
+def learning(
+    portfolio_id: int,
+    as_of: datetime | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    return learning_summary(db, user_id=current_user.id, portfolio_id=portfolio_id, as_of=as_of)
+
+
+@router.post("/portfolios/{portfolio_id}/memory/learning/refresh")
+def update_learning(
+    portfolio_id: int,
+    payload: DailyReviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _portfolio(db, user_id=current_user.id, portfolio_id=portfolio_id)
+    refresh_due_decision_outcomes(db, user_id=current_user.id, portfolio_id=portfolio_id,
+                                  calculation_as_of=payload.as_of, persist=False)
+    result = refresh_learning(db, user_id=current_user.id, portfolio_id=portfolio_id, as_of=payload.as_of)
+    db.commit()
+    return result
 
 
 @router.get("/portfolios/{portfolio_id}/memory/decisions")

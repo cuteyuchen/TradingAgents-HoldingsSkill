@@ -68,6 +68,8 @@ def evaluate_holding_plan(
     previous_value: float | None = None,
     portfolio_snapshot_id: int | None = None,
 ) -> TriggerDetection | None:
+    if getattr(plan, "metric", None) == "daily_action":
+        return None
     quality = str(getattr(getattr(quote, "quality_status", "MISSING"), "value", getattr(quote, "quality_status", "MISSING"))).upper()
     if quality in QUALITY_BLOCKING:
         return TriggerDetection(

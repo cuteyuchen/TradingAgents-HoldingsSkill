@@ -97,8 +97,11 @@ def extract_trigger_plans_from_analysis_run(
 
 
 def refresh_trigger_plans_from_run(db: Session, analysis_run: Any, *, mode: str = "standard") -> list[TriggerPlan]:
+    from .daily_actions import refresh_daily_action_plans
+
+    daily = refresh_daily_action_plans(db, analysis_run)
     if str(mode).lower() == "fast":
-        return []
+        return daily
     portfolio_id = getattr(getattr(analysis_run, "job", None), "portfolio_id", None)
     if portfolio_id is None:
         return []
@@ -108,9 +111,18 @@ def refresh_trigger_plans_from_run(db: Session, analysis_run: Any, *, mode: str 
     for plan in old:
         plan.enabled = False
     plans = extract_trigger_plans_from_analysis_run(db, analysis_run)
+    daily_by_code = {plan.target_key: plan for plan in daily}
+    for plan in plans:
+        action_plan = daily_by_code.get(plan.target_key)
+        if action_plan is not None:
+            plan.valid_from = action_plan.valid_from
+            plan.expires_at = action_plan.expires_at
+            plan.metadata_json = {**(plan.metadata_json or {}), "daily_action_plan_id": action_plan.id,
+                                  "source_account_version": action_plan.metadata_json.get("source_account_version"),
+                                  "evidence_version": action_plan.metadata_json.get("evidence_version")}
     db.add_all(plans)
     db.flush()
-    return plans
+    return [*plans, *daily]
 
 
 __all__ = ["extract_trigger_plans_from_analysis_run", "refresh_trigger_plans_from_run"]

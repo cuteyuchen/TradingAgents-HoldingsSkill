@@ -184,24 +184,24 @@ def test_failed_final_refresh_cannot_reuse_old_prices(environment, monkeypatch):
     run = _run(make_job())
     assert run.status == "failed"
     assert run.failed_node == "final_quote_refresh"
-    assert "portfolio_manager" not in harness.counts()
+    assert harness.counts()["portfolio_manager"] == 1
     with SessionLocal() as db:
         assert db.query(AnalysisArtifact).filter_by(analysis_run_id=run.id, artifact_key="final_quote_refresh.response").count() == 1
 
 
 def test_resume_rejects_expired_final_quotes_without_refetching_evidence(environment, monkeypatch):
     harness, make_job, client, headers = environment
-    stage = analysis_engine._job_stage
+    stage = analysis_engine._phase_skipped
     stopped = False
 
-    def pause(db, job, name, progress):
+    def pause(audit, db, job, name, progress):
         nonlocal stopped
-        if name == "portfolio_synthesis" and not stopped:
+        if name == "portfolio_decision_gate" and not stopped:
             stopped = True
             raise RuntimeError("stopped_after_final_refresh")
-        return stage(db, job, name, progress)
+        return stage(audit, db, job, name, progress)
 
-    monkeypatch.setattr(analysis_engine, "_job_stage", pause)
+    monkeypatch.setattr(analysis_engine, "_phase_skipped", pause)
     job_id = make_job()
     first = _run(job_id)
     assert first.status == "failed"

@@ -5,8 +5,8 @@ import { fmtDateTime } from '../utils/ui'
 
 const props = defineProps<{ freshness?: string | null; at?: string | null }>()
 const text = computed(() => String(props.freshness || 'MISSING').toUpperCase())
-const label = computed(() => ({ FRESH: '数据正常', STALE: '数据稍旧', FROZEN: '使用冻结数据', MISSING: '数据缺失' }[text.value] || '数据状态未知'))
-const type = computed(() => text.value === 'FRESH' ? 'success' : text.value === 'STALE' || text.value === 'FROZEN' ? 'warning' : 'error')
+const label = computed(() => ({ FRESH: '数据正常', STALE: '数据已过期', FROZEN: '使用冻结数据', MISSING: '数据缺失', UNKNOWN: '时效未核对' }[text.value] || '数据状态未知'))
+const type = computed(() => text.value === 'FRESH' ? 'success' : ['STALE', 'FROZEN', 'UNKNOWN'].includes(text.value) ? 'warning' : 'error')
 </script>
 
 <template>

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { ShieldAlert, Sparkles } from 'lucide-vue-next'
 import { fmtDateTime } from '../utils/ui'
+import { decisionLabel, decisionSummary, normalizeDecisionState, validityReasonText } from '../utils/decision'
 
 const props = withDefaults(defineProps<{
   action?: string | null
@@ -11,16 +12,15 @@ const props = withDefaults(defineProps<{
   finalizedAt?: string | null
   quality?: string | null
   freshness?: string | null
-}>(), { action: 'NO_ACTION', summary: '', reasons: () => [], checkpoint: '', finalizedAt: '', quality: '', freshness: '' })
+  validityStatus?: string | null
+  validityReason?: string | null
+  validUntil?: string | null
+}>(), { action: 'INCOMPLETE', summary: '', reasons: () => [], checkpoint: '', finalizedAt: '', quality: '', freshness: '', validityReason: '' })
 
-const normalized = computed(() => String(props.action || 'NO_ACTION').toUpperCase())
-const label = computed(() => ({
-  ACTION: '需要调整',
-  NO_ACTION: '暂不操作',
-  BLOCKED: '暂不可形成可靠行动',
-  DATA_GAP: '数据不完整',
-}[normalized.value] || normalized.value))
-const tone = computed(() => normalized.value === 'ACTION' ? 'action' : ['BLOCKED', 'DATA_GAP'].includes(normalized.value) ? 'blocked' : 'hold')
+const normalized = computed(() => normalizeDecisionState(props.action))
+const label = computed(() => decisionLabel(normalized.value))
+const tone = computed(() => normalized.value === 'ACTION' ? 'action' : ['BLOCKED', 'DATA_GAP', 'EXPIRED', 'UNKNOWN'].includes(normalized.value) ? 'blocked' : 'hold')
+const validityNote = computed(() => validityReasonText(props.validityReason) || (props.validityStatus === 'UNVERIFIED' ? '建议时效待核对' : props.validityStatus === 'EXPIRED' ? '建议已过期' : ''))
 </script>
 
 <template>
@@ -29,7 +29,7 @@ const tone = computed(() => normalized.value === 'ACTION' ? 'action' : ['BLOCKED
       <div class="decision-kicker"><Sparkles :size="15" aria-hidden="true" />今日建议</div>
       <h2>{{ label }}</h2>
       <code>{{ normalized }}</code>
-      <p class="decision-summary">{{ summary || '当前没有足够的新信息改变组合决策。' }}</p>
+      <p class="decision-summary">{{ summary || decisionSummary(normalized) }}</p>
       <ul v-if="reasons.length" class="decision-reasons">
         <li v-for="reason in reasons.slice(0, 3)" :key="reason">{{ reason }}</li>
       </ul>
@@ -40,6 +40,8 @@ const tone = computed(() => normalized.value === 'ACTION' ? 'action' : ['BLOCKED
       <span v-if="finalizedAt">{{ fmtDateTime(finalizedAt) }}</span>
       <span v-if="quality">数据质量 {{ quality }}</span>
       <span v-if="freshness">数据新鲜度 {{ freshness }}</span>
+      <span v-if="validityNote">{{ validityNote }}</span>
+      <span v-if="validUntil">有效期至 {{ fmtDateTime(validUntil) }}</span>
     </div>
     <div v-if="$slots.actions || $slots.default" class="decision-hero-footer">
       <slot />

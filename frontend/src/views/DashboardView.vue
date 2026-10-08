@@ -7,6 +7,8 @@ import { useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { DailyDashboard, FuyaoMarketBrief, ModelProfile, ModelProvider, Portfolio } from '../api/types'
 import DecisionHero from '../components/DecisionHero.vue'
+import DailyActionPlan from '../components/DailyActionPlan.vue'
+import PortfolioReviewPanel from '../components/PortfolioReviewPanel.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import FreshnessLabel from '../components/FreshnessLabel.vue'
@@ -18,6 +20,7 @@ import StatusIndicator from '../components/StatusIndicator.vue'
 import TechnicalDetails from '../components/TechnicalDetails.vue'
 import { usePortfolioContext } from '../composables/portfolio'
 import { formatCurrency, formatNumber, formatPercent } from '../utils/ui'
+import { dashboardDecisionSource, dashboardDecisionState, decisionSummary } from '../utils/decision'
 
 const route = useRoute()
 const router = useRouter()
@@ -42,15 +45,12 @@ const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selec
 const market = computed<Record<string, any>>(() => dashboard.value?.market || {})
 const portfolio = computed<Record<string, any>>(() => dashboard.value?.portfolio || {})
 const health = computed<Record<string, any>>(() => dashboard.value?.data_health || {})
-const decision = computed<Record<string, any>>(() => dashboard.value?.decisions?.latest || {})
-const analysis = computed<Record<string, any>>(() => dashboard.value?.analysis?.latest || {})
-const hasTodayDecision = computed(() => Boolean(Object.keys(decision.value).length || Object.keys(analysis.value).length))
-const finalAction = computed(() => {
-  if (!hasTodayDecision.value) return 'NO_ACTION'
-  const grade = String(analysis.value.quality || decision.value.quality || '').toUpperCase()
-  if (grade === 'DATA_GAP') return 'DATA_GAP'
-  if (grade === 'BLOCKED') return 'BLOCKED'
-  return normalizeFinalAction(dashboard.value?.decisions?.final_action || decision.value.conclusion || analysis.value.portfolio_action)
+const decision = computed(() => dashboardDecisionSource(dashboard.value))
+const finalAction = computed(() => dashboardDecisionState(dashboard.value))
+const hasTodayDecision = computed(() => finalAction.value !== 'INCOMPLETE')
+const decisionSummaryText = computed(() => {
+  if (['INCOMPLETE', 'EXPIRED', 'UNKNOWN', 'DATA_GAP', 'BLOCKED'].includes(finalAction.value)) return decisionSummary(finalAction.value)
+  return decision.value.portfolio_conclusion || decision.value.summary || decisionSummary(finalAction.value)
 })
 const marketStatus = computed(() => String(market.value.health_status || market.value.freshness || market.value.status || 'MISSING').toUpperCase())
 const systemStatus = computed(() => {
@@ -70,17 +70,11 @@ const candidates = computed<any[]>(() => {
   return [...(source.action || []), ...(source.ready || []), ...(source.watchlist || [])].slice(0, 3)
 })
 const reasons = computed(() => {
-  const raw = decision.value.reasons || decision.value.top_reasons || decision.value.blocking_reasons || analysis.value.reasons || []
+  if (['INCOMPLETE', 'EXPIRED', 'UNKNOWN'].includes(finalAction.value)) return [decisionSummary(finalAction.value)]
+  const raw = decision.value.reasons || decision.value.top_reasons || decision.value.blocking_reasons || []
   const list = Array.isArray(raw) ? raw.map((item: any) => typeof item === 'string' ? item : item.reason || item.summary || JSON.stringify(item)).filter(Boolean) : []
   if (list.length) return list
-  if (!hasTodayDecision.value) return ['今天还没有完成分析，现有组合数据仍可查看。']
-  if (finalAction.value === 'ACTION') return ['组合层已给出调整建议，请进入分析查看具体持仓动作和执行前提。']
-  if (['BLOCKED', 'DATA_GAP'].includes(finalAction.value)) return ['市场或组合数据质量尚未满足可靠行动条件。']
-  return ['当前没有足够的新信息改变组合决策。']
-})
-const holdingActions = computed<any[]>(() => {
-  const raw = decision.value.holding_actions || analysis.value.holding_actions || []
-  return Array.isArray(raw) ? raw : []
+  return [decisionSummary(finalAction.value)]
 })
 const marketRegime = computed(() => ({ BULL: '偏强', BEAR: '偏弱', NEUTRAL: '震荡', RANGE: '震荡', RISK_OFF: '风险偏高' }[String(market.value.regime || '').toUpperCase()] || market.value.regime || '状态未知'))
 
@@ -106,23 +100,6 @@ function ratioOrScore(value: unknown) {
   return Math.abs(number) <= 1 ? formatPercent(number) : formatNumber(number, 1)
 }
 
-function actionLabel(action?: string | null) {
-  return ({ ACTION: '需要调整', NO_ACTION: '暂不操作', BLOCKED: '暂不可形成可靠行动', DATA_GAP: '数据不完整' }[String(action || '').toUpperCase()] || String(action || '观察'))
-}
-
-function actionType(action?: string | null) {
-  const value = String(action || '').toUpperCase()
-  return ['BLOCKED', 'DATA_GAP'].includes(value) ? 'error' : value === 'ACTION' ? 'warning' : 'info'
-}
-
-function normalizeFinalAction(action: unknown): 'ACTION' | 'NO_ACTION' | 'BLOCKED' | 'DATA_GAP' {
-  const value = String(action || '').toUpperCase()
-  if (value === 'BLOCKED') return 'BLOCKED'
-  if (value === 'DATA_GAP') return 'DATA_GAP'
-  if (['ACTION', 'ADD', 'BUY', 'REDUCE', 'SELL', 'EXIT', 'REBALANCE'].includes(value)) return 'ACTION'
-  return 'NO_ACTION'
-}
-
 function candidateStage(item: any) {
   const value = String(item.display_stage || item.stage || item.candidate_engine_stage || 'WATCH').toUpperCase()
   return value === 'WATCHLIST' ? 'WATCH' : value
@@ -145,7 +122,7 @@ function candidateRisk(item: any) {
 }
 
 function openAnalysis() {
-  void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined, run: analysis.value.analysis_run_id || decision.value.analysis_run_id || undefined } })
+  void router.push({ name: 'analysis', query: { portfolio: selectedPortfolioId.value || undefined, run: decision.value.analysis_run_id || undefined } })
 }
 
 async function loadDashboard(silent = false) {
@@ -278,17 +255,20 @@ onUnmounted(() => {
       </SectionCard>
 
       <div class="decision-grid">
-        <DecisionHero class="decision-card" :action="finalAction" :summary="hasTodayDecision ? (decision.portfolio_conclusion || analysis.summary || '当前组合建议已生成，请根据持仓动作决定是否执行。') : '今天尚未完成分析，现有组合数据仍可查看。'" :reasons="reasons" :checkpoint="decision.checkpoint || analysis.checkpoint" :finalized-at="decision.decision_at || analysis.finished_at" :quality="decision.quality || analysis.quality" :freshness="market.freshness">
-          <template #actions><n-button type="primary" @click="openAnalysis">{{ hasTodayDecision ? '查看完整分析' : '完成第一次分析' }}<ArrowRight :size="14" /></n-button></template>
+        <DecisionHero class="decision-card" :action="finalAction" :summary="decisionSummaryText" :reasons="reasons" :checkpoint="decision.checkpoint" :finalized-at="decision.finished_at || decision.decision_at" :quality="decision.quality" :validity-status="decision.validity_status" :validity-reason="decision.validity_reason" :valid-until="decision.valid_until">
+          <template #actions><n-button type="primary" @click="openAnalysis">{{ hasTodayDecision ? '查看完整分析' : '查看分析进度' }}<ArrowRight :size="14" /></n-button></template>
         </DecisionHero>
 
-        <SectionCard title="我的组合" description="截至最近确认快照">
+        <SectionCard title="我的组合" description="确认快照加已记录成交后的当前账户">
           <template #actions><n-button text type="primary" @click="router.push({ name: 'holdings' })">查看持仓<ArrowRight :size="14" /></n-button></template>
           <div class="portfolio-metrics"><MetricTile label="总资产" :value="formatCurrency(portfolio.total_assets, 2)" /><MetricTile label="持仓市值" :value="formatCurrency(portfolio.market_value, 2)" /><MetricTile label="可用现金" :value="formatCurrency(portfolio.spendable_cash, 2)" /><MetricTile label="仓位" :value="formatPercent(portfolio.gross_exposure)" tone="risk" /></div>
-          <div class="portfolio-meta"><span>持仓 {{ portfolio.position_count ?? '不可用' }} 个</span><span>确认时间 {{ portfolio.snapshot_time ? new Date(portfolio.snapshot_time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }}</span></div>
+          <div class="portfolio-meta"><span>持仓 {{ portfolio.position_count ?? '不可用' }} 个</span><span>确认时间 {{ portfolio.snapshot_time ? new Date(portfolio.snapshot_time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }}</span><FreshnessLabel :freshness="portfolio.freshness || (portfolio.snapshot_id ? 'UNKNOWN' : 'MISSING')" /></div>
           <p v-if="portfolio.risk_flags?.length" class="risk-note">主要风险：{{ portfolio.risk_flags.slice(0, 2).join('、') }}</p>
         </SectionCard>
       </div>
+
+      <DailyActionPlan v-if="selectedPortfolioId" :portfolio-id="selectedPortfolioId" :account-version="portfolio.account_version" @changed="loadDashboard(true)" />
+      <PortfolioReviewPanel v-if="selectedPortfolioId" :portfolio-id="selectedPortfolioId" :account-version="portfolio.account_version" compact />
 
       <SectionCard title="关注机会" description="最多展示三个值得继续观察的候选，候选不是最终交易指令。">
         <template #actions><n-button text type="primary" @click="router.push({ name: 'analysis' })">查看全部<ArrowRight :size="14" /></n-button></template>

@@ -36,12 +36,15 @@ import type {
   HistoryCoverage,
   HistorySyncRun,
   Holding,
+  LedgerImportCommitResult,
+  LedgerImportPreview,
   ParameterChangeProposal,
   ParameterSetListResponse,
   ParameterSetVersion,
   ParsedHoldings,
   ProposalListResponse,
   Portfolio,
+  PortfolioAccountState,
   PortfolioSnapshot,
   RecomputeCapabilityManifest,
   ReplayAvailabilityManifest,
@@ -65,6 +68,7 @@ import type {
   ShadowPerformance,
   ShadowValidation,
   TokenPair,
+  TradeLedgerEntry,
   User,
 } from './types'
 
@@ -293,6 +297,22 @@ export const api = {
   listSnapshots: (portfolioId: number) => request<PortfolioSnapshot[]>(`/api/v2/portfolios/${portfolioId}/snapshots`),
   getSnapshot: (id: number) => request<PortfolioSnapshot>(`/api/v2/snapshots/${id}`),
 
+  getPortfolioState: (portfolioId: number) => request<PortfolioAccountState>(`/api/v3/portfolios/${portfolioId}/state`),
+  listLedgerEntries: (portfolioId: number) => request<TradeLedgerEntry[]>(`/api/v3/portfolios/${portfolioId}/ledger`),
+  createLedgerEntry: (portfolioId: number, payload: Record<string, unknown>) =>
+    request<TradeLedgerEntry>(`/api/v3/portfolios/${portfolioId}/ledger`, { method: 'POST', body: payload }),
+  reviseLedgerEntry: (portfolioId: number, entryId: number, payload: { changes: Record<string, unknown>; reason: string }) =>
+    request<TradeLedgerEntry>(`/api/v3/portfolios/${portfolioId}/ledger/${entryId}/revise`, { method: 'POST', body: payload }),
+  voidLedgerEntry: (portfolioId: number, entryId: number, reason: string) =>
+    request<TradeLedgerEntry>(`/api/v3/portfolios/${portfolioId}/ledger/${entryId}/void`, { method: 'POST', body: { reason } }),
+  previewLedgerImport: (portfolioId: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<LedgerImportPreview>(`/api/v3/portfolios/${portfolioId}/ledger/import/preview`, { method: 'POST', body: form })
+  },
+  commitLedgerImport: (portfolioId: number, payload: { source_ref: string; rows: Record<string, unknown>[]; label?: string }) =>
+    request<LedgerImportCommitResult>(`/api/v3/portfolios/${portfolioId}/ledger/import`, { method: 'POST', body: payload }),
+
   createAnalysisJob: (snapshotId: number, mode: AnalysisMode, checkpoint?: string, notify = true) => request<AnalysisJob>('/api/v2/analysis/jobs', { method: 'POST', body: { snapshot_id: snapshotId, mode, checkpoint, notify } }),
   getAnalysisJob: (id: number) => request<AnalysisJob>(`/api/v2/analysis/jobs/${id}`),
   cancelAnalysisJob: (id: number) => request<AnalysisJob>(`/api/v2/analysis/jobs/${id}/cancel`, { method: 'POST' }),
@@ -375,6 +395,12 @@ export const api = {
   testNotification: (id: number) => request<{ status: string; message: string }>(`/api/v2/notifications/${id}/test`, { method: 'POST' }),
 
   getDashboardToday: (portfolioId: number, signal?: AbortSignal) => request<DailyDashboard>(`/api/v3/portfolios/${portfolioId}/dashboard/today`, { signal }),
+  getDailyPlan: (portfolioId: number, signal?: AbortSignal) => request<Record<string, any>>(`/api/v3/triggers/daily-plan?portfolio_id=${portfolioId}`, { signal }),
+  refreshDailyPlan: (portfolioId: number) => request<Record<string, any>>('/api/v3/triggers/daily-plan/refresh', { method: 'POST', body: { portfolio_id: portfolioId } }),
+  recheckDailyAction: (planId: number) => request<Record<string, any>>(`/api/v3/triggers/plans/${planId}/recheck`, { method: 'POST' }),
+  linkDailyActionFill: (planId: number, ledgerEntryId: number) => request<Record<string, any>>(`/api/v3/triggers/plans/${planId}/fills`, { method: 'POST', body: { ledger_entry_id: ledgerEntryId } }),
+  getAccountReview: (portfolioId: number, signal?: AbortSignal) => request<Record<string, any>>(`/api/v3/portfolios/${portfolioId}/memory/performance`, { signal }),
+  refreshLearning: (portfolioId: number) => request<Record<string, any>>(`/api/v3/portfolios/${portfolioId}/memory/learning/refresh`, { method: 'POST', body: {} }),
   getDashboardTimeline: (portfolioId: number) => request<DashboardTimeline>(`/api/v3/portfolios/${portfolioId}/dashboard/timeline`),
   getDashboardHealth: (portfolioId: number) => request<DashboardHealth>(`/api/v3/portfolios/${portfolioId}/dashboard/health`),
   getDashboardDiagnostics: (portfolioId: number) => request<DashboardDiagnostics>(`/api/v3/portfolios/${portfolioId}/dashboard/diagnostics`),

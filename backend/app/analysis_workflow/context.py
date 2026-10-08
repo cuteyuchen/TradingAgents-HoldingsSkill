@@ -45,7 +45,7 @@ def compress_payload(payload: Any, mode: str = "full") -> Any:
         result = dict(payload)
         source = payload.get("input") or {}
         reduced = _truncate(source, list_limit=8 if mode == "compressed" else 3, text_limit=400 if mode == "compressed" else 120)
-        for key in ("snapshot", "portfolio_context"):
+        for key in ("snapshot", "portfolio_context", "learning_context"):
             if key in source:
                 reduced[key] = source[key]
         result["input"] = reduced

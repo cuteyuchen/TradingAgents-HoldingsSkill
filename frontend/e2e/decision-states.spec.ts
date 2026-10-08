@@ -22,7 +22,7 @@ test.describe('decision states', () => {
 
     await page.goto(`/reports?portfolio=${facts.portfolios.states}&run=${facts.runs.no_action}`)
     await expect(page.locator('.decision-hero')).toContainText('NO_ACTION')
-    await expect(page.locator('.decision-hero')).toContainText('暂不操作')
+    await expect(page.locator('.decision-hero')).toContainText('无需操作')
 
     await page.goto(`/reports?portfolio=${facts.portfolios.states}&run=${facts.runs.blocked}`)
     await expect(page.locator('.decision-hero')).toContainText('BLOCKED')
@@ -55,7 +55,8 @@ test.describe('decision states', () => {
     await selectPortfolio(page, 'Acceptance Freshness')
     await page.goto(`/dashboard?portfolio=${facts.portfolios.freshness}`)
     await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/)
-    await expect(page.locator('.decision-card')).toContainText('NO_ACTION')
+    await expect(page.locator('.decision-card')).toContainText('INCOMPLETE')
+    await expect(page.locator('.decision-card')).not.toContainText('NO_ACTION')
     await expect(page.locator('.decision-card')).toContainText('今天尚未完成分析')
   })
 })

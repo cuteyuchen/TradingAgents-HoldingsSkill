@@ -45,8 +45,16 @@ def latest_market_state(db: Session, *, as_of: datetime) -> dict[str, Any]:
     }
 
 
-def _calculation_key(snapshot_id: int, as_of: datetime, market_snapshot_id: str | None) -> str:
-    return f"{snapshot_id}:{as_of.replace(second=0, microsecond=0).isoformat()}:{market_snapshot_id or 'none'}:{PORTFOLIO_RISK_VERSION}"
+def _calculation_key(
+    snapshot_id: int,
+    as_of: datetime,
+    market_snapshot_id: str | None,
+    account_version: str | None = None,
+) -> str:
+    return (
+        f"{snapshot_id}:{as_of.replace(second=0, microsecond=0).isoformat()}:"
+        f"{market_snapshot_id or 'none'}:{account_version or 'no-account-version'}:{PORTFOLIO_RISK_VERSION}"
+    )
 
 
 def _persist_risk_snapshot(
@@ -58,7 +66,9 @@ def _persist_risk_snapshot(
     market_state: dict[str, Any],
     as_of: datetime,
 ) -> PortfolioRiskSnapshot:
-    calculation_key = _calculation_key(state["snapshot_id"], as_of, market_state.get("snapshot_id"))
+    calculation_key = _calculation_key(
+        state["snapshot_id"], as_of, market_state.get("snapshot_id"), state.get("account_version")
+    )
     row = db.execute(select(PortfolioRiskSnapshot).where(
         PortfolioRiskSnapshot.calculation_key == calculation_key
     )).scalar_one_or_none()
@@ -229,6 +239,10 @@ def portfolio_context_for_analysis(
         "market_state_frozen": market_state.get("is_frozen"),
         "portfolio_quality": risk.get("quality_status"),
         "portfolio_confidence": risk.get("confidence"),
+        "account_version": state.get("account_version"),
+        "account_derivation": state.get("account_derivation"),
+        "pending_sell_proceeds": state.get("pending_sell_proceeds"),
+        "frozen_cash": state.get("frozen_cash"),
         "snapshot_diff": snapshot_diff,
         "snapshot_history": [
             {

@@ -12,6 +12,7 @@ from ..market.instrument_schemas import InstrumentQuoteResponse
 from ..market.instruments import InstrumentMarketService
 from ..market.models import _coerce_float
 from ..market.quality import _worst_grade
+from .unified_evidence import build_unified_evidence, collect_supplemental_evidence, merge_unified_evidence
 
 
 def _legacy_quote(quote: InstrumentQuoteResponse) -> dict[str, Any]:
@@ -23,6 +24,9 @@ def _legacy_quote(quote: InstrumentQuoteResponse) -> dict[str, Any]:
         "code": quote.instrument.symbol, "canonical_code": quote.instrument.code,
         "instrument_id": quote.instrument.instrument_id, "exchange": quote.instrument.exchange,
         "name": quote.instrument.name, "security_type": quote.instrument.instrument_type,
+        "lot_size": quote.instrument.lot_size, "board": quote.instrument.board,
+        "is_st": quote.instrument.is_st, "is_suspended": quote.instrument.is_suspended,
+        "instrument_status": quote.instrument.status,
         "price": quote.last, "pct_change": quote.change_pct,
         "prev_close": quote.prev_close, "open": quote.open, "high": quote.high, "low": quote.low,
         "volume": quote.volume, "amount": quote.turnover, "turnover": quote.turnover,
@@ -38,23 +42,36 @@ def _legacy_quote(quote: InstrumentQuoteResponse) -> dict[str, Any]:
     }
 
 
-def collect_market_snapshot(codes: list[str], *, service: InstrumentMarketService | None = None) -> dict[str, Any]:
+def collect_market_snapshot(
+    codes: list[str], *, candidate_codes: list[str] | None = None,
+    service: InstrumentMarketService | None = None, _include_context: bool = True,
+) -> dict[str, Any]:
     """Collect once before evidence is frozen. Agent retries never call this."""
     if service is None:
         with SessionLocal() as db:
-            return collect_market_snapshot(codes, service=InstrumentMarketService(db))
+            return collect_market_snapshot(codes, candidate_codes=candidate_codes, service=InstrumentMarketService(db), _include_context=_include_context)
     from . import market_data
 
+    codes = list(dict.fromkeys([*codes, *(candidate_codes or [])]))
     context_codes = list(codes)
-    index_row = service.resolver.resolve_many(["000001.SH"])[0][1]
-    if index_row is not None and codes and len(codes) < 100:
+    index_row = service.resolver.resolve_many(["000001.SH"])[0][1] if _include_context else None
+    if index_row is not None and codes:
         context_codes.append("000001.SH")
-    evidence = service.evidence_snapshot(context_codes) if context_codes else None
+    resolved = service.resolver.resolve_many(context_codes) if context_codes else []
+    known_codes = [code for code, row in resolved if row is not None]
+    evidence = None
+    for offset in range(0, len(known_codes), 100):
+        batch = service.evidence_snapshot(known_codes[offset:offset + 100])
+        if evidence is None:
+            evidence = batch
+        else:
+            evidence.items.extend(batch.items)
+            evidence.as_of = batch.as_of
     quotes = {}
     index_quote = {}
     technicals = {}
     flows = {}
-    errors = []
+    errors = [f"identity:{code}:unavailable" for code, row in resolved if row is None]
     grades = []
     for item in evidence.items if evidence else []:
         snapshot = item.snapshot
@@ -67,8 +84,8 @@ def collect_market_snapshot(codes: list[str], *, service: InstrumentMarketServic
         if snapshot.quote.last is None or snapshot.quote.status in {"stale", "unavailable"}:
             errors.append(f"quote:{snapshot.instrument.code}:{snapshot.quote.status}")
         closes = [bar.close for bar in item.bars.bars]
-        ma5 = sum(closes[-5:]) / len(closes[-5:]) if closes else None
-        ma20 = sum(closes[-20:]) / len(closes[-20:]) if closes else None
+        ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else None
+        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
         volumes = [bar.volume for bar in item.bars.bars[-6:]]
         volume_ratio = None
         if len(volumes) == 6 and all(volume is not None for volume in volumes):
@@ -82,6 +99,8 @@ def collect_market_snapshot(codes: list[str], *, service: InstrumentMarketServic
             "latest": item.bars.bars[-1].model_dump(mode="json") if closes else None,
             "rows": [bar.model_dump(mode="json") for bar in item.bars.bars],
             "source": item.bars.source, "adjustment": item.bars.adjustment,
+            "return_5d_pct": (closes[-1] / closes[-6] - 1) * 100 if len(closes) >= 6 and closes[-6] > 0 else None,
+            "return_20d_pct": (closes[-1] / closes[-21] - 1) * 100 if len(closes) >= 21 and closes[-21] > 0 else None,
         }
         flow = snapshot.capital_flow
         current = flow.current
@@ -104,18 +123,21 @@ def collect_market_snapshot(codes: list[str], *, service: InstrumentMarketServic
         sectors = [{"rank": 1, "name": "Acceptance sector", "pct_change": 1.2, "source": "acceptance"}]
         etfs = []
     else:
-        for code in list(quotes)[:8]:
+        for code in quotes:
             try:
-                announcements[code] = market_data.fetch_announcements(code)
+                announcements[code] = market_data.fetch_announcements(code, limit=20)
             except Exception:
                 announcements[code] = []
                 errors.append(f"announcements:{code}:unavailable")
         extras = {}
         for name, loader in (
-            ("news", market_data.fetch_market_news),
-            ("sectors", market_data.fetch_sector_heat),
+            ("news", lambda: market_data.fetch_market_news(limit=80)),
+            ("sectors", lambda: market_data.fetch_sector_heat(limit=500)),
             ("etfs", market_data.fetch_etf_leaders),
         ):
+            if not _include_context:
+                extras[name] = []
+                continue
             try:
                 extras[name] = loader()
             except Exception:
@@ -124,15 +146,16 @@ def collect_market_snapshot(codes: list[str], *, service: InstrumentMarketServic
         news, sectors, etfs = extras["news"], extras["sectors"], extras["etfs"]
     news = news + [
         {**item, "code": code, "kind": "announcement"}
-        for code, items in announcements.items() for item in items[:3]
+        for code, items in announcements.items() for item in items
     ]
     # Preserve the legacy optional-data gate, not a new Portfolio/Agent policy.
     # The complete per-module worst grade remains inside instrument_market.
     grade = _worst_grade(*grades) if grades else "F"
     if errors:
         grade = _worst_grade(grade, "B")
-    return {
-        "captured_at": (evidence.as_of if evidence else utc_now()).isoformat(),
+    supplemental = collect_supplemental_evidence(service, known_codes, include_market=_include_context)
+    result = {
+        "captured_at": service._now().isoformat(),
         "quotes": quotes, "technicals": technicals, "fund_flows": flows,
         "instrument_market": evidence.model_dump(mode="json") if evidence else None,
         "announcements": announcements, "news": news,
@@ -141,6 +164,42 @@ def collect_market_snapshot(codes: list[str], *, service: InstrumentMarketServic
         "quality_grade": grade, "errors": errors,
         "source_chain": sorted({quote["source"] for quote in quotes.values() if quote.get("source")}),
     }
+    result["unified_evidence"] = build_unified_evidence(result, requested_codes=codes, supplemental=supplemental, include_market=_include_context)
+    result["evidence_version"] = result["unified_evidence"]["evidence_version"]
+    # Only time-admissible events enter the legacy agent context, too.
+    result["news"] = [row["data"] for row in result["unified_evidence"]["records"].values() if row["kind"] in {"news", "international_event", "announcement"}]
+    result["announcements"] = {code: [row for row in result["news"] if row.get("kind") == "announcement" and row.get("code") == code] for code in announcements}
+    return result
+
+
+def enrich_candidate_evidence(
+    snapshot: dict[str, Any], candidate_codes: list[str], *, service: InstrumentMarketService | None = None,
+) -> dict[str, Any]:
+    """Enrich the scan's new candidates before freezing, without recollecting the market."""
+    existing = {normalize_security_code(code) for code in snapshot.get("quotes", {})}
+    missing = list(dict.fromkeys(code for code in candidate_codes if normalize_security_code(code) not in existing))
+    if not missing:
+        return snapshot
+    if service is None:
+        with SessionLocal() as db:
+            return enrich_candidate_evidence(snapshot, missing, service=InstrumentMarketService(db))
+    addition = collect_market_snapshot(missing, service=service, _include_context=False)
+    merged = deepcopy(snapshot)
+    for key in ("quotes", "technicals", "fund_flows", "announcements"):
+        merged[key] = {**merged.get(key, {}), **addition.get(key, {})}
+    merged["news"] = [*merged.get("news", []), *addition.get("news", [])]
+    if addition.get("instrument_market"):
+        if merged.get("instrument_market"):
+            merged["instrument_market"]["items"].extend(addition["instrument_market"]["items"])
+            merged["instrument_market"]["as_of"] = addition["instrument_market"]["as_of"]
+        else:
+            merged["instrument_market"] = addition["instrument_market"]
+    merged["captured_at"] = addition["captured_at"]
+    merged["source_chain"] = sorted(set([*merged.get("source_chain", []), *addition.get("source_chain", [])]))
+    merged["candidate_evidence_errors"] = addition.get("errors", [])
+    merged["unified_evidence"] = merge_unified_evidence(merged.get("unified_evidence") or {}, addition["unified_evidence"], as_of=merged["captured_at"])
+    merged["evidence_version"] = merged["unified_evidence"]["evidence_version"]
+    return merged
 
 
 def refresh_snapshot_quotes(
@@ -163,7 +222,21 @@ def refresh_snapshot_quotes(
             }
             for item in batch.items
         }
-        usable = all(item.status in {"available", "degraded"} and item.quality in {"A", "B"} and item.last is not None for item in batch.items)
+        requested_codes = {normalize_security_code(code) for code in codes}
+        required_codes = {
+            normalize_security_code(code)
+            for code in snapshot.get("final_quote_required_codes", codes)
+        }
+        usable_codes = {
+            normalize_security_code(item.code) for item in batch.items
+            if item.instrument is not None
+            and normalize_security_code(item.instrument.code) == normalize_security_code(item.code)
+            and item.status in {"available", "degraded"}
+            and item.quality in {"A", "B"}
+            and item.last is not None and item.last > 0
+        }
+        usable = bool(required_codes) and required_codes <= requested_codes and required_codes <= usable_codes
+        refreshed["final_quote_unavailable_codes"] = sorted(requested_codes - usable_codes)
         refreshed["final_quote_refresh_at"] = batch.as_of.isoformat()
         refreshed["final_quote_refresh_status"] = "ok" if usable else "failed"
         if not usable:

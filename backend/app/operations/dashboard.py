@@ -12,11 +12,13 @@ from ..clock import utc_now
 from ..candidates.models import CandidateRun, CandidateScore
 from ..candidates.service import latest_candidate_context
 from ..config import settings
+from ..decision_contract import holding_decision_status, resolve_decision_status
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster, TradingCalendar
 from ..market.session import MarketSessionService
 from ..market_runtime_models import ProviderHealth
 from ..memory.models import DailyReviewRun, DecisionMemory, DecisionOutcome
+from ..portfolio.account import build_account_state
 from ..portfolio_models import PortfolioRiskSnapshot, TradeLedgerEntry
 from ..portfolio.snapshot_diff import snapshot_reserve_assets
 from ..services.realtime_monitor import get_realtime_monitor
@@ -300,6 +302,16 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         PortfolioRiskSnapshot.as_of <= cutoff,
     ).order_by(PortfolioRiskSnapshot.as_of.desc(), PortfolioRiskSnapshot.id.desc()).limit(1)).scalar_one_or_none()
     holdings = db.execute(select(HoldingItem).where(HoldingItem.snapshot_id == snapshot.id).order_by(HoldingItem.weight.desc().nullslast(), HoldingItem.id.asc())).scalars().all()
+    account = build_account_state(db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=cutoff)
+    derived_by_code = {
+        str(row.get("code")): row for row in account["positions"] if row.get("code")
+    }
+
+    def derived_value(code: Any, key: str, fallback: Any) -> Any:
+        row = derived_by_code.get(str(code or ""))
+        value = row.get(key) if isinstance(row, dict) else None
+        return value if value is not None else fallback
+
     risk_flags = list(risk.risk_flags_json or []) if risk else []
     total_assets = snapshot.total_assets
     reserve_assets = snapshot_reserve_assets(snapshot)
@@ -312,7 +324,10 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         "snapshot_time": snapshot.snapshot_time,
         "total_assets": total_assets,
         "market_value": snapshot.total_market_value,
-        "spendable_cash": snapshot.broker_available_cash,
+        "spendable_cash": account["cash"]["available"] if account["cash"]["available"] is not None else snapshot.broker_available_cash,
+        "pending_sell_proceeds": account["cash"]["pending_sell_proceeds"],
+        "account_version": account["account_version"],
+        "account_entry_count": account["entry_count"],
         "reserve_assets": reserve_assets,
         "reserve_ratio": reserve_assets / total_assets if reserve_assets is not None and total_assets else None,
         "cash_ratio": risk.cash_ratio if risk else None,
@@ -331,8 +346,8 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         "holdings": [{
             "code": item.code,
             "name": item.name,
-            "qty": item.qty,
-            "available_qty": item.available_qty,
+            "qty": derived_value(item.code, "qty", item.qty),
+            "available_qty": derived_value(item.code, "available_qty", item.available_qty),
             "price": item.screenshot_price,
             "market_value": item.market_value,
             "weight": item.weight,
@@ -438,6 +453,64 @@ def _trigger_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: da
     } for row in rows]}
 
 
+def _decision_validity(
+    db: Session,
+    *,
+    user_id: int,
+    portfolio_id: int,
+    source_snapshot_id: int | None,
+    payload: dict[str, Any],
+    cutoff: datetime,
+) -> dict[str, Any]:
+    snapshot = db.execute(select(PortfolioSnapshot).where(
+        PortfolioSnapshot.user_id == user_id,
+        PortfolioSnapshot.portfolio_id == portfolio_id,
+        PortfolioSnapshot.status == "confirmed",
+        PortfolioSnapshot.snapshot_time <= cutoff,
+    ).order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc()).limit(1)).scalar_one_or_none()
+    metadata = payload.get("decision_validity") if isinstance(payload.get("decision_validity"), dict) else {}
+    try:
+        valid_until = _utc_naive(datetime.fromisoformat(str(metadata.get("valid_until") or "")))
+    except ValueError:
+        valid_until = None
+    reference_account_version = payload.get("account_version")
+    if reference_account_version is None and isinstance(payload.get("result"), dict):
+        reference_account_version = payload["result"].get("account_version")
+    current_account_version: str | None = None
+    if snapshot is not None:
+        try:
+            current_account_version = build_account_state(
+                db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=cutoff
+            )["account_version"]
+        except Exception:  # noqa: BLE001
+            logger.exception("Account version derivation failed for portfolio %s", portfolio_id)
+    status, reason = "UNVERIFIED", "VALIDITY_WINDOW_UNAVAILABLE"
+    if valid_until is not None and cutoff >= valid_until:
+        status, reason = "EXPIRED", "VALIDITY_WINDOW_EXPIRED"
+    elif source_snapshot_id is None or snapshot is None:
+        reason = "PORTFOLIO_LINEAGE_UNAVAILABLE"
+    elif source_snapshot_id != snapshot.id:
+        status, reason = "EXPIRED", "PORTFOLIO_SNAPSHOT_CHANGED"
+    elif (
+        reference_account_version
+        and current_account_version
+        and str(reference_account_version) != str(current_account_version)
+    ):
+        status, reason = "EXPIRED", "PORTFOLIO_ACCOUNT_CHANGED"
+    elif _freshness(snapshot.snapshot_time, cutoff=cutoff, limit_seconds=FRESHNESS_LIMITS_SECONDS["portfolio"]) == "STALE":
+        status, reason = "EXPIRED", "PORTFOLIO_SNAPSHOT_STALE"
+    elif valid_until is not None:
+        status, reason = "VALID", "EXPLICIT_VALIDITY_WINDOW"
+    return {
+        "portfolio_snapshot_id": source_snapshot_id,
+        "account_version": reference_account_version,
+        "current_account_version": current_account_version,
+        "validity_status": status,
+        "validity_reason": reason,
+        "valid_until": valid_until.replace(tzinfo=UTC) if valid_until is not None else None,
+    }
+
+
 def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: datetime) -> dict[str, Any]:
     local_date = _local(cutoff).date()
     start = _day_start(local_date)
@@ -451,16 +524,18 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
         AnalysisJob.status == "succeeded",
         AnalysisJob.finished_at.is_not(None),
         AnalysisJob.finished_at <= cutoff,
-        AnalysisRun.created_at >= start,
+        AnalysisJob.finished_at >= start,
         AnalysisRun.created_at <= cutoff,
-    ).order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(20)).scalars().all()
+    ).order_by(AnalysisJob.finished_at.desc(), AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(20)).scalars().all()
     latest = runs[0] if runs else None
-    result = (latest.structured_result_json or {}).get("result", {}) if latest else {}
+    structured = latest.structured_result_json if latest and isinstance(latest.structured_result_json, dict) else {}
+    result = structured.get("result") if isinstance(structured.get("result"), dict) else {}
     decision_gate = result.get("decision_gate") if isinstance(result.get("decision_gate"), dict) else {}
     action_rows = result.get("candidates") or []
     in_progress = [job for job in jobs if _job_status_as_of(job, cutoff) == "RUNNING"]
     latest_payload = None
     if latest is not None:
+        validity = _decision_validity(db, user_id=user_id, portfolio_id=portfolio_id, source_snapshot_id=latest.portfolio_snapshot_id, payload=structured, cutoff=cutoff)
         latest_payload = {
             "analysis_job_id": latest.job_id,
             "analysis_run_id": latest.id,
@@ -472,6 +547,10 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
             "portfolio_action": result.get("portfolio_action") or decision_gate.get("portfolio_action"),
             "quality": latest.data_quality_grade,
             "confidence": latest.confidence,
+            "holding_actions": result.get("holdings") or [],
+            "candidate_actions": result.get("candidates") or [],
+            "decision_status": "EXPIRED" if validity["validity_status"] == "EXPIRED" else resolve_decision_status(result),
+            **validity,
             "candidate_action_count": len([
                 row for row in action_rows
                 if isinstance(row, dict) and str(row.get("stage") or "").upper() == "ACTION"
@@ -503,10 +582,10 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
     }
 
 
-def _decision_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: datetime) -> dict[str, Any]:
+def _decision_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: datetime, analysis: dict[str, Any] | None = None) -> dict[str, Any]:
     local_date = _local(cutoff).date()
     start = _day_start(local_date)
-    rows = db.execute(select(DecisionMemory).join(
+    rows = db.execute(select(DecisionMemory, AnalysisRun).join(
         AnalysisRun, DecisionMemory.analysis_run_id == AnalysisRun.id,
     ).join(
         AnalysisJob, AnalysisRun.job_id == AnalysisJob.id,
@@ -521,32 +600,74 @@ def _decision_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
         DecisionMemory.available_at <= cutoff,
         DecisionMemory.decision_at >= start,
         DecisionMemory.decision_at <= cutoff,
-    ).order_by(DecisionMemory.decision_at.desc(), DecisionMemory.id.desc())).scalars().all()
-    latest = rows[0] if rows else None
+    ).order_by(AnalysisJob.finished_at.desc(), DecisionMemory.decision_at.desc(), DecisionMemory.id.desc())).all()
+    latest, run = rows[0] if rows else (None, None)
     latest_payload = None
     if latest is not None:
-        action = str(latest.portfolio_action or latest.final_rating or "no_action").strip().upper()
-        conclusion = "NO_ACTION" if action in {"NO_ACTION", "HOLD", "HOLD_ONLY", "WATCH", "WATCH_ONLY"} else action
-        if str(latest.quality_status or "").upper() in {"BLOCKED", "MISSING"}:
-            conclusion = "BLOCKED"
+        structured = run.structured_result_json if isinstance(run.structured_result_json, dict) else {}
+        result = structured.get("result") if isinstance(structured.get("result"), dict) else {}
+        source_snapshot_id = run.portfolio_snapshot_id
+        validity = _decision_validity(db, user_id=user_id, portfolio_id=portfolio_id, source_snapshot_id=source_snapshot_id, payload=structured, cutoff=cutoff)
+        if latest.portfolio_snapshot_id is not None and latest.portfolio_snapshot_id != source_snapshot_id:
+            validity.update(validity_status="EXPIRED", validity_reason="DECISION_LINEAGE_CONFLICT")
+        conclusion = resolve_decision_status(result)
+        if str(latest.quality_status or "").upper() in {"BLOCKED", "MISSING", "INVALID", "CONFLICT", "D", "F"}:
+            conclusion = "DATA_GAP"
+        if validity["validity_status"] == "EXPIRED":
+            conclusion = "EXPIRED"
+        original_rows = result.get("holdings") if isinstance(result.get("holdings"), list) else []
+        original_by_code = {str(row.get("code") or ""): row for row in original_rows if isinstance(row, dict) and row.get("code")}
+        holding_actions = []
+        for stored in latest.holding_decisions_json or []:
+            if not isinstance(stored, dict):
+                continue
+            original = original_by_code.pop(str(stored.get("code") or stored.get("target_key") or ""), None)
+            if original is None:
+                original = stored.get("source") if isinstance(stored.get("source"), dict) else {}
+            row = {**stored, **original}
+            row["decision_status"] = holding_decision_status(original)
+            holding_actions.append(row)
+        holding_actions.extend({**row, "decision_status": holding_decision_status(row)} for row in original_by_code.values())
         latest_payload = {
             "id": latest.id,
             "decision_at": latest.decision_at,
+            "finished_at": run.job.finished_at,
             "decision_type": latest.decision_type,
             "final_rating": latest.final_rating,
             "portfolio_action": latest.portfolio_action,
             "conclusion": conclusion,
-            "holding_actions": latest.holding_decisions_json or [],
+            "decision_status": conclusion,
+            **validity,
+            "holding_actions": holding_actions,
             "candidate_actions": latest.candidate_decisions_json or [],
             "quality": latest.quality_status,
             "confidence": latest.confidence,
             "analysis_run_id": latest.analysis_run_id,
+            "decision_source": "DECISION_MEMORY",
         }
+    if analysis is None:
+        analysis = _analysis_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff)
+    latest_analysis = analysis.get("latest")
+    if isinstance(latest_analysis, dict):
+        analysis_finished = _utc_naive(latest_analysis.get("finished_at"))
+        memory_finished = _utc_naive(latest_payload.get("finished_at")) if latest_payload else None
+        if analysis_finished is not None and (memory_finished is None or analysis_finished > memory_finished):
+            latest_payload = {
+                **latest_analysis,
+                "id": None,
+                "decision_at": latest_analysis["finished_at"],
+                "decision_type": latest_analysis["decision_status"],
+                "conclusion": latest_analysis["decision_status"],
+                "decision_source": "ANALYSIS_RUN",
+            }
     return {
-        "status": "AVAILABLE" if latest else "MISSING",
+        "status": "AVAILABLE" if latest_payload else "MISSING",
         "today_count": len(rows),
         "latest": latest_payload,
-        "final_action": latest_payload["conclusion"] if latest_payload else "NO_ACTION",
+        "final_action": latest_payload["conclusion"] if latest_payload else "INCOMPLETE",
+        "decision_status": latest_payload["decision_status"] if latest_payload else "INCOMPLETE",
+        "validity_status": latest_payload["validity_status"] if latest_payload else "UNVERIFIED",
+        "valid_until": latest_payload["valid_until"] if latest_payload else None,
     }
 
 
@@ -816,21 +937,16 @@ def build_daily_dashboard(db: Session, *, user_id: int, portfolio_id: int, as_of
     candidates = _section(lambda: _candidate_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff, portfolio=portfolio))
     triggers = _section(lambda: _trigger_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff))
     analysis = _section(lambda: _analysis_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff))
-    decisions = _section(lambda: _decision_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff))
+    decisions = _section(lambda: _decision_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff, analysis=analysis))
     executions = _section(lambda: _execution_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff))
     memory = _section(lambda: _memory_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff))
     timeline = _section(lambda: operational_timeline(db, portfolio_id=portfolio_id, user_id=user_id, as_of=local))
     health = _section(lambda: _health_section(db, user_id=user_id, portfolio_id=portfolio_id, cutoff=cutoff, portfolio=portfolio, market=market, candidate=candidates, memory=memory))
     final_action = (
-        (decisions.get("latest") or {}).get("conclusion")
-        or (analysis.get("latest") or {}).get("portfolio_action")
-        or (analysis.get("latest") or {}).get("final_rating")
-        or "NO_ACTION"
+        (decisions.get("latest") or {}).get("decision_status")
+        or (analysis.get("latest") or {}).get("decision_status")
+        or "INCOMPLETE"
     )
-    if str(final_action).lower() in {"no_action", "hold", "hold_only", "watch", "watch_only"}:
-        final_action = "NO_ACTION"
-    elif str(final_action).lower() in {"blocked", "block"}:
-        final_action = "BLOCKED"
     notification_state = db.execute(select(DailyOperationalRun.notification_state_json).where(
         DailyOperationalRun.user_id == user_id, DailyOperationalRun.portfolio_id == portfolio_id, DailyOperationalRun.trade_date == local.date(),
     ).order_by(DailyOperationalRun.id.desc()).limit(1)).scalar_one_or_none()
@@ -854,7 +970,7 @@ def build_daily_dashboard(db: Session, *, user_id: int, portfolio_id: int, as_of
         "candidates": candidates,
         "triggers": triggers,
         "analysis": analysis,
-        "decisions": {**decisions, "final_action": final_action or "NO_ACTION"},
+        "decisions": {**decisions, "final_action": final_action, "decision_status": final_action},
         "executions": executions,
         "memory": memory,
         "data_health": health,

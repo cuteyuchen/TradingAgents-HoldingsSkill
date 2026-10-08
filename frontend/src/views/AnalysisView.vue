@@ -5,7 +5,7 @@ import MarkdownIt from 'markdown-it'
 import { ArrowRight, Check, CircleAlert, Image, LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
-import { api } from '../api'
+import { api, hasSession } from '../api'
 import type { AnalysisJob, AnalysisRunDetail, AnalysisRunSummary, FuyaoMarketBrief, FuyaoSecurityContext } from '../api/types'
 import DecisionHero from '../components/DecisionHero.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -18,6 +18,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import TechnicalDetails from '../components/TechnicalDetails.vue'
 import { usePortfolioContext } from '../composables/portfolio'
 import { actionLabel, formatNumber, formatPercent, fmtDateTime, pctClass, unavailableText } from '../utils/ui'
+import { decisionSummary, normalizeDecisionState } from '../utils/decision'
 
 type AnyRecord = Record<string, any>
 
@@ -44,6 +45,7 @@ const candidateDrawerOpen = computed({
 const screenshotUrl = ref('')
 const job = ref<AnalysisJob | null>(null)
 let mounted = false
+let disposed = false
 let jobTimer: number | null = null
 let jobBusy = false
 
@@ -71,19 +73,23 @@ const candidateVetoes = computed<AnyRecord[]>(() => {
   return Array.isArray(value) ? value : [value]
 })
 const finalDecision = computed(() => {
+  if (result.value.decision_status) return normalizeDecisionState(result.value.decision_status)
   const quality = String(detail.value?.data_quality_grade || result.value.data_quality_grade || '').toUpperCase()
   if (quality === 'BLOCKED') return 'BLOCKED'
   if (quality === 'DATA_GAP') return 'DATA_GAP'
-  return normalizeFinalDecision(decisionGate.value.portfolio_action || result.value.final_action || result.value.final_rating || result.value.portfolio_action || detail.value?.final_rating || 'NO_ACTION')
+  return normalizeDecisionState(decisionGate.value.portfolio_action || result.value.final_action || result.value.final_rating || result.value.portfolio_action || detail.value?.final_rating)
 })
-const finalSummary = computed(() => String(result.value.portfolio_conclusion || result.value.summary || detail.value?.summary || '当前没有足够的新信息改变组合决策。'))
+const finalSummary = computed(() => {
+  if (['INCOMPLETE', 'EXPIRED', 'UNKNOWN'].includes(finalDecision.value)) return decisionSummary(finalDecision.value)
+  return String(result.value.portfolio_conclusion || result.value.summary || detail.value?.summary || decisionSummary(finalDecision.value))
+})
 const finalReasons = computed(() => {
   const raw = result.value.reason_codes || result.value.reasons || qualityGate.value.blockers || result.value.risk_warnings || []
   const list = Array.isArray(raw) ? raw.map((item) => typeof item === 'string' ? item : item.reason || item.summary || JSON.stringify(item)).filter(Boolean) : []
   if (list.length) return list
   if (finalDecision.value === 'ACTION') return ['组合层已给出调整建议，请核对持仓动作和执行前提。']
   if (['BLOCKED', 'DATA_GAP'].includes(finalDecision.value)) return ['市场或组合数据质量尚未满足可靠行动条件。']
-  return ['当前没有足够的新信息改变组合决策。']
+  return [decisionSummary(finalDecision.value)]
 })
 const analysisState = computed<'idle' | 'running' | 'succeeded' | 'failed'>(() => {
   if (job.value && ['queued', 'running'].includes(String(job.value.status).toLowerCase())) return 'running'
@@ -115,14 +121,6 @@ function section(...keys: string[]): any {
     for (const key of keys) if (source?.[key] !== undefined && source[key] !== null) return source[key]
   }
   return null
-}
-
-function normalizeFinalDecision(value: unknown): 'ACTION' | 'NO_ACTION' | 'BLOCKED' | 'DATA_GAP' {
-  const normalized = String(value || '').toUpperCase()
-  if (normalized === 'BLOCKED') return 'BLOCKED'
-  if (normalized === 'DATA_GAP') return 'DATA_GAP'
-  if (['ACTION', 'ADD', 'BUY', 'REDUCE', 'SELL', 'EXIT', 'REBALANCE', 'OVERWEIGHT', 'UNDERWEIGHT'].includes(normalized)) return 'ACTION'
-  return 'NO_ACTION'
 }
 
 function hasContent(value: any): boolean {
@@ -195,10 +193,13 @@ async function loadMarketBrief() {
 }
 
 async function loadRuns() {
+  if (disposed || !hasSession()) return
   loading.value = true
   loadError.value = null
   try {
-    runs.value = await api.listRuns(portfolioId.value || undefined)
+    const rows = await api.listRuns(portfolioId.value || undefined)
+    if (disposed || !hasSession()) return
+    runs.value = rows
     const requested = Number(route.query.run)
     const next = runs.value.find((item) => item.id === requested)?.id || selectedRunId.value || runs.value[0]?.id || null
     if (next) await selectRun(next)
@@ -211,11 +212,14 @@ async function loadRuns() {
 }
 
 async function selectRun(id: number) {
+  if (disposed || !hasSession()) return
   selectedRunId.value = id
   detailLoading.value = true
   detailError.value = null
   try {
-    detail.value = await api.getRun(id)
+    const loaded = await api.getRun(id)
+    if (disposed || !hasSession()) return
+    detail.value = loaded
     await router.replace({ name: 'analysis', query: { ...(portfolioId.value ? { portfolio: portfolioId.value } : {}), run: id } })
     if (activeTab.value === 'screenshot') await loadScreenshot()
   } catch (reason) {
@@ -236,8 +240,11 @@ async function loadScreenshot() {
 }
 
 async function loadJob(jobId: number) {
+  if (disposed || !hasSession()) return
   try {
-    job.value = await api.getAnalysisJob(jobId)
+    const loaded = await api.getAnalysisJob(jobId)
+    if (disposed || !hasSession()) return
+    job.value = loaded
     if (!['queued', 'running', 'retrying'].includes(String(job.value.status).toLowerCase())) {
       if (job.value.status === 'succeeded' && job.value.run_id) await selectRun(job.value.run_id)
       return
@@ -249,12 +256,15 @@ async function loadJob(jobId: number) {
 }
 
 function startJobPolling() {
+  if (disposed || !hasSession()) return
   if (jobTimer !== null) window.clearInterval(jobTimer)
   jobTimer = window.setInterval(async () => {
-    if (!job.value || jobBusy) return
+    if (disposed || !hasSession() || !job.value || jobBusy) return
     jobBusy = true
     try {
-      job.value = await api.getAnalysisJob(job.value.id)
+      const loaded = await api.getAnalysisJob(job.value.id)
+      if (disposed || !hasSession()) return
+      job.value = loaded
       if (!['queued', 'running'].includes(String(job.value.status).toLowerCase())) {
         if (jobTimer !== null) window.clearInterval(jobTimer)
         jobTimer = null
@@ -282,6 +292,7 @@ onMounted(async () => {
   const requestedJob = Number(route.query.job)
   try {
     await Promise.all([loadPortfolios(), loadMarketBrief()])
+    if (disposed || !hasSession()) return
     const requestedPortfolio = Number(route.query.portfolio)
     if (requestedPortfolio && portfolios.value.some((item) => item.id === requestedPortfolio)) setSelectedPortfolio(requestedPortfolio)
     await loadRuns()
@@ -289,9 +300,11 @@ onMounted(async () => {
   } catch (reason) {
     loadError.value = reason
   }
-  mounted = true
+  mounted = !disposed
 })
 onUnmounted(() => {
+  disposed = true
+  mounted = false
   if (jobTimer !== null) window.clearInterval(jobTimer)
   if (screenshotUrl.value) URL.revokeObjectURL(screenshotUrl.value)
 })

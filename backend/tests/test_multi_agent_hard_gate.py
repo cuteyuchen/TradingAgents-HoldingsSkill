@@ -134,3 +134,64 @@ def test_invalid_lot_size_cannot_authorize_a_trade(action, lot_size):
     result = _gate([{"code": "600519", "action": action, "target_weight": 0.2, "quantity": 150}], context)
     assert result["holdings"][0]["action"] == "watch"
     assert "LOT_SIZE_UNAVAILABLE" in result["decision_gate"]["blocking_reasons"]
+
+
+@pytest.mark.parametrize("action", ["add", "conditional_add", "reduce", "sell"])
+def test_explicit_share_units_are_normalized_in_all_execution_fields(action):
+    target = "20%" if action in {"add", "conditional_add"} else "17%"
+    result = _gate([{"code": "600519", "action": action, "target_weight": target, "quantity": "100股", "proposed_qty": 100}])
+    row = result["holdings"][0]
+    assert row["action"] == action
+    assert row["requested_qty"] == row["proposed_qty"] == float(row["quantity"]) == 100
+    assert row["requested_target_weight"] == float(target.rstrip("%")) / 100
+    assert isinstance(row["target_weight"], float)
+    assert result["decision_gate"]["action_results"][0]["allowed_qty"] == 100
+
+
+@pytest.mark.parametrize("action", ["add", "sell"])
+@pytest.mark.parametrize("quantity,proposed,reason", [
+    ("20%", None, "QUANTITY_INVALID"),
+    ("20%", 100, "QUANTITY_INVALID"),
+    ("100股", "20%", "QUANTITY_INVALID"),
+    (100, 200, "QUANTITY_CONFLICT"),
+    (float("inf"), 100, "QUANTITY_INVALID"),
+    (100, float("nan"), "QUANTITY_INVALID"),
+    (100, -100, "QUANTITY_INVALID"),
+    (100.5, None, "QUANTITY_INVALID"),
+    (True, None, "QUANTITY_INVALID"),
+])
+def test_invalid_sizing_cannot_be_replaced_by_valid_other_field(action, quantity, proposed, reason):
+    result = _gate([{
+        "code": "600519", "action": action, "target_weight": 0.2,
+        "quantity": quantity, "proposed_qty": proposed,
+    }])
+    row = result["holdings"][0]
+    assert row["action"] == "watch"
+    assert row["quantity"] is row["proposed_qty"] is row["target_weight"] is None
+    assert reason in row["portfolio_gate_reasons"]
+    assert result["decision_gate"]["portfolio_action"] == "WATCH_ONLY"
+
+
+@pytest.mark.parametrize("target", ["100股", 20, "20", -0.2, float("nan"), float("inf"), True])
+def test_invalid_target_weight_cannot_authorize_explicit_share_buy(target):
+    result = _gate([{"code": "600519", "action": "add", "target_weight": target, "quantity": "100股"}])
+    assert result["holdings"][0]["action"] == "watch"
+    assert "TARGET_WEIGHT_INVALID" in result["decision_gate"]["blocking_reasons"]
+
+
+@pytest.mark.parametrize("available", [-100, float("nan"), float("inf"), 100.5, "20%", True])
+def test_invalid_sellable_share_count_fails_closed(available):
+    context = _context()
+    context["position_constraints"][0]["max_sellable_qty"] = available
+    result = _gate([{"code": "600519", "action": "sell", "quantity": "100股"}], context)
+    assert result["holdings"][0]["action"] == "watch"
+    assert "AVAILABLE_QTY_LIMIT" in result["decision_gate"]["blocking_reasons"]
+
+
+@pytest.mark.parametrize("missing_field", ["current_estimated_total_assets", "spendable_cash"])
+def test_explicit_percent_target_needs_execution_inputs(missing_field):
+    context = _context()
+    context.pop(missing_field)
+    result = _gate([{"code": "600519", "action": "add", "target_weight": "20%"}], context)
+    assert result["holdings"][0]["action"] == "watch"
+    assert "EXECUTION_INPUT_MISSING" in result["decision_gate"]["blocking_reasons"]
