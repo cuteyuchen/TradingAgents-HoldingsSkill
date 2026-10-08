@@ -18,11 +18,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .clock import utc_now
 from .database import Base
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return utc_now()
 
 
 class User(Base):
@@ -199,6 +200,7 @@ class AnalysisJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    context_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     run: Mapped["AnalysisRun | None"] = relationship(back_populates="job", uselist=False, cascade="all, delete-orphan")
@@ -219,6 +221,25 @@ class AnalysisRun(Base):
     confidence: Mapped[str | None] = mapped_column(String(16))
     structured_result_json: Mapped[dict | None] = mapped_column(JSON)
     markdown_text: Mapped[str] = mapped_column(Text)
+    parameter_set_version_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    parameter_set_version: Mapped[str | None] = mapped_column(String(64), index=True)
+    parameter_set_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    governance_lineage_json: Mapped[dict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="completed", index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    workflow_version: Mapped[str | None] = mapped_column(String(32))
+    skill_version: Mapped[str | None] = mapped_column(String(64))
+    analysis_mode: Mapped[str | None] = mapped_column(String(16), index=True)
+    market_snapshot_at: Mapped[datetime | None] = mapped_column(DateTime)
+    resumable: Mapped[bool] = mapped_column(Boolean, default=False)
+    interrupted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_checkpoint: Mapped[str | None] = mapped_column(String(32), index=True)
+    failed_stage: Mapped[str | None] = mapped_column(String(64))
+    failed_node: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    last_artifact_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
     job: Mapped[AnalysisJob] = relationship(back_populates="run")

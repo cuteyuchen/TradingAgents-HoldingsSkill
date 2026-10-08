@@ -3,15 +3,20 @@ from __future__ import annotations
 
 import math
 import random
-import re
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+
+from ..clock import china_now, utc_now
+from ..config import settings
+from ..market.codes import exchange_hint, normalize_security_code
+from ..market.providers.factory import create_quote_provider
+from ..market.providers.tencent import TencentQuoteProvider, parse_tencent_line as _normalized_parse_tencent_line
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -20,8 +25,8 @@ _EM_LAST_CALL = 0.0
 
 
 def normalize_code(value: str) -> str:
-    match = re.search(r"(\d{6})", value or "")
-    return match.group(1) if match else (value or "").strip().upper()
+    """Legacy facade for the shared security-code normalizer."""
+    return normalize_security_code(value)
 
 
 def tencent_symbol(code: str) -> str:
@@ -30,7 +35,10 @@ def tencent_symbol(code: str) -> str:
 
 
 def eastmoney_secid(code: str) -> str:
+    explicit = exchange_hint(code)
     code = normalize_code(code)
+    if explicit is not None:
+        return f"{'1' if explicit == 'SSE' else '0'}.{code}"
     return f"1.{code}" if code.startswith(("5", "6", "9")) else f"0.{code}"
 
 
@@ -83,69 +91,84 @@ def _em_get(
 
 
 def _parse_tencent_line(line: str) -> dict[str, Any] | None:
-    if '="' not in line:
+    quote = _normalized_parse_tencent_line(line)
+    if quote is None:
         return None
-    raw = line.split('="', 1)[1].rstrip('";\r\n')
-    fields = raw.split("~")
-    if len(fields) < 38:
-        return None
-    code = normalize_code(fields[2])
-    quote_time = fields[30] or None
-    return {
-        "code": code,
-        "name": fields[1] or None,
-        "price": _float(fields[3]),
-        "prev_close": _float(fields[4]),
-        "open": _float(fields[5]),
-        "pct_change": _float(fields[32]),
-        "high": _float(fields[33]),
-        "low": _float(fields[34]),
-        "volume": _float(fields[36]),
-        "turnover": _float(fields[37]),
-        "quote_time": quote_time,
-        "source": "Tencent qt.gtimg.cn",
-        "stale": False,
-    }
+    legacy = quote.to_dict()
+    legacy_quote_time = (
+        quote.source_timestamp.astimezone(CHINA_TZ).strftime("%H:%M:%S")
+        if quote.source_timestamp
+        else None
+    )
+    legacy.update(
+        {
+            "turnover": legacy.get("amount"),
+            "source": "Tencent qt.gtimg.cn",
+            "stale": legacy.get("quality_status") in {"STALE", "MISSING"},
+            "quote_time": legacy_quote_time,
+        }
+    )
+    return legacy
 
 
 def fetch_quotes(codes: list[str]) -> dict[str, dict[str, Any]]:
     normalized = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
     if not normalized:
         return {}
-    symbols = [tencent_symbol(code) for code in normalized]
-    response = requests.get(
-        "https://qt.gtimg.cn/q=" + ",".join(symbols),
-        headers={"User-Agent": USER_AGENT, "Referer": "https://finance.qq.com/"},
-        timeout=10,
-    )
-    response.raise_for_status()
+    provider = create_quote_provider("acceptance") if settings.ACCEPTANCE_MODE else TencentQuoteProvider(timeout=10)
+    normalized_quotes = provider.get_quotes(normalized)
     results: dict[str, dict[str, Any]] = {}
-    for line in _decode(response.content).splitlines():
-        parsed = _parse_tencent_line(line)
-        if parsed and parsed["code"]:
-            results[parsed["code"]] = parsed
+    for code, quote in normalized_quotes.items():
+        parsed = quote.to_dict()
+        legacy_quote_time = (
+            quote.source_timestamp.astimezone(CHINA_TZ).strftime("%H:%M:%S")
+            if quote.source_timestamp
+            else None
+        )
+        if parsed.get("quality_status") in {"MISSING", "INVALID"}:
+            errors = parsed.get("errors") or []
+            parsed["error"] = str(errors[0]) if errors else (
+                "quote_missing" if parsed.get("quality_status") == "MISSING" else "quote_invalid"
+            )
+        parsed.update(
+            {
+                "turnover": parsed.get("amount"),
+                "source": "Acceptance fixture" if settings.ACCEPTANCE_MODE else "Tencent qt.gtimg.cn",
+                "stale": parsed.get("quality_status") in {"STALE", "MISSING"},
+                "quote_time": legacy_quote_time,
+            }
+        )
+        results[code] = parsed
     missing = set(normalized) - set(results)
     for code in missing:
         results[code] = {
             "code": code,
-            "source": "Tencent qt.gtimg.cn",
+            "source": "Acceptance fixture" if settings.ACCEPTANCE_MODE else "Tencent qt.gtimg.cn",
             "error": "quote_missing",
             "stale": True,
         }
     return results
 
 
-def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
+def fetch_kline(
+    code: str, limit: int = 30, *, start: date | None = None,
+    end: date | None = None, adjustment: str = "forward",
+) -> dict[str, Any]:
+    adjustments = {"none": "0", "forward": "1", "backward": "2"}
+    if adjustment not in adjustments:
+        raise ValueError("unsupported_adjustment")
     params = {
         "secid": eastmoney_secid(code),
         "klt": "101",
-        "fqt": "1",
+        "fqt": adjustments[adjustment],
         "lmt": str(limit),
-        "end": "20500101",
+        "end": end.strftime("%Y%m%d") if end else "20500101",
         "iscca": "1",
         "fields1": "f1,f2,f3,f4,f5,f6,f7,f8",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
     }
+    if start is not None:
+        params["beg"] = start.strftime("%Y%m%d")
     payload = _em_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", params=params).json()
     rows = ((payload.get("data") or {}).get("klines") or [])
     closes: list[float] = []
@@ -169,6 +192,7 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
                 "high": _float(fields[3]),
                 "low": _float(fields[4]),
                 "volume": volume,
+                "amount": _float(fields[6]) if len(fields) > 6 else None,
             }
         )
     latest = parsed_rows[-1] if parsed_rows else None
@@ -198,11 +222,11 @@ def fetch_kline(code: str, limit: int = 30) -> dict[str, Any]:
     }
 
 
-def fetch_fund_flow(code: str) -> dict[str, Any]:
+def fetch_fund_flow(code: str, *, limit: int = 1, daily: bool = False) -> dict[str, Any]:
     """Fetch the latest main/small/medium/large/super-large net flow row."""
     params = {
-        "lmt": "1",
-        "klt": "1",
+        "lmt": str(limit),
+        "klt": "101" if daily else "1",
         "secid": eastmoney_secid(code),
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56",
@@ -220,6 +244,18 @@ def fetch_fund_flow(code: str) -> dict[str, Any]:
         "medium_net": _float(fields[3]) if len(fields) > 3 else None,
         "large_net": _float(fields[4]) if len(fields) > 4 else None,
         "super_large_net": _float(fields[5]) if len(fields) > 5 else None,
+        "history": [
+            {
+                "date": values[0],
+                "main_net": _float(values[1]),
+                "small_net": _float(values[2]),
+                "medium_net": _float(values[3]),
+                "large_net": _float(values[4]),
+                "super_large_net": _float(values[5]),
+            }
+            for row in rows
+            if len(values := str(row).split(",")) >= 6
+        ] if daily else [],
         "source": "Eastmoney push2his fund flow",
     }
 
@@ -249,6 +285,12 @@ def fetch_announcements(code: str, limit: int = 5) -> list[dict[str, Any]]:
                 "notice_date": row.get("notice_date") or row.get("display_time"),
                 "art_code": row.get("art_code"),
                 "source": "Eastmoney announcements",
+                "source_url": (
+                    f"https://data.eastmoney.com/notices/detail/{normalize_code(code)}/{row['art_code']}.html"
+                    if str(row.get("art_code") or "").isalnum() else None
+                ),
+                "published_at": row.get("display_time") or row.get("notice_date"),
+                "fetched_at": utc_now().isoformat(),
             }
         )
     return output
@@ -270,6 +312,9 @@ def fetch_market_news(limit: int = 8) -> list[dict[str, Any]]:
                 "title": row.get("title") or row.get("brief"),
                 "time": row.get("ctime"),
                 "source": "CLS telegraph",
+                "source_url": f"https://www.cls.cn/detail/{row['id']}" if str(row.get("id") or "").isdigit() else None,
+                "published_at": row.get("ctime"),
+                "fetched_at": utc_now().isoformat(),
                 "kind": "market_news",
             }
             for row in rows[:limit]
@@ -301,6 +346,9 @@ def fetch_market_news(limit: int = 8) -> list[dict[str, Any]]:
             "title": row.get("title"),
             "time": row.get("showTime"),
             "source": "Eastmoney 7x24",
+            "source_url": row.get("uniqueUrl") or row.get("url"),
+            "published_at": row.get("showTime"),
+            "fetched_at": utc_now().isoformat(),
             "kind": "market_news",
         }
         for row in rows[:limit]
@@ -321,10 +369,29 @@ def fetch_sector_heat(limit: int = 10) -> list[dict[str, Any]]:
         "fs": "m:90+t:2+f:!50",
         "fields": "f12,f14,f3,f62,f104,f105,f106,f184",
     }
-    payload = _em_get("https://push2.eastmoney.com/api/qt/clist/get", params=params).json()
-    rows = ((payload.get("data") or {}).get("diff") or [])
+    # The provider can cap a page below pz. Continue by its reported total so
+    # portfolio context includes weak industries as well as today's leaders.
+    rows = []
+    total = None
+    while len(rows) < limit:
+        payload = _em_get("https://push2.eastmoney.com/api/qt/clist/get", params=params).json()
+        data = payload.get("data") or {}
+        total = int(data["total"]) if data.get("total") is not None else total
+        page_rows = data.get("diff") or []
+        if isinstance(page_rows, dict):
+            page_rows = list(page_rows.values())
+        if not page_rows:
+            break
+        seen = {row.get("f12") for row in rows}
+        fresh = [row for row in page_rows if row.get("f12") not in seen]
+        if not fresh:
+            break
+        rows.extend(fresh)
+        if len(rows) >= int(data.get("total") or len(rows)):
+            break
+        params["pn"] = str(int(params["pn"]) + 1)
     output: list[dict[str, Any]] = []
-    for rank, row in enumerate(rows, start=1):
+    for rank, row in enumerate(rows[:limit], start=1):
         output.append(
             {
                 "rank": rank,
@@ -338,6 +405,11 @@ def fetch_sector_heat(limit: int = 10) -> list[dict[str, Any]]:
                 "unchanged": _float(row.get("f106")),
                 "rotation_stage": "intraday_leader" if rank <= 5 else "watch",
                 "source": "Eastmoney sector ranking",
+                "source_url": "https://quote.eastmoney.com/center/boardlist.html#industry_board",
+                "fetched_at": utc_now().isoformat(),
+                "coverage_total": total,
+                "coverage_returned": min(len(rows), limit),
+                "coverage_complete": total is not None and min(len(rows), limit) >= total,
             }
         )
     return output
@@ -405,6 +477,39 @@ def _market_mood(index_quote: dict[str, Any], sector_heat: list[dict[str, Any]])
 
 def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
     normalized_codes = list(dict.fromkeys(normalize_code(code) for code in codes if normalize_code(code)))
+    if settings.ACCEPTANCE_MODE:
+        quotes = fetch_quotes(normalized_codes + ["000001"])
+        complete = bool(normalized_codes) and all(code in quotes for code in normalized_codes)
+        return {
+            "captured_at": china_now().isoformat(timespec="seconds"),
+            "quotes": {code: quotes.get(code, {"code": code, "error": "quote_missing", "stale": True}) for code in normalized_codes},
+            "technicals": {
+                code: {
+                    "code": code,
+                    "trend": "up",
+                    "ma20": quotes.get(code, {}).get("price"),
+                    "source": "Acceptance fixture",
+                }
+                for code in normalized_codes
+            },
+            "fund_flows": {
+                code: {"code": code, "main_net": 1200000.0, "source": "Acceptance fixture"}
+                for code in normalized_codes
+            },
+            "announcements": {code: [] for code in normalized_codes},
+            "news": [{"title": "验收固定市场资讯", "source": "Acceptance fixture"}],
+            "indices": {"sh000001": quotes.get("000001", {})},
+            "sector_heat": [{"rank": 1, "name": "验收板块", "pct_change": 1.2, "source": "Acceptance fixture"}],
+            "candidate_pool": {"etf_leaders": []},
+            "market_mood": {
+                "mood": "constructive" if complete else "unknown",
+                "buy_mode_hint": "rotation_or_conditional_buy" if complete else "watch_only",
+                "source": "Acceptance fixture",
+            },
+            "quality_grade": "A" if complete else "F",
+            "errors": [] if complete else ["quote: acceptance fixture missing code"],
+            "source_chain": ["Acceptance deterministic fixture"],
+        }
     quotes: dict[str, Any]
     errors: list[str] = []
     try:
@@ -475,7 +580,7 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
         grade = "F"
     index_quote = quotes.get("000001", {})
     return {
-        "captured_at": datetime.now(CHINA_TZ).isoformat(timespec="seconds"),
+        "captured_at": china_now().isoformat(timespec="seconds"),
         "quotes": holding_quotes,
         "technicals": technicals,
         "fund_flows": fund_flows,
@@ -500,22 +605,14 @@ def collect_market_snapshot(codes: list[str]) -> dict[str, Any]:
 
 
 def refresh_snapshot_quotes(snapshot: dict[str, Any], codes: list[str]) -> dict[str, Any]:
-    """Refresh quote-sensitive fields immediately before the visible decision."""
-    refreshed = dict(snapshot)
-    refreshed["final_quote_refresh_at"] = datetime.now(CHINA_TZ).isoformat(timespec="seconds")
-    try:
-        quotes = fetch_quotes(codes)
-        refreshed["quotes"] = {normalize_code(code): quotes.get(normalize_code(code), {}) for code in codes}
-        refreshed["final_quote_refresh_status"] = "ok"
-    except Exception as exc:
-        refreshed["final_quote_refresh_status"] = "failed"
-        refreshed["final_quote_refresh_error"] = str(exc)
-        refreshed.setdefault("errors", []).append(f"final_quote_refresh: {exc}")
-    return refreshed
+    """Compatibility entry point; every final quote refresh uses MARKET-2."""
+    from .instrument_market_evidence import refresh_snapshot_quotes as refresh
+
+    return refresh(snapshot, codes)
 
 
 def is_a_share_trading_day(now: datetime | None = None) -> bool:
-    current = now.astimezone(CHINA_TZ) if now else datetime.now(CHINA_TZ)
+    current = now.astimezone(CHINA_TZ) if now else china_now()
     if current.weekday() >= 5:
         return False
     try:

@@ -6,7 +6,7 @@ import uuid
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEST_DB_DIR = os.path.join(BACKEND_DIR, "data")
-TEST_ARTIFACTS_DIR = os.path.join(TEST_DB_DIR, f"test_shared_artifacts_{os.getpid()}")
+TEST_ARTIFACTS_DIR = os.environ.get("ADVISOR_ARTIFACTS_DIR") or os.path.join(TEST_DB_DIR, f"test_shared_artifacts_{os.getpid()}")
 os.makedirs(TEST_DB_DIR, exist_ok=True)
 os.environ.setdefault("ADVISOR_DB_PATH", os.path.join(TEST_DB_DIR, f"test_shared_{os.getpid()}.db"))
 os.environ.setdefault("ADVISOR_ARTIFACTS_DIR", TEST_ARTIFACTS_DIR)

@@ -15,7 +15,7 @@ Every execution must answer:
 5. If none qualifies, why does no new opportunity reach the action threshold?
 6. What condition cancels all new buys today?
 
-`candidates=[]` is a normal successful result. If data quality is blocked or the portfolio exposure is too high, state the blocker and any useful observation trigger outside the candidate list; do not manufacture a row.
+`candidates=[]` is a normal successful result. If data quality is blocked or the risk review finds current exposure unsuitable, state the blocker and any useful observation trigger outside the candidate list; do not manufacture a row. Exposure is a risk input, not a universal fixed-percentage hard gate.
 
 ## Recommendation Reason Requirement
 
@@ -31,9 +31,9 @@ Do not output a buy recommendation if any of the three reason fields is empty. I
 
 ## Candidate / Holding Separation Rule
 
-Today's candidates are **new, non-held opportunities only**:
+Today's candidates are **actionable new, non-held opportunities only**:
 
-- Use `候选类型` to label a row as `新开仓` or `轮动观察`.
+- Every emitted row uses `candidate_type=new_position` (`新开仓`) and must pass the action gate. `rotation_watch` (`轮动观察`) is report/blocker text only; it is not a candidate-list lifecycle state in Phase A.
 - Compare normalized `candidates[].code` against `holdings[].code` and remove every duplicate.
 - Preserve an evidence-backed `加仓` or `条件加仓` verdict for a current holding only in the holding action table.
 - If the best expression of a hot sector is already held, evaluate its add eligibility as a holding action; do not copy it into candidates.
@@ -149,14 +149,14 @@ three. For each emitted candidate, output:
 
 ## Buy Risk Gate
 
-Block new buys or convert them to watch-only when any applies:
+Block new buys and keep any observation trigger in blocker/report text when any applies:
 
 - A new opportunity is not clearly better than keeping the portfolio unchanged under the current market-regime, liquidity, concentration, and evidence assessment.
 - Major index and candidate sector diverge negatively (大盘跌而板块涨 — 不可持续).
 - Candidate is below both open and previous close.
 - Main funds are materially outflowing while price rises.
 - Candidate has fresh negative announcement, reduction, pledge, ST/delist, or major uncertainty.
-- Current checkpoint is 14:30 and the buy would be a fresh overnight gamble without strong confirmation.
+- Current checkpoint is 14:30 or later (including 15:10) and the buy would be a fresh overnight gamble without strong confirmation.
 - VPA shows distribution signals (price up + volume down, or selling climax).
 - Northbound flow is materially negative today.
 - Data quality is C or worse.
@@ -167,7 +167,7 @@ When blocked, keep `candidates=[]`, state the blocking reason, and optionally de
 
 Buy recommendations must not conflict with the portfolio plan:
 
-- If the user is overexposed, candidate size should come only from cash raised by reducing weak holdings.
+- If the risk review finds current exposure unsuitable, candidate size should come only from cash raised by reducing weak holdings; do not infer this from a universal percentage.
 - Do not recommend averaging down current losers as the only buy idea; any existing-holding add belongs in holding actions.
 - If the strongest existing holding is already the best expression of the hot sector, evaluate it only as a holding action.
 - Candidate composition is unconstrained: all stocks, all ETFs, or a mix are valid. Do not force an ETF-plus-stock pairing.
@@ -175,9 +175,10 @@ Buy recommendations must not conflict with the portfolio plan:
 
 ## Industry Comparison Integration
 
-Before finalizing candidates, use Eastmoney's 90-block industry comparison to verify:
+Before finalizing candidates, use Eastmoney's 90-block industry comparison when
+the source is available to verify:
 
-- Is the candidate's sector actually outperforming the broader market today?
+- Is the candidate's sector actually outperforming the broader market today? If this mandatory comparison is unavailable, keep `candidates=[]` and preserve the blocker.
 - Where does the candidate's sector rank in 5-day and 20-day performance?
 - Is the sector at an early, mid, or late stage of its rotation cycle?
 

@@ -29,5 +29,13 @@ frontend/node_modules/
 !.vscode/
 !.vscode/tasks.json
 .idea/
+.playwright-cli/
 .DS_Store
 Thumbs.db
+output/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+output/playwright/
+frontend/vite-dev*.log

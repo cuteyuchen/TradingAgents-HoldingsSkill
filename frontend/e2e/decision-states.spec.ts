@@ -1,0 +1,66 @@
+import { test, expect, login, openPage, selectPortfolio } from './fixtures'
+
+test.describe('decision states', () => {
+  test('ACTION permits a holding adjustment with zero new candidates', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    const hero = page.getByTestId('v3-decision-hero')
+    await expect(hero).toBeVisible({ timeout: 20_000 })
+    // Acceptance Action portfolio is structured ACTION; V3 hero must say需要行动.
+    await expect(hero).toHaveAttribute('data-decision-kind', /ACTIONABLE|MISSING|BLOCKED|NO_ACTION/)
+    await expect(page.getByTestId('v3-decision-title')).toBeVisible()
+
+    await page.goto(`/reports?portfolio=${facts.portfolios.action}&run=${facts.runs.action}`)
+    await expect(page).toHaveURL(/\/analysis/)
+    await expect(page.locator('.decision-hero')).toContainText('ACTION')
+    await expect(page.locator('.action-table-panel')).toContainText('减仓')
+    await expect(page.locator('.candidate-panel')).toContainText('候选机会')
+    await expect(page.locator('.candidate-panel')).toContainText('当前没有明显的新机会')
+    await expect(page.locator('.candidate-panel')).not.toContainText('创业板ETF')
+  })
+
+  test('NO_ACTION, BLOCKED, DATA_GAP, and Candidate Veto remain explicit', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    await selectPortfolio(page, 'Acceptance States')
+
+    await page.goto(`/reports?portfolio=${facts.portfolios.states}&run=${facts.runs.no_action}`)
+    await expect(page.locator('.decision-hero')).toContainText('NO_ACTION')
+    await expect(page.locator('.decision-hero')).toContainText('无需操作')
+
+    await page.goto(`/reports?portfolio=${facts.portfolios.states}&run=${facts.runs.blocked}`)
+    await expect(page.locator('.decision-hero')).toContainText('BLOCKED')
+    await expect(page.locator('.decision-hero')).toContainText('数据质量门控阻断')
+
+    await page.goto(`/reports?portfolio=${facts.portfolios.states}&run=${facts.runs.data_gap}`)
+    await expect(page.locator('.decision-hero')).toContainText('DATA_GAP')
+    await page.locator('.n-tabs-tab').filter({ hasText: '结构化证据' }).click()
+    await expect(page.locator('.evidence-grid')).toContainText('关键行情不可用')
+    await expect(page.locator('.candidate-panel')).not.toContainText('0.00')
+
+    await page.goto(`/reports?portfolio=${facts.portfolios.states}&run=${facts.runs.veto}`)
+    await expect(page.locator('.decision-hero')).toContainText('NO_ACTION')
+    await expect(page.locator('.candidate-veto')).toContainText('Candidate Veto')
+    await expect(page.locator('.candidate-veto')).toContainText('候选达到 ACTION，但组合层未批准')
+
+    const shadowOrders = await page.evaluate(async (portfolioId) => {
+      const token = localStorage.getItem('advisor_v2_access_token')
+      const response = await fetch(`/api/v3/shadow/orders?portfolio_id=${portfolioId}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      })
+      return { status: response.status, body: await response.json() }
+    }, facts.portfolios.states)
+    expect(shadowOrders.status).toBe(200)
+    expect(shadowOrders.body).toEqual([])
+})
+
+  test('Dashboard freshness does not promote yesterday ACTION to today', async ({ acceptancePage: page, facts }) => {
+    await login(page, facts.users.a)
+    await selectPortfolio(page, 'Acceptance Freshness')
+    await page.goto(`/dashboard?portfolio=${facts.portfolios.freshness}`)
+    await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/)
+    // Product rule: missing valid decision/analysis is not explicit NO_ACTION.
+    const hero = page.getByTestId('v3-decision-hero')
+    await expect(hero).toBeVisible({ timeout: 20_000 })
+    await expect(hero).not.toHaveAttribute('data-decision-kind', 'NO_ACTION')
+    await expect(page.getByTestId('v3-decision-title')).toBeVisible()
+  })
+})

@@ -20,7 +20,12 @@ import {
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { AnalysisRunDetail, AnalysisRunSummary, Portfolio } from '../api/types'
+import { usePortfolioContext } from '../composables/portfolio'
+import EmptyState from '../components/EmptyState.vue'
+import ErrorState from '../components/ErrorState.vue'
+import LoadingState from '../components/LoadingState.vue'
+import { fmtDateTime, formatNumber, formatPercent, unavailableText } from '../utils/ui'
+import type { AnalysisRunDetail, AnalysisRunSummary } from '../api/types'
 
 type AnyRecord = Record<string, any>
 
@@ -28,16 +33,25 @@ const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
-const portfolios = ref<Portfolio[]>([])
-const portfolioId = ref<number | null>(null)
 const runs = ref<AnalysisRunSummary[]>([])
 const selectedId = ref<number | null>(null)
 const detail = ref<AnalysisRunDetail | null>(null)
 const loading = ref(false)
 const detailLoading = ref(false)
+const loadError = ref<unknown>(null)
+const detailError = ref<unknown>(null)
 const screenshotUrl = ref('')
 const comparison = ref<Record<string, any> | null>(null)
 const comparisonOpen = ref(false)
+let mounted = false
+
+const {
+  portfolios,
+  selectedPortfolioId: portfolioId,
+  selectedPortfolio,
+  loadPortfolios,
+  setSelectedPortfolio,
+} = usePortfolioContext()
 
 const rendered = computed(() => markdown.render(detail.value?.markdown || ''))
 const structured = computed<AnyRecord>(() => detail.value?.structured_result || {})
@@ -45,6 +59,7 @@ const result = computed<AnyRecord>(() => structured.value.result || {})
 const workflow = computed<AnyRecord>(() => structured.value.workflow || structured.value.analysis_workflow || {})
 const holdings = computed<any[]>(() => Array.isArray(result.value.holdings) ? result.value.holdings : [])
 const market = computed<AnyRecord>(() => structured.value.market_snapshot || {})
+const decisionGate = computed<AnyRecord>(() => section('decision_gate') || {})
 
 function section(...keys: string[]): any {
   for (const source of [result.value, workflow.value, structured.value]) {
@@ -68,11 +83,26 @@ const traderProposal = computed(() => section('trader_proposal'))
 const riskDebate = computed(() => section('risk_debate_state', 'risk_debate', 'three_way_risk_debate') || {})
 const riskRevision = computed(() => section('risk_revision', 'risk_revision_loop'))
 const portfolioFinal = computed(() => section('portfolio_final', 'portfolio_manager_final'))
+const finalDecision = computed(() => {
+  const quality = String(detail.value?.data_quality_grade || result.value.data_quality_grade || '').toUpperCase()
+  if (quality === 'BLOCKED') return 'BLOCKED'
+  if (quality === 'DATA_GAP') return 'DATA_GAP'
+  return decisionGate.value.portfolio_action
+    || field(result.value, 'final_action', 'final_rating', 'portfolio_action', 'decision')
+    || detail.value?.final_rating
+    || null
+})
 const candidates = computed<any[]>(() => {
   const value = section('candidates', 'buy_candidates', 'rotation_candidates')
   if (Array.isArray(value)) return value
   if (Array.isArray(value?.items)) return value.items
   return []
+})
+const candidateVetoes = computed<any[]>(() => {
+  const value = section('candidate_veto', 'candidate_vetoes', 'candidate_rejections', 'candidate_exclusions')
+    || (section('candidates', 'buy_candidates') as AnyRecord)?.veto
+    || (section('candidates', 'buy_candidates') as AnyRecord)?.vetoes
+  return listValue(value)
 })
 const candidateBlockReason = computed(() => {
   const value = section('candidate_blocked_reason', 'candidate_block_reason', 'buy_block_reason')
@@ -136,7 +166,7 @@ const actionLabels: Record<string, string> = {
 }
 
 function fmt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
+  return fmtDateTime(value)
 }
 
 function hasContent(value: any): boolean {
@@ -226,12 +256,50 @@ function claimType(speaker: string) {
 }
 
 function actionType(action: string) {
-  return ['sell', 'reduce'].includes(action) ? 'error' : ['add', 'new_position', 'add_existing', 'conditional_buy'].includes(action) ? 'success' : 'info'
+  const value = String(action || '').toLowerCase()
+  return ['sell', 'reduce', 'blocked', 'data_gap'].includes(value) ? 'error' : ['add', 'new_position', 'add_existing', 'conditional_buy'].includes(value) ? 'success' : 'info'
 }
 
 function actionText(action: any) {
   const key = String(action || 'watch').toLowerCase()
+  if (['action', 'no_action', 'blocked', 'data_gap'].includes(key)) return key.toUpperCase()
   return actionLabels[key] || key
+}
+
+function finalDecisionText(value: any) {
+  const normalized = String(value || '').toUpperCase()
+  if (['ACTION', 'NO_ACTION', 'BLOCKED', 'DATA_GAP'].includes(normalized)) return normalized
+  return actionText(value)
+}
+
+function finalDecisionType(value: any) {
+  const normalized = String(value || '').toUpperCase()
+  if (normalized === 'ACTION') return 'warning'
+  if (['BLOCKED', 'DATA_GAP'].includes(normalized)) return 'error'
+  if (normalized === 'NO_ACTION') return 'info'
+  return actionType(String(value || ''))
+}
+
+function candidateStage(row: AnyRecord) {
+  const value = field(row, 'stage', 'candidate_engine_stage', 'candidate_status', 'readiness', 'status')
+  const normalized = String(value || '').toUpperCase()
+  if (['ACTION', 'READY', 'WATCH', 'WATCHLIST', 'DATA_GAP', 'BLOCKED'].includes(normalized)) return normalized === 'WATCHLIST' ? 'WATCH' : normalized
+  return value ? String(value) : unavailableText
+}
+
+function candidateIsDataGap(row: AnyRecord) {
+  return ['DATA_GAP', 'MISSING', 'INSUFFICIENT', 'BLOCKED_FOR_ACTION'].includes(String(field(row, 'quality_status', 'data_status', 'status') || '').toUpperCase())
+}
+
+function candidateMetric(row: AnyRecord, keys: string[], kind: 'number' | 'percent' = 'number') {
+  const raw = field(row, ...keys)
+  if (raw === null || raw === undefined || raw === '' || (candidateIsDataGap(row) && Number(raw) === 0)) return unavailableText
+  if (kind === 'percent') return formatPercent(raw)
+  return formatNumber(raw)
+}
+
+function candidateVetoText(value: any) {
+  return textValue(value) || unavailableText
 }
 
 function field(row: AnyRecord, ...keys: string[]) {
@@ -241,14 +309,18 @@ function field(row: AnyRecord, ...keys: string[]) {
 
 async function loadRuns() {
   loading.value = true
+  loadError.value = null
   try {
     runs.value = await api.listRuns(portfolioId.value || undefined)
     const requested = Number(route.query.run)
     const next = runs.value.find((item) => item.id === requested)?.id || selectedId.value || runs.value[0]?.id || null
     if (next) await selectRun(next)
-    else detail.value = null
+    else {
+      detail.value = null
+      selectedId.value = null
+    }
   } catch (e) {
-    message.error((e as Error).message)
+    loadError.value = e
   } finally {
     loading.value = false
   }
@@ -257,6 +329,7 @@ async function loadRuns() {
 async function selectRun(id: number) {
   selectedId.value = id
   detailLoading.value = true
+  detailError.value = null
   if (screenshotUrl.value) {
     URL.revokeObjectURL(screenshotUrl.value)
     screenshotUrl.value = ''
@@ -270,7 +343,7 @@ async function selectRun(id: number) {
       screenshotUrl.value = URL.createObjectURL(blob)
     }
   } catch (e) {
-    message.error((e as Error).message)
+    detailError.value = e
   } finally {
     detailLoading.value = false
   }
@@ -288,51 +361,59 @@ async function showComparison() {
 
 onMounted(async () => {
   try {
-    portfolios.value = await api.listPortfolios()
+    await loadPortfolios()
     const requestedPortfolio = Number(route.query.portfolio)
-    portfolioId.value = portfolios.value.some(p => p.id === requestedPortfolio) ? requestedPortfolio : null
-    await loadRuns()
-  } catch (e) { message.error((e as Error).message) }
+    if (requestedPortfolio && portfolios.value.some((item) => item.id === requestedPortfolio)) setSelectedPortfolio(requestedPortfolio)
+  } catch (e) {
+    loadError.value = e
+  }
+  mounted = true
+  await loadRuns()
 })
 onUnmounted(() => { if (screenshotUrl.value) URL.revokeObjectURL(screenshotUrl.value) })
-watch(portfolioId, () => void loadRuns())
+watch(portfolioId, () => { if (mounted) void loadRuns() })
 </script>
 
 <template>
   <section class="page-stack">
     <div class="page-heading">
-      <div><p class="eyebrow">DECISION HISTORY</p><h1>分析报告</h1><p>查看完整分析流程、组合决策与可执行候选。</p></div>
+      <div><p class="eyebrow">DECISION HISTORY</p><h1>分析报告</h1><p>查看完整分析流程、组合决策与可执行候选。<span v-if="selectedPortfolio">当前组合：{{ selectedPortfolio.name }}</span><span v-else>当前未限定组合</span></p></div>
       <div class="heading-actions">
-        <n-select v-model:value="portfolioId" clearable placeholder="全部组合" :options="portfolios.map(p => ({ label: p.name, value: p.id }))" class="portfolio-filter" />
+        <n-select :value="portfolioId" clearable placeholder="全部组合" :options="portfolios.map(p => ({ label: p.name, value: p.id }))" class="portfolio-filter" @update:value="setSelectedPortfolio" />
         <n-button secondary :loading="loading" @click="loadRuns"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
       </div>
     </div>
 
+    <ErrorState v-if="loadError" :error="loadError" @retry="loadRuns" />
     <div class="report-layout">
       <aside class="panel-card report-list">
         <div class="list-head"><strong>历史记录</strong><span>{{ runs.length }} 条</span></div>
-        <n-empty v-if="!runs.length && !loading" description="暂无分析报告" />
+        <LoadingState v-if="loading" message="正在读取分析报告" />
+        <EmptyState v-else-if="!runs.length" description="当前组合还没有分析报告">
+          <template #action><n-button secondary size="small" @click="router.push({ name: 'upload', query: { portfolio: portfolioId || undefined } })">先确认持仓并分析</n-button></template>
+        </EmptyState>
         <button v-for="run in runs" :key="run.id" type="button" :class="['run-item', { active: run.id === selectedId }]" @click="selectRun(run.id)">
-          <div><strong>{{ actionText(run.final_rating) }}</strong><n-tag size="tiny" :bordered="false" type="info">{{ run.data_quality_grade || '-' }}</n-tag></div>
+          <div><strong>{{ finalDecisionText(run.final_rating) }}</strong><n-tag size="tiny" :bordered="false" type="info">{{ run.data_quality_grade || unavailableText }}</n-tag></div>
           <p>{{ run.summary || '暂无摘要' }}</p>
           <span>{{ fmt(run.created_at) }}</span>
         </button>
       </aside>
 
       <main class="report-detail">
-        <section v-if="detailLoading" class="panel-card loading-report"><n-skeleton text :repeat="9" /></section>
-        <n-empty v-else-if="!detail" class="panel-card empty-report" description="选择一份报告查看详情" />
+        <section v-if="detailLoading" class="panel-card loading-report"><LoadingState message="正在读取报告详情" /></section>
+        <ErrorState v-else-if="detailError" :error="detailError" @retry="selectedId && selectRun(selectedId)" />
+        <EmptyState v-else-if="!detail" class="panel-card empty-report" description="选择一份报告查看详情" />
         <template v-else>
           <section class="panel-card decision-hero">
             <div class="verdict-copy">
               <p class="eyebrow">PORTFOLIO VERDICT</p>
-              <div class="verdict-line"><h2>{{ actionText(detail.final_rating) }}</h2><n-tag :bordered="false" :type="actionType(detail.final_rating || '')">{{ actionText(detail.final_rating || 'watch_only') }}</n-tag></div>
+              <div class="verdict-line"><h2>{{ finalDecisionText(finalDecision) }}</h2><n-tag :bordered="false" :type="finalDecisionType(finalDecision)">{{ finalDecisionText(finalDecision) }}</n-tag></div>
               <p>{{ detail.summary || '暂无摘要' }}</p>
             </div>
             <div class="hero-stats">
-              <div><span>数据质量</span><strong>{{ detail.data_quality_grade || '—' }}</strong></div>
-              <div><span>现金目标</span><strong>{{ detail.cash_target || '—' }}</strong></div>
-              <div><span>置信度</span><strong>{{ detail.confidence || '—' }}</strong></div>
+              <div><span>数据质量</span><strong>{{ detail.data_quality_grade || unavailableText }}</strong></div>
+              <div><span>现金目标</span><strong>{{ detail.cash_target || unavailableText }}</strong></div>
+              <div><span>置信度</span><strong>{{ detail.confidence || unavailableText }}</strong></div>
             </div>
             <div class="hero-actions"><span>{{ fmt(detail.created_at) }}</span><n-button secondary @click="showComparison"><template #icon><GitCompareArrows :size="16" /></template>与上次比较</n-button></div>
           </section>
@@ -360,19 +441,31 @@ watch(portfolioId, () => void loadRuns())
               <div><p class="section-kicker">NEW OPPORTUNITIES</p><h2>新增机会候选</h2><p>仅展示通过消息催化、资金面、板块位置与组合约束的新非持仓机会</p></div>
               <TrendingUp :size="21" />
             </div>
+            <n-alert type="info" :show-icon="false" class="candidate-disclaimer">
+              Candidate 是候选机会，不是最终组合动作；只有上方的 Portfolio Verdict 才代表本次组合决策。
+            </n-alert>
             <div v-if="candidates.length" class="candidate-list">
               <article v-for="(row, index) in candidates" :key="row.code || index" class="candidate-row">
                 <div class="candidate-identity">
                   <span class="candidate-index">{{ String(index + 1).padStart(2, '0') }}</span>
                   <div><strong>{{ row.name || row.code || `候选 ${index + 1}` }}</strong><span>{{ row.code || '代码待确认' }}</span></div>
-                  <n-tag :bordered="false" :type="actionType(field(row, 'action', 'type', 'candidate_type'))">{{ actionText(field(row, 'action', 'type', 'candidate_type')) }}</n-tag>
-                  <strong v-if="field(row, 'score', 'total_score')" class="candidate-score">{{ field(row, 'score', 'total_score') }}<small>/10</small></strong>
+                  <n-tag :bordered="false" :type="candidateStage(row) === 'DATA_GAP' || candidateStage(row) === 'BLOCKED' ? 'error' : candidateStage(row) === 'ACTION' ? 'warning' : 'info'">{{ candidateStage(row) }}</n-tag>
+                  <n-tag v-if="field(row, 'action', 'type', 'candidate_type')" size="small" bordered :type="actionType(field(row, 'action', 'type', 'candidate_type'))">{{ actionText(field(row, 'action', 'type', 'candidate_type')) }}</n-tag>
                 </div>
                 <p class="candidate-reason">{{ field(row, 'reason', 'recommendation_reason', 'thesis') || '—' }}</p>
                 <div class="candidate-evidence">
                   <div><span>消息 / 催化</span><p>{{ field(row, 'news_catalyst', 'catalyst', 'news') || field(row.reason_detail || {}, 'catalyst') || '—' }}</p></div>
                   <div><span>资金面</span><p>{{ field(row, 'capital_flow', 'fund_flow', 'money_flow') || field(row.reason_detail || {}, 'capital_flow') || '—' }}</p></div>
                   <div><span>板块位置</span><p>{{ field(row, 'sector_position', 'sector_stage', 'rotation_stage') || field(row.reason_detail || {}, 'sector_position') || '—' }}</p></div>
+                </div>
+                <div class="candidate-metrics">
+                  <div><span>Opportunity</span><strong>{{ candidateMetric(row, ['opportunity_score']) }}</strong></div>
+                  <div><span>Entry</span><strong>{{ candidateMetric(row, ['entry_score']) }}</strong></div>
+                  <div><span>R/R</span><strong>{{ candidateMetric(row, ['risk_reward_ratio', 'risk_reward', 'rr', 'rr_ratio']) }}</strong></div>
+                  <div><span>Fit</span><strong>{{ candidateMetric(row, ['portfolio_fit_score', 'portfolio_fit', 'fit']) }}</strong></div>
+                  <div><span>Decision Edge</span><strong>{{ candidateMetric(row, ['decision_edge', 'edge_vs_no_action', 'edge']) }}</strong></div>
+                  <div><span>Coverage</span><strong>{{ candidateMetric(row, ['coverage', 'data_coverage', 'quote_coverage'], 'percent') }}</strong></div>
+                  <div><span>Confidence</span><strong>{{ candidateMetric(row, ['confidence', 'confidence_score'], 'percent') }}</strong></div>
                 </div>
                 <div class="candidate-plan">
                   <div><span>入场条件</span><strong>{{ field(row, 'trigger', 'entry_condition', 'entry_trigger') || '—' }}</strong></div>
@@ -383,6 +476,10 @@ watch(portfolioId, () => void loadRuns())
               </article>
             </div>
             <n-alert v-else type="info" :show-icon="false">{{ candidateBlockReason }}</n-alert>
+            <div v-if="candidateVetoes.length" class="candidate-veto">
+              <div class="candidate-veto-title"><ShieldCheck :size="15" /><strong>Candidate Veto</strong><span>候选未进入组合最终动作</span></div>
+              <ul><li v-for="(item, index) in candidateVetoes" :key="index">{{ candidateVetoText(item) }}</li></ul>
+            </div>
           </section>
 
           <n-tabs type="line" animated class="report-tabs">
@@ -451,7 +548,7 @@ watch(portfolioId, () => void loadRuns())
                 </section>
 
                 <section class="workflow-stage compact-stage final-stage">
-                  <div class="stage-number">08</div><div class="stage-content"><div class="stage-title"><h3>组合经理最终决策</h3><n-tag :bordered="false" :type="actionType(detail.final_rating || '')">{{ actionText(detail.final_rating) }}</n-tag></div><dl v-if="sectionEntries(portfolioFinal).length" class="stage-summary"><div v-for="([key, value]) in sectionEntries(portfolioFinal)" :key="key"><dt>{{ labelFor(key) }}</dt><dd>{{ textValue(value) }}</dd></div></dl><p v-else class="empty-copy">{{ detail.summary || '未返回独立组合经理决策' }}</p></div>
+                  <div class="stage-number">08</div><div class="stage-content"><div class="stage-title"><h3>组合经理最终决策</h3><n-tag :bordered="false" :type="finalDecisionType(finalDecision)">{{ finalDecisionText(finalDecision) }}</n-tag></div><dl v-if="sectionEntries(portfolioFinal).length" class="stage-summary"><div v-for="([key, value]) in sectionEntries(portfolioFinal)" :key="key"><dt>{{ labelFor(key) }}</dt><dd>{{ textValue(value) }}</dd></div></dl><p v-else class="empty-copy">{{ detail.summary || '未返回独立组合经理决策' }}</p></div>
                 </section>
               </section>
             </n-tab-pane>
@@ -510,7 +607,7 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 40px); letter-spacing: 0; }
 .hero-actions { grid-column: 1 / 3; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--app-border-soft); padding-top: 12px; color: var(--app-text-muted); font-size: 11px; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }.section-title h2 { margin: 0; font-size: 17px; }.section-title > svg { color: var(--app-primary); }
 .table-wrap, .debate-wrap { max-width: 100%; min-width: 0; overflow-x: auto; }.action-table, .debate-table { width: 100%; min-width: 980px; border-collapse: collapse; }.action-table th, .debate-table th { border-bottom: 1px solid var(--app-border); padding: 9px; color: var(--app-text-muted); font-size: 10px; text-align: left; }.action-table td, .debate-table td { border-bottom: 1px solid var(--app-border-soft); padding: 11px 9px; vertical-align: top; }.action-table td:first-child, .action-proposal-table td:first-child { display: grid; }.action-table td:first-child span, .action-proposal-table td:first-child span { color: var(--app-text-muted); font-size: 10px; }.long-cell { min-width: 210px; line-height: 1.55; }.empty-cell { color: var(--app-text-muted); text-align: center; }
-.candidate-list { display: grid; }.candidate-row { display: grid; gap: 13px; border-top: 1px solid var(--app-border-soft); padding: 17px 0; }.candidate-row:first-child { border-top: 0; padding-top: 0; }.candidate-row:last-child { padding-bottom: 0; }.candidate-identity { display: flex; align-items: center; gap: 9px; }.candidate-index { display: grid; width: 30px; height: 30px; place-items: center; background: var(--app-primary-soft); color: var(--app-primary); font-weight: 800; }.candidate-identity > div { display: grid; min-width: 0; }.candidate-identity > div > span { color: var(--app-text-muted); font-size: 10px; }.candidate-score { margin-left: auto; color: var(--app-primary); font-size: 20px; }.candidate-score small { color: var(--app-text-muted); font-size: 10px; }.candidate-reason { margin: 0; line-height: 1.7; }.candidate-evidence, .candidate-plan { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }.candidate-evidence div { border-left: 2px solid var(--app-border); padding-left: 10px; }.candidate-evidence span, .candidate-plan span { color: var(--app-text-muted); font-size: 10px; }.candidate-evidence p { margin: 4px 0 0; line-height: 1.6; }.candidate-plan { grid-template-columns: repeat(4, 1fr); background: var(--app-surface-muted); padding: 11px 12px; }.candidate-plan div { display: grid; gap: 4px; }.candidate-plan strong { font-size: 12px; line-height: 1.5; }
+.candidate-list { display: grid; }.candidate-row { display: grid; gap: 13px; border-top: 1px solid var(--app-border-soft); padding: 17px 0; }.candidate-row:first-child { border-top: 0; padding-top: 0; }.candidate-row:last-child { padding-bottom: 0; }.candidate-disclaimer { margin-bottom: 2px; }.candidate-identity { display: flex; align-items: center; gap: 9px; }.candidate-index { display: grid; width: 30px; height: 30px; place-items: center; background: var(--app-primary-soft); color: var(--app-primary); font-weight: 800; }.candidate-identity > div { display: grid; min-width: 0; }.candidate-identity > div > span { color: var(--app-text-muted); font-size: 10px; }.candidate-reason { margin: 0; line-height: 1.7; }.candidate-evidence, .candidate-metrics, .candidate-plan { display: grid; gap: 12px; }.candidate-evidence { grid-template-columns: repeat(3, 1fr); }.candidate-evidence div { border-left: 2px solid var(--app-border); padding-left: 10px; }.candidate-evidence span, .candidate-metrics span, .candidate-plan span { color: var(--app-text-muted); font-size: 10px; }.candidate-evidence p { margin: 4px 0 0; line-height: 1.6; }.candidate-metrics { grid-template-columns: repeat(7, minmax(0, 1fr)); border-top: 1px solid var(--app-border-soft); border-bottom: 1px solid var(--app-border-soft); padding: 10px 0; }.candidate-metrics div { display: grid; gap: 4px; min-width: 0; }.candidate-metrics strong { overflow-wrap: anywhere; color: var(--app-primary); font-size: 13px; }.candidate-plan { grid-template-columns: repeat(4, 1fr); background: var(--app-surface-muted); padding: 11px 12px; }.candidate-plan div { display: grid; gap: 4px; }.candidate-plan strong { font-size: 12px; line-height: 1.5; }.candidate-veto { display: grid; gap: 7px; margin-top: 14px; border-left: 3px solid var(--app-warning); background: color-mix(in srgb, var(--app-warning) 8%, transparent); padding: 10px 12px; }.candidate-veto-title { display: flex; align-items: center; gap: 7px; color: var(--app-warning); }.candidate-veto-title span { margin-left: auto; color: var(--app-text-muted); font-size: 11px; }.candidate-veto ul { margin: 0; padding-left: 19px; color: var(--app-text-muted); font-size: 12px; line-height: 1.6; }
 .report-tabs { margin-top: 2px; }.workflow-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; }.workflow-heading h2 { margin: 0; font-size: 19px; }.workflow-heading > span { color: var(--app-text-muted); font-size: 11px; }.flow-rail { display: grid; grid-template-columns: repeat(8, 1fr); margin: 18px 0 4px; border: 1px solid var(--app-border-soft); background: var(--app-surface-muted); }.flow-rail div { position: relative; display: grid; min-width: 0; place-items: center; gap: 5px; padding: 10px 4px; color: var(--app-text-muted); font-size: 10px; }.flow-rail div:not(:last-child)::after { position: absolute; top: 50%; right: -5px; width: 9px; height: 9px; border-top: 1px solid var(--app-border); border-right: 1px solid var(--app-border); background: var(--app-surface-muted); content: ''; transform: translateY(-50%) rotate(45deg); }.flow-rail svg { color: var(--app-primary); }
 .workflow-stage { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 15px; border-top: 1px solid var(--app-border-soft); padding: 22px 0; }.workflow-stage:last-child { padding-bottom: 3px; }.stage-number { display: grid; width: 36px; height: 36px; place-items: center; background: var(--app-primary-soft); color: var(--app-primary); font-size: 11px; font-weight: 900; }.stage-content { min-width: 0; }.stage-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 13px; }.stage-title h3 { margin: 0; font-size: 16px; }.stage-title > span { color: var(--app-text-muted); font-size: 11px; }.split-details { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }.split-details h4 { margin: 0 0 9px; font-size: 12px; }.detail-list, .stage-summary { display: grid; margin: 0; }.detail-list > div, .stage-summary > div { display: grid; grid-template-columns: minmax(95px, .3fr) minmax(0, 1fr); gap: 10px; border-top: 1px solid var(--app-border-soft); padding: 9px 0; }.detail-list dt, .stage-summary dt { color: var(--app-text-muted); font-size: 11px; }.detail-list dd, .stage-summary dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }.empty-copy { margin: 0; color: var(--app-text-muted); font-size: 12px; }
 .analyst-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px 18px; }.analyst-item { border-top: 1px solid var(--app-border-soft); padding: 12px 0; }.analyst-item > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.analyst-item p { margin: 7px 0 0; line-height: 1.65; }.analyst-item ul { margin: 8px 0 0; padding-left: 17px; color: var(--app-text-muted); font-size: 11px; line-height: 1.6; }
@@ -518,7 +615,7 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 40px); letter-spacing: 0; }
 .markdown-panel { padding: 24px; }.json-panel { display: grid; gap: 16px; }.evidence-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }.evidence-grid div { border-left: 2px solid var(--app-border); padding-left: 12px; }.evidence-grid h3 { margin: 0 0 9px; font-size: 14px; }.evidence-grid ul { margin: 0; padding-left: 18px; color: var(--app-text-muted); line-height: 1.7; }
 pre { overflow: auto; border-radius: 7px; background: color-mix(in srgb, var(--app-bg) 70%, black); padding: 13px; font-size: 11px; white-space: pre-wrap; }.screenshot-panel { display: grid; min-height: 420px; place-items: center; }.screenshot-panel img { max-width: 100%; max-height: 75dvh; object-fit: contain; }
 .change-card { display: grid; grid-template-columns: 80px 1fr 1fr; gap: 10px; margin-top: 12px; border-top: 1px solid var(--app-border-soft); padding: 12px 0; }.change-card div > span { color: var(--app-text-muted); font-size: 11px; }
-@media (max-width: 1100px) { .report-layout { grid-template-columns: 230px minmax(0, 1fr); }.decision-hero { grid-template-columns: 1fr; }.hero-actions { grid-column: auto; }.candidate-evidence, .candidate-plan { grid-template-columns: repeat(2, 1fr); }.flow-rail { grid-template-columns: repeat(4, 1fr); }.analyst-list, .risk-claims { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .report-layout { grid-template-columns: 230px minmax(0, 1fr); }.decision-hero { grid-template-columns: 1fr; }.hero-actions { grid-column: auto; }.candidate-evidence, .candidate-metrics, .candidate-plan { grid-template-columns: repeat(2, 1fr); }.flow-rail { grid-template-columns: repeat(4, 1fr); }.analyst-list, .risk-claims { grid-template-columns: 1fr; } }
 @media (max-width: 860px) { .report-layout { grid-template-columns: 1fr; }.report-list { position: static; display: flex; max-height: none; overflow-x: auto; }.list-head { min-width: 90px; align-content: start; flex-direction: column; }.run-item { min-width: 245px; }.split-details { grid-template-columns: 1fr; }.change-card { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .page-heading { align-items: start; flex-direction: column; }.heading-actions { width: 100%; }.portfolio-filter { flex: 1; width: auto; }.hero-stats { grid-template-columns: 1fr; }.hero-stats div { border-top: 1px solid var(--app-border-soft); border-left: 0; padding: 9px 0; }.candidate-evidence, .candidate-plan, .evidence-grid { grid-template-columns: 1fr; }.flow-rail { grid-template-columns: repeat(2, 1fr); }.workflow-stage { grid-template-columns: 1fr; }.stage-number { width: 30px; height: 30px; }.candidate-identity { flex-wrap: wrap; }.candidate-score { margin-left: 0; }.detail-list > div, .stage-summary > div { grid-template-columns: 1fr; gap: 3px; }.panel-card { padding: 15px; } }
 </style>

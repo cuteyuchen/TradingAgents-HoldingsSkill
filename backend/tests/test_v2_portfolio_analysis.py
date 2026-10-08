@@ -27,32 +27,27 @@ def test_recognized_holding_without_code_can_be_corrected_manually():
     assert errors == []
 
 
-def test_analysis_model_resolves_optional_holding_code(monkeypatch):
+def test_analysis_does_not_guess_missing_holding_codes():
     from app.services import analysis_engine
 
-    monkeypatch.setattr(
-        analysis_engine,
-        "_call_json",
-        lambda *_args, **_kwargs: {
-            "matches": [{"index": 0, "code": "600519", "confidence": "high", "reason": "名称唯一匹配"}]
-        },
-    )
-    holdings = [{"code": "", "name": "贵州茅台", "market": None}]
-
-    resolved = analysis_engine._resolve_missing_codes(object(), holdings)
-
-    assert resolved[0]["code"] == "600519"
-    assert resolved[0]["code_source"] == "model_match"
+    assert not hasattr(analysis_engine, "_resolve_missing_codes")
 
 
 def test_v2_portfolio_flow(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from app.database import init_db
+    from app.database import SessionLocal, init_db
     from app.main import app
     from app.services import analysis_engine
+    from app.services.security_master import ETF, STOCK, upsert_security
 
+    monkeypatch.setattr(analysis_engine.settings, "TRUE_MULTI_AGENT_WORKFLOW_ENABLED", False)
     init_db()
+    with SessionLocal() as db:
+        upsert_security(db, {"code": "600519", "exchange": "SSE", "name": "贵州茅台", "security_type": STOCK})
+        upsert_security(db, {"code": "600002", "exchange": "SSE", "name": "验收股票A", "security_type": STOCK})
+        upsert_security(db, {"code": "510002", "exchange": "SSE", "name": "验收ETF", "security_type": ETF})
+        db.commit()
     client = TestClient(app)
     suffix = uuid.uuid4().hex
     email = f"portfolio-{suffix}@example.com"
@@ -99,8 +94,8 @@ def test_v2_portfolio_flow(monkeypatch):
                 "pnl": 0.0667,
                 "pnl_amount": 10000,
             },
-            {"code": None, "name": "中证证券", "qty": 26000, "available_qty": 26000},
-            {"code": None, "name": "通信ETF", "qty": 42000, "available_qty": 38000},
+            {"code": "600002", "name": "验收股票A", "qty": 26000, "available_qty": 26000},
+            {"code": "510002", "name": "验收ETF", "qty": 42000, "available_qty": 38000},
         ],
         "total_assets": 200000,
         "total_market_value": 160000,
@@ -123,14 +118,20 @@ def test_v2_portfolio_flow(monkeypatch):
     snapshot_payload = snapshot.json()
     assert snapshot_payload["holdings"][0]["available_qty"] == 80
     assert snapshot_payload["holdings"][0]["extra"]["unavailable_qty"] == 20
-    assert [item["code"] for item in snapshot_payload["holdings"]] == ["600519", "", ""]
+    assert [item["code"] for item in snapshot_payload["holdings"]] == ["600519", "600002", "510002"]
+
+    def quotes(codes):
+        now = analysis_engine.utc_now().isoformat()
+        return {code: {"code": code, "price": 1601 if code == "600519" else 1,
+            "source": "test", "quality_status": "VALID", "fetched_at": now,
+            "observed_at": now, "stale": False} for code in codes}
 
     monkeypatch.setattr(
         analysis_engine,
         "collect_market_snapshot",
         lambda codes: {
-            "captured_at": "2026-07-19T10:00:00+08:00",
-            "quotes": {"600519": {"code": "600519", "price": 1601, "source": "test"}},
+            "captured_at": analysis_engine.utc_now().isoformat(),
+            "quotes": quotes(codes),
             "technicals": {"600519": {"trend": "up", "source": "test"}},
             "indices": {},
             "quality_grade": "A",
@@ -138,6 +139,10 @@ def test_v2_portfolio_flow(monkeypatch):
             "source_chain": ["test-source"],
         },
     )
+    monkeypatch.setattr(analysis_engine, "refresh_snapshot_quotes", lambda market, codes, **kwargs: {
+        **market, "quotes": quotes(codes), "final_quote_refresh_status": "ok",
+        "final_quote_refresh_at": analysis_engine.utc_now().isoformat(), "final_quote_unavailable_codes": [],
+    })
 
     def fake_call(_profile, _system, _payload, instruction):
         if "匹配六位证券代码" in instruction:
@@ -169,7 +174,9 @@ def test_v2_portfolio_flow(monkeypatch):
                     "stop_loss": "趋势失效",
                     "take_profit": "放量突破",
                     "risk": "估值风险",
-                }
+                },
+                {"code": "600002", "name": "验收股票A", "action": "hold", "reason": "保持原仓位"},
+                {"code": "510002", "name": "验收ETF", "action": "hold", "reason": "保持原仓位"},
             ],
             "candidates": [],
             "history_consistency": "首次分析",
@@ -180,7 +187,16 @@ def test_v2_portfolio_flow(monkeypatch):
             "evidence": ["test-source"],
         }
 
-    monkeypatch.setattr(analysis_engine, "_call_json", fake_call)
+    monkeypatch.setattr(
+        analysis_engine,
+        "_structured_call_json",
+        lambda _profile, _system, _payload, instruction, _phase_name: fake_call(
+            _profile,
+            _system,
+            _payload,
+            instruction,
+        ),
+    )
     created_job = client.post(
         "/api/v2/analysis/jobs",
         headers=headers,

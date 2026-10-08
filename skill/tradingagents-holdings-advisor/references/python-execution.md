@@ -2,6 +2,12 @@
 
 Use Python when manual API calls or calculations would make the intraday analysis slow, fragile, or incomplete.
 
+This guide describes the bundled Skill snapshot script and its read-only evidence
+workflow. It is separate from the Phase B backend Provider/Snapshot API: the
+backend currently has configured Tencent/Eastmoney quote adapters and persisted
+snapshot metadata. SecurityMaster/TradingCalendar synchronization is opt-in, and
+the backend Provider registry does not yet include a Sina adapter.
+
 This file integrates the centralized data collection pattern from `TradingAgents-AShare`'s DataCollector (fetch once, serve many), the concurrency control from `TradingAgents-astock`'s Eastmoney throttling, `TradingAgents`' verified data-access contract, and VPA pre-computation from both A-share repos.
 
 ## When To Use Python
@@ -13,7 +19,7 @@ Use Python scripts when any applies:
 - Technical indicators such as MA, RSI, MACD, Bollinger, ATR, VWMA, MFI, volume ratios, or support/resistance need calculation.
 - VPA indicators (OBV, volume ratio, bar type classification, volume-price divergence, selling climax detection) need pre-computation.
 - Data from several sources must be normalized into one evidence table.
-- A repeatable market snapshot is needed for 09:35, 10:30, 13:05, 14:30, or 15:10 runs.
+- A repeatable market snapshot is needed for the standard checkpoints `09:35`, `10:30`, `13:05`, `14:30`, or `15:10` runs (Asia/Shanghai).
 - Candidate scoring requires programmatic comparison across multiple stocks/ETFs.
 
 ## Fast Market Snapshot Script
@@ -169,7 +175,7 @@ If `holdings[].quote.source` is `[数据缺失: quote]`, do not issue an executa
 buy/sell/reduce instruction for that holding. State the missing source chain and
 the next collection step.
 
-If `quality_gate.new_buy_allowed` is false because sector, concept, or capital-flow evidence is missing, output only conditional watch triggers for new candidates. Do not turn missing hot-sector data into a weak executable buy.
+If `quality_gate.new_buy_allowed` is false because sector, concept, or capital-flow evidence is missing, output only conditional watch triggers in blocker/report text; keep `candidates=[]`. Do not turn missing hot-sector data into a weak executable buy.
 
 ### Eastmoney Throttling
 
@@ -364,12 +370,12 @@ packaging; do not require those optional fields before the script can be useful.
 ```python
 ####################### 标准化输出格式 #######################
 evidence = {
-    "timestamp": "2026-06-18 10:00",
+    "timestamp": "2026-06-18 10:30",
     "screenshot": {
         "filename": "holdings-2026-06-18.png",
         "mime_type": "image/png",
         "data_url": "data:image/png;base64,...",
-        "captured_at": "2026-06-18T10:00:00+08:00",
+        "captured_at": "2026-06-18T10:30:00+08:00",
         "source": "user_upload"
     },
     "account": {
@@ -408,7 +414,7 @@ evidence = {
                 "turnover": 45.2e8,
                 "volume_ratio": 1.3,
                 "source": "Tencent qt.gtimg.cn",
-                "quote_time": "2026-06-18 10:00:03",
+                "quote_time": "2026-06-18 10:30:03",
                 "market_session": "trading"
             },
             "technicals": {
@@ -453,7 +459,16 @@ evidence = {
         {
             "name": "半导体ETF",
             "code": "512480",
+            "candidate_type": "new_position",
             "score": 7.5,
+            "score_breakdown": {
+                "sector_heat": 2,
+                "catalyst": 2,
+                "technical": 1.5,
+                "vpa": 1,
+                "capital_flow": 1,
+                "portfolio_fit": 0
+            },
             "entry_trigger": "突破1.050",
             "initial_size": "10%",
             "take_profit_1": "1.080",
@@ -469,6 +484,11 @@ evidence = {
     ]
 }
 ```
+
+The `candidates` array above is intentionally limited to actionable new
+positions. A rotation watch, a score-5/6 idea, or an incomplete evidence row
+belongs in `candidate_blocked_reason` or an observation trigger, not in this
+array. An empty array is a valid successful outcome and must not be padded.
 
 If a source fails, output `[数据缺失: source/field]` instead of silently filling values. Reduce confidence grade for affected holdings.
 

@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("ADVISOR_TOKEN", "test_token_xxx")
 os.environ.setdefault("APP_SECRET_KEY", "test-secret-key-at-least-32-bytes-long")
@@ -61,6 +63,25 @@ def test_quality_block_preserves_watch_only():
 
     assert result["final_rating"] == "watch_only"
     assert result["portfolio_manager_final"]["portfolio_rating"] == "watch_only"
+
+
+def test_portfolio_gate_failure_fail_closes_new_position_candidates():
+    from app.services.analysis_engine import _fail_closed_portfolio_gate_result
+
+    result = _fail_closed_portfolio_gate_result(
+        {
+            "final_rating": "add",
+            "holdings": [{"code": "600519", "action": "add", "target_weight": 0.2}],
+            "candidates": [{"code": "510300", "candidate_type": "new_position", "action": "new_position", "buyable": True}],
+        },
+        RuntimeError("portfolio gate unavailable"),
+    )
+
+    assert result["final_rating"] == "watch_only"
+    assert result["holdings"][0]["action"] == "watch"
+    assert result["candidates"][0]["buyable"] is False
+    assert result["candidates"][0]["actionable"] is False
+    assert result["decision_gate"]["portfolio_action"] == "WATCH_ONLY"
 
 
 def test_candidate_zero_valid():
@@ -279,3 +300,70 @@ def test_contract_runtime_sync():
     runtime_path = Path(BACKEND_DIR).parent / "skill" / "tradingagents-holdings-advisor" / "runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert runtime["decision_contract"] == decision_contract_payload()
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (100, 100.0), (100.0, 100.0), ("100股", 100.0), (" 100 份 ", 100.0),
+    ("1,000股", 1000.0), ("100.0", 100.0), (0, 0.0),
+    ("20%", None), ("20％", None), ("100股或20%", None),
+    ("1,00", None), (0.2, None), (-100, None), (True, None),
+    (float("nan"), None), (float("inf"), None), ("NaN", None),
+    (10 ** 400, None),
+])
+def test_share_quantity_requires_finite_nonnegative_whole_shares(raw, expected):
+    from app.decision_contract import parse_share_quantity
+
+    assert parse_share_quantity(raw) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (0.2, 0.2), ("0.2", 0.2), ("20%", 0.2), ("20％", 0.2),
+    (0, 0.0), (1, 1.0), ("100%", 1.0),
+    ("100股", None), (20, None), ("20", None), ("20%%", None),
+    (-0.2, None), (True, None), (float("nan"), None), (float("inf"), None),
+    ("120%", None), (10 ** 400, None),
+])
+def test_target_weight_requires_ratio_or_explicit_percent(raw, expected):
+    from app.decision_contract import parse_target_weight
+
+    assert parse_target_weight(raw) == expected
+
+
+@pytest.mark.parametrize("row,errors", [
+    ({"quantity": "100股", "proposed_qty": 100, "target_weight": "20%"}, ()),
+    ({"quantity": "20%", "proposed_qty": 100}, ("QUANTITY_INVALID",)),
+    ({"quantity": "100股", "proposed_qty": "20%"}, ("QUANTITY_INVALID",)),
+    ({"quantity": 100, "proposed_qty": 200}, ("QUANTITY_CONFLICT",)),
+    ({"quantity": 0}, ("QUANTITY_INVALID",)),
+    ({"quantity": 100, "target_weight": "100股"}, ("TARGET_WEIGHT_INVALID",)),
+])
+def test_action_sizing_never_hides_invalid_or_conflicting_fields(row, errors):
+    from app.decision_contract import normalize_action_sizing
+
+    sizing = normalize_action_sizing(row)
+    assert sizing.errors == errors
+    if not errors:
+        assert sizing.quantity == 100
+        assert sizing.target_weight == 0.2
+    elif any(reason.startswith("QUANTITY_") for reason in errors):
+        assert sizing.quantity is None
+
+
+@pytest.mark.parametrize("result,expected", [
+    ({}, "INCOMPLETE"),
+    ({"final_rating": "no_action", "holdings": []}, "INCOMPLETE"),
+    ({"holdings": [{"code": "600519"}]}, "INCOMPLETE"),
+    ({"holdings": [{"action": "hold"}]}, "NO_ACTION"),
+    ({"holdings": [{"action": "watch"}]}, "WAITING"),
+    ({"holdings": [{"action": "conditional_add"}]}, "WAITING"),
+    ({"holdings": [{"action": "sell"}]}, "ACTION"),
+    ({"holdings": [{"action": "watch", "portfolio_gate": "BLOCKED"}]}, "DATA_GAP"),
+    ({"holdings": [{"action": "watch", "decision_status": "INCOMPLETE"}]}, "INCOMPLETE"),
+    ({"holdings": [{"action": "hold"}], "quality_gate": {"grade": "F"}}, "DATA_GAP"),
+    ({"holdings": [{"action": "hold"}], "candidates": [{"candidate_type": "new_position", "buyable": True}]}, "ACTION"),
+])
+def test_explicit_decision_states_do_not_conflate_missing_waiting_and_holding(result, expected):
+    from app.decision_contract import apply_decision_status
+
+    assert apply_decision_status(result)["decision_status"] == expected
+    assert all("decision_status" in row for row in result.get("holdings", []))
