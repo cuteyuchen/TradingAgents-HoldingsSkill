@@ -51,6 +51,14 @@ def _provider_name(provider: QuoteProvider) -> str:
     ).lower()
 
 
+def _provider_disabled(provider_name: str) -> bool:
+    if provider_name != "eastmoney_batch":
+        return False
+    from ...config import settings
+
+    return not settings.EASTMONEY_QUOTE_ENABLED
+
+
 def _quote_freshness_seconds() -> float:
     try:
         from ...config import settings
@@ -140,18 +148,21 @@ class HealthTrackedQuoteProvider(QuoteProvider):
         self.last_provider_attempts = []
         if not requested:
             return {}
-        if not self.health.allow(self.name):
-            self.last_errors = [{"provider": self.name, "error_code": "circuit_open", "message": "provider circuit is open"}]
+        disabled = _provider_disabled(self.name)
+        if disabled or not self.health.allow(self.name):
+            status = "provider_disabled" if disabled else "circuit_open"
+            message = "provider is disabled by configuration" if disabled else "provider circuit is open"
+            self.last_errors = [{"provider": self.name, "error_code": status, "message": message}]
             self.last_provider_attempts = [
                 {
                     "provider": self.name,
                     "endpoint": self.endpoint or None,
-                    "status": "circuit_open",
+                    "status": status,
                     "latency_ms": None,
                     "contribution_count": 0,
                 }
             ]
-            raise ProviderCircuitOpen("provider circuit is open")
+            raise ProviderCircuitOpen(message)
         started = monotonic()
         try:
             raw_result = (
@@ -299,14 +310,17 @@ class FallbackQuoteProvider(QuoteProvider):
             provider_name = _provider_name(provider)
             if not remaining:
                 break
-            if not self.health.allow(provider_name):
-                errors.append({"provider": provider_name, "error_code": "circuit_open", "message": "provider circuit is open"})
+            disabled = _provider_disabled(provider_name)
+            if disabled or not self.health.allow(provider_name):
+                status = "provider_disabled" if disabled else "circuit_open"
+                message = "provider is disabled by configuration" if disabled else "provider circuit is open"
+                errors.append({"provider": provider_name, "error_code": status, "message": message})
                 provider_attempts.append(
                     {
                         "provider": provider_name,
                         "fallback_level": level,
                         "endpoint": str(getattr(provider, "endpoint", "") or "") or None,
-                        "status": "circuit_open",
+                        "status": status,
                         "latency_ms": None,
                         "contribution_count": 0,
                     }

@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from app.market.models import DataQualityStatus
 from app.market.providers import (
     FuyaoCalendarProvider,
+    FuyaoAPIError,
     FuyaoClient,
     FuyaoKLineProvider,
     FuyaoQuoteProvider,
@@ -74,6 +77,106 @@ def test_all_a_quote_provider_uses_official_limit_offset_pagination():
     assert set(result) == {"000001", "600519", "159915"}
     assert [call[1]["offset"] for call in client.calls] == [0, 2]
     assert all("thscodes" not in call[1] for call in client.calls)
+
+
+def test_all_a_default_fetches_5500_plus_quotes_in_one_request_without_sleep():
+    codes = [str(600000 + index) for index in range(5501)]
+    calls = []
+    sleeps = []
+
+    def transport(_url, **kwargs):
+        calls.append(kwargs["params"])
+        return {"code": 0, "message": "success", "data": {"total": len(codes), "item": [
+            {"thscode": f"{code}.SH", "last_price": 10} for code in codes
+        ]}}
+
+    client = FuyaoClient(api_key="test", transport=transport, sleeper=sleeps.append, clock=lambda: 100.0)
+    result = FuyaoQuoteProvider(client=client).get_all_a_share_quotes(codes)
+
+    assert calls == [{"limit": 6000, "offset": 0}]
+    assert sleeps == []
+    assert len(result) == len(codes)
+    assert all(quote.quality_status == DataQualityStatus.VALID for quote in result.values())
+
+
+@pytest.mark.parametrize("count", [250, 6250])
+def test_all_a_large_batch_failure_falls_back_at_current_offset(count):
+    codes = [str(600000 + index) for index in range(count)]
+    endpoint = "/api/a-share/prices/snapshot"
+    failed_offset = 0 if count < 6000 else 6000
+
+    def load(call):
+        params = call[1]
+        if params["limit"] == 6000 and params["offset"] == failed_offset:
+            raise ValueError("batch too large")
+        rows = codes[params["offset"]:params["offset"] + params["limit"]]
+        return response(endpoint, {"total": count, "item": [
+            {"thscode": f"{code}.SH", "last_price": 10} for code in rows
+        ]})
+
+    client = StubClient({endpoint: load})
+    provider = FuyaoQuoteProvider(client=client)
+    result = provider.get_all_a_share_quotes(codes)
+
+    assert len(result) == count
+    assert all(quote.price == 10 for quote in result.values())
+    params = [call[1] for call in client.calls]
+    failed_index = 0 if count < 6000 else 1
+    assert params[failed_index] == {"limit": 6000, "offset": failed_offset}
+    assert params[failed_index + 1:] == [
+        {"limit": 100, "offset": offset} for offset in range(failed_offset, count, 100)
+    ]
+    assert len(provider.last_errors) == 1
+
+
+def test_all_a_server_clamped_limit_does_not_skip_quotes():
+    codes = [str(600000 + index) for index in range(250)]
+    endpoint = "/api/a-share/prices/snapshot"
+
+    def load(call):
+        offset = call[1]["offset"]
+        return response(endpoint, {"total": len(codes), "item": [
+            {"thscode": f"{code}.SH", "last_price": 10} for code in codes[offset:offset + 100]
+        ]})
+
+    client = StubClient({endpoint: load})
+    result = FuyaoQuoteProvider(client=client).get_all_a_share_quotes(codes)
+    assert all(quote.price == 10 for quote in result.values())
+    assert [call[1]["offset"] for call in client.calls] == [0, 100, 200]
+
+
+@pytest.mark.parametrize("category", ["PERMISSION", "RATE_LIMIT"])
+def test_all_a_does_not_retry_smaller_pages_for_auth_or_rate_limit(category):
+    endpoint = "/api/a-share/prices/snapshot"
+
+    def fail(_call):
+        raise FuyaoAPIError("unavailable", category=category)
+
+    client = StubClient({endpoint: fail})
+    provider = FuyaoQuoteProvider(client=client, full_market_threshold=1)
+    result = provider.get_all_a_share_quotes(["600519", "000001"])
+    assert len(client.calls) == 1
+    assert all(quote.quality_status == DataQualityStatus.MISSING for quote in result.values())
+
+
+def test_all_a_small_page_failure_is_bounded_and_preserves_partial_quotes():
+    endpoint = "/api/a-share/prices/snapshot"
+
+    def load(call):
+        params = call[1]
+        if params["limit"] == 6000 or params["offset"]:
+            raise TimeoutError("unavailable")
+        return response(endpoint, {"total": 3, "item": [{"thscode": "600519.SH", "last_price": 10}]})
+
+    client = StubClient({endpoint: load})
+    provider = FuyaoQuoteProvider(client=client, full_market_threshold=1)
+    result = provider.get_all_a_share_quotes(["600519", "000001", "159915"])
+    assert [call[1] for call in client.calls] == [
+        {"limit": 6000, "offset": 0}, {"limit": 100, "offset": 0}, {"limit": 100, "offset": 1},
+    ]
+    assert result["600519"].price == 10
+    assert result["000001"].quality_status == DataQualityStatus.MISSING
+    assert len(provider.last_errors) == 2
 
 
 def test_all_a_fallback_chain_preserves_primary_pagination_capability():

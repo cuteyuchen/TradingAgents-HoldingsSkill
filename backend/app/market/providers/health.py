@@ -123,10 +123,12 @@ class ProviderHealthTracker:
         failure_threshold: int = 3,
         cooldown_seconds: float = 60.0,
         clock: Callable[[], float] | None = None,
+        provider_circuit_options: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
         self._clock = clock or monotonic
+        self._provider_circuit_options = provider_circuit_options or {}
         self._states: dict[tuple[str, str], ProviderHealth] = {}
         self._breakers: dict[tuple[str, str], CircuitBreaker] = {}
         self._lock = RLock()
@@ -135,14 +137,15 @@ class ProviderHealthTracker:
         key = (str(provider).lower(), str(data_type).lower())
         with self._lock:
             state = self._states.setdefault(key, ProviderHealth(key[0], key[1]))
-            breaker = self._breakers.setdefault(
-                key,
-                CircuitBreaker(
-                    failure_threshold=self.failure_threshold,
-                    cooldown_seconds=self.cooldown_seconds,
+            breaker = self._breakers.get(key)
+            if breaker is None:
+                options = self._provider_circuit_options.get(key[0], {}) if key[1] == "quote" else {}
+                breaker = CircuitBreaker(
+                    failure_threshold=options.get("failure_threshold", self.failure_threshold),
+                    cooldown_seconds=options.get("cooldown_seconds", self.cooldown_seconds),
                     clock=self._clock,
-                ),
-            )
+                )
+                self._breakers[key] = breaker
         return state, breaker
 
     def get(self, provider: str, data_type: str = "quote") -> ProviderHealth:
@@ -259,7 +262,7 @@ class ProviderHealthTracker:
                     else 0.0
                 )
             breaker.restore(
-                failures=max(consecutive_failures, self.failure_threshold if is_open else 0),
+                failures=max(consecutive_failures, breaker.failure_threshold if is_open else 0),
                 opened_elapsed_seconds=elapsed_seconds,
             )
             with self._lock:
@@ -322,6 +325,7 @@ def get_runtime_provider_health_registry() -> ProviderHealthRegistry:
             _runtime_registry = ProviderHealthRegistry(
                 failure_threshold=failure_threshold,
                 cooldown_seconds=cooldown_seconds,
+                provider_circuit_options=_eastmoney_circuit_options(),
             )
         return _runtime_registry
 
@@ -341,8 +345,24 @@ def reset_runtime_provider_health_registry(
             failure_threshold=failure_threshold if failure_threshold is not None else default_threshold,
             cooldown_seconds=cooldown_seconds if cooldown_seconds is not None else default_cooldown,
             clock=clock,
+            provider_circuit_options=_eastmoney_circuit_options(
+                failure_threshold=failure_threshold, cooldown_seconds=cooldown_seconds,
+            ),
         )
         return _runtime_registry
+
+
+def _eastmoney_circuit_options(
+    *, failure_threshold: int | None = None, cooldown_seconds: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    from ...config import settings
+
+    return {
+        "eastmoney_batch": {
+            "failure_threshold": failure_threshold if failure_threshold is not None else settings.EASTMONEY_FAILURE_THRESHOLD,
+            "cooldown_seconds": cooldown_seconds if cooldown_seconds is not None else settings.EASTMONEY_CIRCUIT_COOLDOWN_SECONDS,
+        }
+    }
 
 
 def runtime_provider_health_snapshot() -> list[dict[str, object]]:

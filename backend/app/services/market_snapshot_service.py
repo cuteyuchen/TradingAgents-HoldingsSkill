@@ -45,6 +45,9 @@ _snapshot_provider: SnapshotProvider | None = None
 _foundation_snapshot_cache_lock = threading.Lock()
 _foundation_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _MARKET_CACHE_MAX_ENTRIES = 2048
+# Fixed lock stripes bound memory while coalescing refreshes for the same key.
+# Never hold the cache-wide lock during provider I/O.
+_market_refresh_locks = tuple(threading.Lock() for _ in range(64))
 
 
 def get_market_data_cache(key: str) -> dict[str, Any] | None:
@@ -52,20 +55,45 @@ def get_market_data_cache(key: str) -> dict[str, Any] | None:
 
     with _foundation_snapshot_cache_lock:
         cached = _foundation_snapshot_cache.get(key)
-        if cached is not None and cached[0] > time.monotonic():
-            return deepcopy(cached[1])
-        _foundation_snapshot_cache.pop(key, None)
-    return None
+        if cached is None:
+            return None
+        if cached[0] <= time.monotonic():
+            _foundation_snapshot_cache.pop(key, None)
+            return None
+    # Stored payloads are replaced, never mutated. Copying a full-market batch
+    # outside the global lock keeps other cached market reads moving.
+    return deepcopy(cached[1])
 
 
 def put_market_data_cache(key: str, payload: Mapping[str, Any], *, ttl: float) -> None:
-    now = time.monotonic()
+    stored = deepcopy(dict(payload))
     with _foundation_snapshot_cache_lock:
+        now = time.monotonic()
         for expired in [name for name, (expiry, _) in _foundation_snapshot_cache.items() if expiry <= now]:
             _foundation_snapshot_cache.pop(expired, None)
         if key not in _foundation_snapshot_cache and len(_foundation_snapshot_cache) >= _MARKET_CACHE_MAX_ENTRIES:
             _foundation_snapshot_cache.pop(next(iter(_foundation_snapshot_cache)))
-        _foundation_snapshot_cache[key] = (now + max(0.0, ttl), deepcopy(dict(payload)))
+        _foundation_snapshot_cache[key] = (now + max(0.0, ttl), stored)
+
+
+def get_or_load_market_data_cache(
+    key: str,
+    loader: Callable[[], Mapping[str, Any]],
+    *,
+    ttl: float | Callable[[Mapping[str, Any]], float],
+) -> tuple[dict[str, Any], bool]:
+    """Share one refresh among concurrent readers, returning data and hit status."""
+
+    cached = get_market_data_cache(key)
+    if cached is not None:
+        return cached, True
+    with _market_refresh_locks[hash(key) % len(_market_refresh_locks)]:
+        cached = get_market_data_cache(key)
+        if cached is not None:
+            return cached, True
+        result = deepcopy(dict(loader()))
+        put_market_data_cache(key, result, ttl=ttl(result) if callable(ttl) else ttl)
+        return result, False
 
 
 def set_snapshot_provider(provider: SnapshotProvider | None) -> None:
@@ -391,8 +419,8 @@ def get_cached_all_a_share_quote_snapshot(
     trade_date: date | str | None = None,
     include_bse: bool = True,
     include_suspended: bool = True,
-    max_age_seconds: float = 5.0,
-    failure_ttl_seconds: float = 5.0,
+    max_age_seconds: float | None = None,
+    failure_ttl_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Return the canonical all-A batch snapshot through one shared TTL cache.
 
@@ -402,36 +430,39 @@ def get_cached_all_a_share_quote_snapshot(
     """
 
     day = _date(trade_date)
+    if max_age_seconds is None:
+        max_age_seconds = settings.MARKET_FOUNDATION_LIVE_CACHE_SECONDS
+    if failure_ttl_seconds is None:
+        failure_ttl_seconds = settings.MARKET_FOUNDATION_FAILURE_CACHE_SECONDS
     key = ":".join(
         (
+            "foundation-quotes",
+            str(id(db.get_bind())),
             str(provider or "all_a").lower(),
             day.isoformat() if day else "latest",
             "bse" if include_bse else "no-bse",
             "suspended" if include_suspended else "active-only",
         )
     )
-    cached = get_market_data_cache(key)
-    if cached is not None:
-        metadata = dict(cached.get("metadata") or {})
-        metadata["market_foundation_cache_hit"] = True
-        cached["metadata"] = metadata
-        return cached
-
-    snapshot = get_all_a_share_quote_snapshot(
-        db,
-        provider=provider,
-        trade_date=day,
-        include_bse=include_bse,
-        include_suspended=include_suspended,
+    result, cache_hit = get_or_load_market_data_cache(
+        key,
+        lambda: get_all_a_share_quote_snapshot(
+            db,
+            provider=provider,
+            trade_date=day,
+            include_bse=include_bse,
+            include_suspended=include_suspended,
+        ),
+        ttl=lambda snapshot: float(
+            max_age_seconds
+            if str(snapshot.get("quality_status") or "MISSING").upper() in {"VALID", "DEGRADED", "STALE"}
+            else failure_ttl_seconds
+        ),
     )
-    quality = str(snapshot.get("quality_status") or "MISSING").upper()
-    ttl = max_age_seconds if quality in {"VALID", "DEGRADED", "STALE"} else failure_ttl_seconds
-    result = deepcopy(snapshot)
     metadata = dict(result.get("metadata") or {})
-    metadata["market_foundation_cache_hit"] = False
+    metadata["market_foundation_cache_hit"] = cache_hit
     result["metadata"] = metadata
-    put_market_data_cache(key, result, ttl=float(ttl))
-    return deepcopy(result)
+    return result
 
 
 def clear_market_foundation_snapshot_cache() -> None:
@@ -520,7 +551,7 @@ def persist_snapshot(db: Session, snapshot: Mapping[str, Any], *, endpoint: str 
         if provider_quality not in QUALITY_STATUSES:
             provider_quality = (
                 "MISSING"
-                if str(attempt.get("status") or "").lower() in {"failure", "unusable", "circuit_open"}
+                if str(attempt.get("status") or "").lower() in {"failure", "unusable", "circuit_open", "provider_disabled"}
                 else row.quality_status
             )
         provider_errors = [

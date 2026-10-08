@@ -162,6 +162,104 @@ def test_eastmoney_factory_applies_configured_throttle():
     )
 
 
+@pytest.mark.parametrize("failure", ["http_502", "timeout", "missing"])
+def test_eastmoney_failure_opens_shared_circuit_after_one_request_and_recovers(monkeypatch, failure):
+    import requests
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "EASTMONEY_QUOTE_ENABLED", True)
+    monkeypatch.setattr(settings, "EASTMONEY_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(settings, "EASTMONEY_CIRCUIT_COOLDOWN_SECONDS", 300)
+    clock = [0.0]
+    registry = reset_runtime_provider_health_registry(clock=lambda: clock[0])
+    calls = []
+    should_fail = [True]
+
+    def transport(_url, **_kwargs):
+        calls.append(_url)
+        if should_fail[0]:
+            if failure == "timeout":
+                raise requests.exceptions.Timeout("timed out")
+            if failure == "http_502":
+                upstream = requests.Response()
+                upstream.status_code = 502
+                raise requests.exceptions.HTTPError("blocked by WAF", response=upstream)
+            return {"data": {"total": 0, "diff": []}}
+        return {"data": {"total": 1, "diff": [{"f12": "600519", "f43": 10, "f60": 9.9}]}}
+
+    def chain():
+        # Rebuild adapters like independent HTTP requests do. The registry must
+        # keep the failure across those instances, even with the old ordering.
+        return FallbackQuoteProvider([
+            EastmoneyBatchQuoteProvider(transport=transport),
+            InMemoryQuoteProvider({"600519": _quote("600519")}, provider="tencent"),
+        ])
+
+    try:
+        first = chain()
+        assert first.get_all_a_share_quotes(["600519"])["600519"].provider == "tencent"
+        assert registry.get("eastmoney_batch").status == ProviderHealthStatus.CIRCUIT_OPEN
+        second = chain()
+        assert second.get_quotes(["600519"])["600519"].provider == "tencent"
+        assert second.last_provider_attempts[0]["status"] == "circuit_open"
+        assert len(calls) == 1
+        clock[0] = 299
+        assert registry.allow("eastmoney_batch") is False
+        clock[0] = 301
+        assert registry.allow("eastmoney_batch") is True
+        assert registry.allow("eastmoney_batch") is False  # only one recovery probe
+        registry.record_failure("eastmoney_batch", "probe_failed")
+        assert registry.allow("eastmoney_batch") is False
+        clock[0] = 602
+        should_fail[0] = False
+        recovered = create_quote_provider("eastmoney", transport=transport)
+        assert recovered.get_quotes(["600519"])["600519"].price == 10
+        assert registry.get("eastmoney_batch").status == ProviderHealthStatus.HEALTHY
+        assert len(calls) == 2
+    finally:
+        reset_runtime_provider_health_registry()
+
+
+def test_disabled_eastmoney_is_skipped_in_direct_and_fallback_routes(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "EASTMONEY_QUOTE_ENABLED", False)
+    registry = ProviderHealthTracker()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("disabled Eastmoney must not send a request")
+
+    raw = EastmoneyBatchQuoteProvider(transport=forbidden)
+    direct = HealthTrackedQuoteProvider(raw, health=registry)
+    with pytest.raises(RuntimeError, match="disabled"):
+        direct.get_quotes(["600519"])
+    assert direct.last_provider_attempts[0]["status"] == "provider_disabled"
+
+    fallback = FallbackQuoteProvider([
+        raw, InMemoryQuoteProvider({"600519": _quote("600519")}, provider="tencent"),
+    ], health=registry)
+    assert fallback.get_quotes(["600519"])["600519"].provider == "tencent"
+    assert fallback.last_provider_attempts[0]["status"] == "provider_disabled"
+    assert all(state.provider_name != "eastmoney_batch" for state in registry.snapshot())
+
+
+def test_default_all_a_chain_uses_tencent_before_eastmoney(monkeypatch):
+    from app.config import settings
+    from app.market.providers.factory import QuoteProviderFactory
+
+    monkeypatch.setattr(settings, "ACCEPTANCE_MODE", False)
+    monkeypatch.setattr(settings, "MARKET_QUOTE_ALL_A_PRIMARY_PROVIDER", "fuyao")
+    monkeypatch.setattr(settings, "MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS", ("tencent", "eastmoney_batch"))
+    provider = QuoteProviderFactory().build_all_a_quote_chain()
+    assert [source.name for source in provider.providers] == ["fuyao", "tencent", "eastmoney_batch"]
+    result = FallbackQuoteProvider([
+        InMemoryQuoteProvider({}, provider="fuyao"),
+        InMemoryQuoteProvider({"600519": _quote("600519")}, provider="tencent"),
+        _FailingProvider(),
+    ], health=ProviderHealthTracker()).get_quotes(["600519"])
+    assert result["600519"].provider == "tencent"
+
+
 class _FailingProvider(QuoteProvider):
     name = "failing"
 

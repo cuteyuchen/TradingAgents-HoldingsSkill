@@ -158,7 +158,7 @@ def parse_fuyao_quote(
 
 
 class FuyaoQuoteProvider(QuoteProvider):
-    """Fuyao A-share snapshot adapter with explicit batch and full paging paths."""
+    """Fuyao snapshots with a large all-market batch and smaller-page recovery."""
 
     name = "fuyao"
     endpoint = FUYAO_QUOTE_ENDPOINT
@@ -178,7 +178,8 @@ class FuyaoQuoteProvider(QuoteProvider):
         request: Any | None = None,
         timeout: float | None = None,
         batch_size: int = 100,
-        page_size: int = 100,
+        page_size: int = 6000,
+        fallback_page_size: int = 100,
         max_pages: int = 200,
         full_market_threshold: int = 200,
     ) -> None:
@@ -207,6 +208,7 @@ class FuyaoQuoteProvider(QuoteProvider):
         self.client = client or client_from_settings(**client_options)
         self.batch_size = max(1, int(batch_size))
         self.page_size = max(1, int(page_size))
+        self.fallback_page_size = max(1, min(int(fallback_page_size), self.page_size))
         self.max_pages = max(1, int(max_pages))
         self.full_market_threshold = max(1, int(full_market_threshold))
         self.last_errors: list[dict[str, Any]] = []
@@ -328,17 +330,28 @@ class FuyaoQuoteProvider(QuoteProvider):
         wanted = set(normalized)
         result: dict[str, NormalizedQuote] = {}
         total: int | None = None
-        for page in range(self.max_pages):
-            offset = page * self.page_size
+        page_size = self.page_size
+        offset = 0
+        pages = 0
+        while pages < self.max_pages:
             try:
                 response = self.client.get(
                     self.endpoint,
-                    params={"limit": self.page_size, "offset": offset},
+                    params={"limit": page_size, "offset": offset},
                     capability="quotes",
                 )
             except Exception as exc:
                 self.last_errors.append(_safe_error(exc, provider=self.name, endpoint=self.endpoint))
+                # Retry an oversized batch at the same offset. Authentication
+                # and rate-limit failures cannot be fixed by reducing its size.
+                if page_size > self.fallback_page_size and not (
+                    isinstance(exc, FuyaoAPIError)
+                    and (exc.category in {"PERMISSION", "RATE_LIMIT"} or exc.status_code in {401, 403, 429})
+                ):
+                    page_size = self.fallback_page_size
+                    continue
                 break
+            pages += 1
             data = response.data if isinstance(response.data, Mapping) else {}
             try:
                 total = int(data.get("total")) if data.get("total") is not None else total
@@ -351,9 +364,11 @@ class FuyaoQuoteProvider(QuoteProvider):
                 break
             if not page_rows:
                 break
-            if total is not None and offset + self.page_size >= total:
+            # Advance by received rows: some upstream deployments clamp limit.
+            offset += len(page_rows)
+            if total is not None and offset >= total:
                 break
-            if len(page_rows) < self.page_size and total is None:
+            if len(page_rows) < page_size and total is None:
                 break
         for code in normalized:
             result.setdefault(code, self._missing(code, fetched_at=fetched_at))

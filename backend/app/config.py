@@ -162,7 +162,7 @@ class Settings:
     MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS: tuple[str, ...] = tuple(
         value.strip().lower()
         for value in os.getenv(
-            "MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS", "eastmoney_batch,tencent"
+            "MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS", "tencent,eastmoney_batch"
         ).split(",")
         if value.strip()
     )
@@ -189,6 +189,22 @@ class Settings:
     )
     EASTMONEY_MIN_INTERVAL_SECONDS: float = float(
         os.getenv("EASTMONEY_MIN_INTERVAL_SECONDS", "0.8")
+    )
+    # Overseas deployments can bypass Eastmoney's WAF entirely. Otherwise one
+    # failed quote request opens its shared circuit before the next refresh.
+    EASTMONEY_QUOTE_ENABLED: bool = _bool_env("EASTMONEY_QUOTE_ENABLED", "true")
+    EASTMONEY_FAILURE_THRESHOLD: int = max(1, int(os.getenv("EASTMONEY_FAILURE_THRESHOLD", "1")))
+    EASTMONEY_CIRCUIT_COOLDOWN_SECONDS: float = max(
+        0.0, float(os.getenv("EASTMONEY_CIRCUIT_COOLDOWN_SECONDS", "300"))
+    )
+    MARKET_FOUNDATION_LIVE_CACHE_SECONDS: float = max(
+        0.0, float(os.getenv("MARKET_FOUNDATION_LIVE_CACHE_SECONDS", "30"))
+    )
+    MARKET_FOUNDATION_CLOSED_CACHE_SECONDS: float = max(
+        0.0, float(os.getenv("MARKET_FOUNDATION_CLOSED_CACHE_SECONDS", "300"))
+    )
+    MARKET_FOUNDATION_FAILURE_CACHE_SECONDS: float = max(
+        0.0, float(os.getenv("MARKET_FOUNDATION_FAILURE_CACHE_SECONDS", "15"))
     )
     # Fuyao is the production financial-data primary.  An empty key is valid
     # for local bootstrap and acceptance mode: the adapter reports

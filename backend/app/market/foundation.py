@@ -20,9 +20,10 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot, MarketScoreSnapshot
 from ..market_models import SecurityMaster
-from ..services.market_snapshot_service import get_cached_all_a_share_quote_snapshot
+from ..services.market_snapshot_service import get_cached_all_a_share_quote_snapshot, get_or_load_market_data_cache
 from ..services.security_master import get_market_universe
 from .codes import canonical_security_code, normalize_security_code
 from .engine.median_index import next_median_index
@@ -198,7 +199,7 @@ def _index_code(value: Any) -> str:
 def _rows_from_response(response: Any) -> list[dict[str, Any]]:
     data = _value(response, "data", default=response)
     if isinstance(data, Mapping):
-        for key in ("items", "rows", "list", "data", "result"):
+        for key in ("item", "items", "rows", "list", "data", "result"):
             candidate = data.get(key)
             if isinstance(candidate, Mapping):
                 candidate = list(candidate.values())
@@ -255,24 +256,49 @@ class MarketFoundationService:
     def _load_quote_snapshot(self, *, trade_date: date, session: MarketSessionResolution) -> Mapping[str, Any]:
         if self.quote_snapshot_loader is not None:
             return self.quote_snapshot_loader(trade_date=trade_date, session=session)
-        ttl = 5.0 if session.data_basis == MarketDataBasis.LIVE.value else 300.0
+        ttl = (
+            settings.MARKET_FOUNDATION_LIVE_CACHE_SECONDS
+            if session.data_basis == MarketDataBasis.LIVE.value
+            else settings.MARKET_FOUNDATION_CLOSED_CACHE_SECONDS
+        )
         return get_cached_all_a_share_quote_snapshot(
             self.db,
             trade_date=trade_date,
             include_bse=True,
             include_suspended=True,
             max_age_seconds=ttl,
-            failure_ttl_seconds=5.0,
+            failure_ttl_seconds=settings.MARKET_FOUNDATION_FAILURE_CACHE_SECONDS,
         )
 
-    def _load_major_index_rows(self) -> tuple[list[dict[str, Any]], str | None]:
-        try:
-            if self.index_snapshot_loader is not None:
+    def _load_major_index_rows(self, *, now: datetime | None = None) -> tuple[list[dict[str, Any]], str | None]:
+        if self.index_snapshot_loader is not None:
+            try:
                 return _rows_from_response(self.index_snapshot_loader(codes=[item["code"] for item in MAJOR_INDEX_DEFINITIONS])), None
+            except Exception as exc:
+                return [], exc.__class__.__name__
+        moment = self._now(now)
+        session = self.session_service.resolve_session(moment)
+        ttl = (
+            settings.MARKET_FOUNDATION_LIVE_CACHE_SECONDS
+            if session.data_basis == MarketDataBasis.LIVE.value
+            else settings.MARKET_FOUNDATION_CLOSED_CACHE_SECONDS
+        )
+        key = f"foundation-indices:{id(self.db.get_bind())}:{session.trading_date}:{session.data_basis}"
+        result, _cache_hit = get_or_load_market_data_cache(
+            key,
+            self._fetch_major_index_rows,
+            ttl=lambda payload: settings.MARKET_FOUNDATION_FAILURE_CACHE_SECONDS if payload["error"] else ttl,
+        )
+        return result["rows"], result["error"]
+
+    @staticmethod
+    def _fetch_major_index_rows() -> dict[str, Any]:
+        try:
             response = FuyaoDataProvider().get_index_snapshot(item["code"] for item in MAJOR_INDEX_DEFINITIONS)
-            return _rows_from_response(response), None
+            rows = _rows_from_response(response)
+            return {"rows": rows, "error": None if rows else "empty_index_snapshot"}
         except Exception as exc:  # noqa: BLE001 - preserve partial market facts.
-            return [], exc.__class__.__name__
+            return {"rows": [], "error": exc.__class__.__name__}
 
     def _major_indices(self, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         by_code: dict[str, Mapping[str, Any]] = {}
@@ -747,7 +773,7 @@ class MarketFoundationService:
         aggregate, quote_as_of, quality_flags = self._aggregate_all_a(snapshot, session=resolved, now=moment)
         index_error = None
         if major_index_rows is None:
-            raw_indices, index_error = self._load_major_index_rows()
+            raw_indices, index_error = self._load_major_index_rows(now=moment)
         else:
             raw_indices = [dict(row) for row in major_index_rows]
         major_indices = self._major_indices(raw_indices)
@@ -1045,7 +1071,7 @@ class MarketFoundationService:
                 if isinstance(indices, list):
                     return indices
             return self._major_indices([])
-        rows, _error = self._load_major_index_rows()
+        rows, _error = self._load_major_index_rows(now=moment)
         return self._major_indices(rows)
 
 

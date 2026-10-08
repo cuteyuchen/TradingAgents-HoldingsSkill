@@ -310,6 +310,10 @@ uvicorn app.main:app --reload
 
 后端 `pytest` 在收集测试模块前自动设置独立临时数据库、分析产物和备份目录，并关闭调度器。显式指定的隔离测试路径会保留；指向默认用户数据库 `backend/data/advisor.db` 或默认产物、备份目录的配置会拒绝启动。测试结束保留诊断目录，路径显示在 pytest 输出末尾，不自动删除。
 
+A 股全市场行情默认由 Fuyao 以 `limit=6000` 获取，超大批次失败后自动退回每页 100 条；分页使用实际返回行数推进偏移量，兼容服务端限制批次大小。默认补全顺序为 Tencent、Eastmoney。东财行情一次失败后在进程共享的熔断器中跳过 300 秒，冷却结束仅允许一次恢复探测；海外部署已确认东财持续返回 502 时，可设置 `EASTMONEY_QUOTE_ENABLED=false` 完全跳过行情请求。已有部署可将 `MARKET_QUOTE_ALL_A_FALLBACK_PROVIDERS` 更新为 `tencent,eastmoney_batch`。
+
+Overview/Foundation 的全市场快照和主要指数共用缓存刷新机制，同一个键的并发请求只拉取一次。默认盘中缓存 30 秒、盘后 300 秒、失败 15 秒，分别通过 `MARKET_FOUNDATION_LIVE_CACHE_SECONDS`、`MARKET_FOUNDATION_CLOSED_CACHE_SECONDS`、`MARKET_FOUNDATION_FAILURE_CACHE_SECONDS` 调整；响应保留原始行情时间戳。
+
 ```bash
 cd frontend
 npm install
