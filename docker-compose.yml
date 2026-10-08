@@ -5,9 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: ${ADVISOR_CONTAINER_NAME:-tradingagents-holdings-advisor}
     environment:
-      - APP_VERSION=${APP_VERSION:-0.3.0}
-      - APP_GIT_SHA=${APP_GIT_SHA:-UNKNOWN}
-      - APP_BUILD_TIME=${APP_BUILD_TIME:-unknown}
+      # 版本和构建信息由镜像提供，避免覆盖为宿主机默认值。
       - APP_ENV=${APP_ENV:-development}
       - ACCEPTANCE_MODE=false
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}

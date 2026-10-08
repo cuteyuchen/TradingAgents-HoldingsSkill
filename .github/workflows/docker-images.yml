@@ -25,6 +25,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must contain a semantic version such as 1.0.0" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Release tag must match VERSION (v$version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU for ARM64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,19 +67,48 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=v${{ steps.version.outputs.version }}
             type=ref,event=tag
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build and push application image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            APP_VERSION=${{ github.ref_name }}
             APP_GIT_SHA=${{ github.sha }}
             APP_BUILD_TIME=${{ steps.build_time.outputs.time }}
           cache-from: type=gha,scope=application
           cache-to: type=gha,mode=max,scope=application
+
+      - name: Verify both image architectures and release metadata
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          docker buildx imagetools inspect "$IMAGE_REF"
+          for arch in amd64 arm64; do
+            docker run --rm --platform "linux/$arch" --entrypoint python \
+              -e EXPECTED_VERSION="$RELEASE_VERSION" -e EXPECTED_ARCH="$arch" "$IMAGE_REF" -c '
+          import os, platform
+          import pyarrow, cryptography, sqlalchemy
+          from pathlib import Path
+          from app.config import settings
+          from app.main import app
+          expected_arch = {"amd64": "x86_64", "arm64": "aarch64"}[os.environ["EXPECTED_ARCH"]]
+          assert platform.machine() == expected_arch, platform.machine()
+          assert settings.APP_VERSION == os.environ["EXPECTED_VERSION"], settings.APP_VERSION
+          assert app.version == settings.APP_VERSION
+          assert Path("/app/static/index.html").is_file()
+          print(f"Verified {platform.machine()} release {settings.APP_VERSION}")
+          '
+          done

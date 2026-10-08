@@ -5,6 +5,7 @@
  */
 import { computed } from 'vue'
 import { LogOut, Menu, Moon, Settings, Sun, SunMoon } from 'lucide-vue-next'
+import AppVersion from '@/components/AppVersion.vue'
 import { useV3Theme } from '../composables/useV3Theme'
 
 const props = withDefaults(
@@ -55,6 +56,7 @@ function cycleTheme(): void {
         <Menu :size="20" aria-hidden="true" />
       </button>
       <span v-if="pageTitle" class="v3-topbar__title" data-testid="v3-topbar-title">{{ pageTitle }}</span>
+      <AppVersion />
       <slot name="title" />
     </div>
 
@@ -141,6 +143,7 @@ function cycleTheme(): void {
   place-items: center;
   width: 36px;
   height: 36px;
+  flex-shrink: 0;
   border: none;
   border-radius: var(--v3-radius-sm);
   background: transparent;
@@ -153,7 +156,7 @@ function cycleTheme(): void {
 }
 @media (max-width: 768px) {
   .v3-topbar {
-    grid-template-columns: auto 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
     padding-inline: var(--v3-space-2);
   }
   .v3-topbar__center { display: none; }

@@ -5,6 +5,7 @@ import { Activity, LockKeyhole } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
 import { api, saveSession } from '../api'
+import AppVersion from '../components/AppVersion.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -97,6 +98,7 @@ function switchMode() {
         <button class="mode-switch" type="button" @click="switchMode">
           {{ mode === 'login' ? '首次使用？创建账户' : '已有账户？返回登录' }}
         </button>
+        <AppVersion class="login-version" />
       </div>
     </section>
   </div>
@@ -120,6 +122,7 @@ h1 span { color: #245ea8; }
 h2 { margin: 0; font-size: 25px; }
 .login-card p { margin: 5px 0 0; color: var(--app-text-muted); }
 .mode-switch { border: 0; background: transparent; color: var(--app-primary); cursor: pointer; font: inherit; font-weight: 700; }
+.login-version { justify-self: center; }
 :global(.theme-dark) .intro-panel { background: #182028; color: #eef3f7; }
 :global(.theme-dark) .intro-badge { border-color: #465562; background: rgba(29,39,49,.88); color: #8fc0ff; }
 :global(.theme-dark) h1 span { color: #8fc0ff; }

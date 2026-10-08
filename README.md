@@ -253,11 +253,28 @@ DELETE /api/v1/archives/{id}
 
 ## GHCR 部署与升级
 
-GitHub Actions 在 `main`、版本标签或手动触发时发布单一镜像：
+GitHub Actions 在 `main`、版本标签或手动触发时发布单一多架构镜像，支持 `linux/amd64` 和 `linux/arm64`。ARM64 服务器拉取相同标签时会自动选择 ARM64 镜像：
 
 ```text
 ghcr.io/cuteyuchen/tradingagents-holdings-advisor:latest
 ghcr.io/cuteyuchen/tradingagents-holdings-advisor:sha-<commit>
+ghcr.io/cuteyuchen/tradingagents-holdings-advisor:1.0.0
+ghcr.io/cuteyuchen/tradingagents-holdings-advisor:v1.0.0
+```
+
+应用版本从 `1.0.0` 开始，由根目录 `VERSION` 统一维护；登录/注册页、各业务页顶部、API 文档和系统运维页显示相同版本。版本嵌入构建产物，部署 Compose 不再使用环境变量覆盖版本、提交号和构建时间。后续发布时更新 `VERSION` 及 `frontend/package.json`、`frontend/package-lock.json` 的包版本；如推送 Git 标签，标签必须与 `VERSION` 一致，例如版本 `1.0.1` 对应标签 `v1.0.1`。
+
+仅打包本地 ARM64 镜像：
+
+```bash
+docker buildx build --platform linux/arm64 -t tradingagents-holdings-advisor:1.0.0-arm64 --load .
+docker save -o tradingagents-holdings-advisor-1.0.0-arm64.tar tradingagents-holdings-advisor:1.0.0-arm64
+```
+
+检查已发布镜像的架构：
+
+```bash
+docker buildx imagetools inspect ghcr.io/cuteyuchen/tradingagents-holdings-advisor:1.0.0
 ```
 
 服务器首次部署：

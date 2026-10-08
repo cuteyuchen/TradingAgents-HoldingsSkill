@@ -3,9 +3,7 @@ services:
     image: ghcr.io/${GHCR_OWNER:-cuteyuchen}/tradingagents-holdings-advisor:${IMAGE_TAG:-latest}
     container_name: tradingagents-holdings-advisor
     environment:
-      - APP_VERSION=${APP_VERSION:-0.3.0}
-      - APP_GIT_SHA=${APP_GIT_SHA:-UNKNOWN}
-      - APP_BUILD_TIME=${APP_BUILD_TIME:-unknown}
+      # 版本和构建信息由镜像提供，避免覆盖为宿主机默认值。
       - ADVISOR_TOKEN=${ADVISOR_TOKEN}
       - APP_SECRET_KEY=${APP_SECRET_KEY}
       - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-true}

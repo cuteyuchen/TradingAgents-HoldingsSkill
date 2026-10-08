@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 import os
 from functools import lru_cache
+from pathlib import Path
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -17,9 +18,9 @@ def _choice_int_env(name: str, default: int, allowed: set[int]) -> int:
 class Settings:
     """Runtime settings for the legacy archive API and the V2 application."""
 
-    # Release metadata. Production images should inject these at build time;
-    # the resolver never fabricates a SHA when no value is supplied.
-    APP_VERSION: str = os.getenv("APP_VERSION", "0.3.0")
+    # The packaged VERSION file identifies the code, including in Docker.
+    # Git metadata is injected at build time; missing SHAs stay unknown.
+    APP_VERSION: str = (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()
     APP_GIT_SHA: str = os.getenv("APP_GIT_SHA", "").strip()
     APP_GIT_REF: str = os.getenv("APP_GIT_REF", "").strip()
     APP_BUILD_TIME: str = os.getenv("APP_BUILD_TIME", "").strip()

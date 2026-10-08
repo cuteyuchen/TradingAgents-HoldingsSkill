@@ -110,7 +110,7 @@ app = FastAPI(
         "V1 archive compatibility plus V2 authentication, model configuration, "
         "portfolio screenshot parsing, analysis jobs, reports, schedules, and notifications."
     ),
-    version="0.3.0",
+    version=settings.APP_VERSION,
     lifespan=lifespan,
 )
 
