@@ -395,6 +395,13 @@ export interface FuyaoStatus {
   capabilities: Record<string, FuyaoCapabilityStatus>
 }
 
+export interface FuyaoConfig {
+  configured: boolean
+  source: 'system' | 'environment' | 'none'
+  can_manage: boolean
+  updated_at?: string | null
+}
+
 export interface FuyaoMarketBrief {
   risk: Record<string, any>
   breadth: Record<string, any>

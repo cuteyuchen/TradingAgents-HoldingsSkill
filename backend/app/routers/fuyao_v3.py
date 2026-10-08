@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, SecretStr, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,11 +17,73 @@ from ..market.fuyao_analytics import (
 from ..market.providers.factory import build_critical_quote_provider
 from ..market_engine_models import MarketMetricSnapshot, MarketScoreSnapshot
 from ..services.holding_identity import RESOLVED, audit_holding_item
+from ..security import encrypt_secret
+from ..services.market_provider_settings import can_manage_market_settings, fuyao_config_status
 from ..v2_dependencies import get_current_user
-from ..v2_models import HoldingItem, Portfolio, PortfolioSnapshot, User
+from ..v2_models import HoldingItem, MarketProviderSetting, Portfolio, PortfolioSnapshot, User
 
 
 router = APIRouter(prefix="/api/v3/fuyao", tags=["v3-fuyao"])
+
+
+class FuyaoConfigUpdate(BaseModel):
+    api_key: SecretStr
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_shape(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or not isinstance(value.get("api_key"), str):
+            # FastAPI's default validation response includes the raw input.
+            # Reject malformed credential payloads without reflecting secrets.
+            raise HTTPException(status_code=422, detail="请以文本格式提供 API Key。")
+        return value
+
+
+@router.get("/config")
+def read_fuyao_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return fuyao_config_status(db, current_user.id)
+
+
+def _require_config_owner(db: Session, user: User) -> None:
+    if not can_manage_market_settings(db, user.id):
+        raise HTTPException(status_code=403, detail="只有实例管理员（首个注册账户）可以修改共享行情密钥。")
+
+
+@router.put("/config")
+def update_fuyao_config(
+    payload: FuyaoConfigUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_config_owner(db, current_user)
+    key = payload.api_key.get_secret_value().strip()
+    if not key or len(key) > 4096 or any(char.isspace() or ord(char) < 32 for char in key):
+        # Do not include submitted credential values in validation errors.
+        raise HTTPException(status_code=422, detail="请输入有效的 API Key（不含空白，长度不超过 4096 个字符）。")
+    row = db.get(MarketProviderSetting, "fuyao")
+    if row is None:
+        row = MarketProviderSetting(provider="fuyao", updated_by=current_user.id)
+        db.add(row)
+    row.encrypted_api_key = encrypt_secret(key)
+    row.updated_by = current_user.id
+    db.commit()
+    return fuyao_config_status(db, current_user.id)
+
+
+@router.delete("/config")
+def reset_fuyao_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_config_owner(db, current_user)
+    row = db.get(MarketProviderSetting, "fuyao")
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    return fuyao_config_status(db, current_user.id)
 
 
 def _portfolio(db: Session, *, user_id: int, portfolio_id: int) -> Portfolio:

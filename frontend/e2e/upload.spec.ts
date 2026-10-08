@@ -10,7 +10,7 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
   await expect(dialog).toBeVisible()
   await dialog.getByLabel('组合名称').locator('input').fill(portfolioName)
   await dialog.getByRole('button', { name: '创建组合', exact: true }).click()
-  await expect(page.locator('.global-portfolio-select .n-base-selection')).toContainText(portfolioName)
+  await expect(page.locator('.global-portfolio-select')).toContainText(portfolioName)
 
   await page.goto('/upload')
   await expect(page).toHaveURL(/\/holdings\?/)

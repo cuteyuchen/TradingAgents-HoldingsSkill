@@ -13,6 +13,20 @@ test('Single-user navigation exposes only the workbench pages and preserves lega
   await expect(page.getByTestId('v3-holdings')).toBeVisible()
   await expect(page.getByRole('heading', { name: '我的持仓' })).toBeVisible()
 
+  // Every business page keeps the same fixed left navigation and active item.
+  for (const name of ['dashboard', 'holdings', 'analysis', 'simulation', 'history', 'settings']) {
+    await page.getByTestId(`v3-nav-${name}`).click()
+    await expect(page).toHaveURL(new RegExp(`/${name}(?:\\?.*)?$`))
+    await expect(page.getByTestId('v3-desktop-sidebar')).toBeVisible()
+    await expect(page.getByTestId(`v3-nav-${name}`)).toHaveAttribute('aria-current', 'page')
+    const box = await page.getByTestId('v3-sidebar').boundingBox()
+    expect(box?.x).toBe(0)
+  }
+  await page.getByTestId('v3-sidebar-collapse').click()
+  await page.getByTestId('v3-nav-analysis').click()
+  await expect(page.getByTestId('v3-sidebar-collapse')).toHaveAttribute('aria-label', '展开侧边栏')
+  await page.getByTestId('v3-sidebar-collapse').click()
+
   const aliases = [
     ['/reports?portfolio=' + facts.portfolios.action + '&run=' + facts.runs.action, '/analysis', '今日分析'],
     ['/shadow?portfolio=' + facts.portfolios.action, '/simulation', '模拟跟随'],
@@ -67,11 +81,25 @@ test('Shell system status follows authoritative readiness instead of portfolio e
   })
 
   await login(page, facts.users.a)
-  // System status lives on Legacy settings shell after /holdings became V3.
+  // The shared shell exposes authoritative status on every page.
   await page.goto('/settings')
   await expect(page.locator('.system-status-button')).toContainText('需要配置')
   await expect(page.locator('.system-status-button')).not.toContainText('正常')
   expect(readinessRequests).toBeGreaterThan(0)
+})
+
+test('Mobile business pages keep the drawer on the left and close it after navigation', async ({ acceptancePage: page, facts }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  await login(page, facts.users.a)
+  for (const name of ['settings', 'analysis', 'holdings', 'history', 'simulation', 'dashboard']) {
+    await page.getByTestId('v3-topbar-menu').click()
+    await expect(page.getByTestId('v3-mobile-drawer')).toBeVisible()
+    await expect.poll(async () => (await page.getByTestId('v3-mobile-drawer').boundingBox())?.x).toBe(0)
+    await page.getByTestId(`v3-nav-${name}`).click()
+    await expect(page).toHaveURL(new RegExp(`/${name}(?:\\?.*)?$`))
+    await expect(page.getByTestId('v3-mobile-drawer')).toBeHidden()
+    await expect(page.getByTestId('v3-topbar-menu')).toBeVisible()
+  }
 })
 
 test('Shell shows verification pending instead of data-limited when Fuyao is configured', async ({ acceptancePage: page, facts }) => {

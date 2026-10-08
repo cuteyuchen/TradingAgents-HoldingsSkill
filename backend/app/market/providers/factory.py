@@ -183,6 +183,7 @@ def _configured_provider_options() -> dict[str, dict[str, Any]]:
 
     try:
         from ...config import settings
+        from ...services.market_provider_settings import get_fuyao_api_key
 
         return {
             "eastmoney_batch": {
@@ -190,7 +191,7 @@ def _configured_provider_options() -> dict[str, dict[str, Any]]:
             },
             "fuyao": {
                 "base_url": settings.FUYAO_BASE_URL,
-                "api_key": settings.FUYAO_API_KEY,
+                "api_key": get_fuyao_api_key(),
                 "connect_timeout": settings.FUYAO_CONNECT_TIMEOUT_SECONDS,
                 "read_timeout": settings.FUYAO_READ_TIMEOUT_SECONDS,
                 "max_retries": settings.FUYAO_MAX_RETRIES,

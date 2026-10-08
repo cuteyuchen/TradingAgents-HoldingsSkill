@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BarChart3, Bot, CalendarClock, Database, Palette, Plus, RefreshCw, Server, ShieldCheck, SlidersHorizontal } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../api'
-import type { FuyaoCapabilityStatus, FuyaoStatus, ModelProvider } from '../api/types'
+import type { FuyaoCapabilityStatus, FuyaoConfig, FuyaoStatus, ModelProvider } from '../api/types'
 import EmptyState from '../components/EmptyState.vue'
 import MetricTile from '../components/MetricTile.vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -16,6 +16,7 @@ import { usePortfolioContext } from '../composables/portfolio'
 import SettingsOperationsView from './SettingsOperationsView.vue'
 import GovernanceView from './GovernanceView.vue'
 import SystemView from './SystemView.vue'
+import { resolvedTheme, setThemePref } from '../v3/composables/useV3Theme'
 
 type SettingSection = 'data' | 'ai' | 'automation' | 'strategy' | 'system' | 'appearance'
 
@@ -24,9 +25,14 @@ const router = useRouter()
 const message = useMessage()
 const THEME_KEY = 'advisor_theme'
 const activeSection = ref<SettingSection>(sectionFromQuery(route.query.section))
-const theme = ref<'light' | 'dark'>(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light')
+const theme = resolvedTheme
 const providers = ref<ModelProvider[]>([])
 const fuyaoStatus = ref<FuyaoStatus | null>(null)
+const fuyaoConfig = ref<FuyaoConfig | null>(null)
+const fuyaoApiKey = ref('')
+const fuyaoSaveLoading = ref(false)
+const fuyaoConfigError = ref('')
+const fuyaoSourceLabel = computed(() => ({ system: '系统设置', environment: '部署环境', none: '尚未配置' }[fuyaoConfig.value?.source || 'none']))
 const fuyaoProbeLoading = ref(false)
 const loading = ref(false)
 const loadError = ref<unknown>(null)
@@ -93,7 +99,9 @@ async function load() {
   try {
     await loadPortfolios()
     providers.value = await api.listProviders()
-    fuyaoStatus.value = await api.getFuyaoStatus().catch(() => null)
+    const [status, config] = await Promise.all([api.getFuyaoStatus(), api.getFuyaoConfig()])
+    fuyaoStatus.value = status
+    fuyaoConfig.value = config
   } catch (reason) {
     loadError.value = reason
   } finally {
@@ -106,11 +114,45 @@ async function probeFuyao() {
   fuyaoProbeLoading.value = true
   try {
     fuyaoStatus.value = await api.getFuyaoStatus(true)
-    message.success('Fuyao 能力状态已更新')
+    message.success('同花顺金融数据能力状态已更新')
   } catch (reason) {
     message.error((reason as Error).message)
   } finally {
     fuyaoProbeLoading.value = false
+  }
+}
+
+async function saveFuyaoConfig() {
+  if (fuyaoSaveLoading.value || !fuyaoApiKey.value.trim()) return
+  fuyaoSaveLoading.value = true
+  fuyaoConfigError.value = ''
+  try {
+    fuyaoConfig.value = await api.saveFuyaoConfig(fuyaoApiKey.value.trim())
+    fuyaoApiKey.value = ''
+    window.dispatchEvent(new Event('advisor-market-config-changed'))
+    message.success('API Key 已保存，后续行情请求将使用新配置。可探测能力确认连接。')
+    fuyaoStatus.value = await api.getFuyaoStatus()
+  } catch (reason) {
+    fuyaoConfigError.value = (reason as Error).message
+  } finally {
+    fuyaoSaveLoading.value = false
+  }
+}
+
+async function resetFuyaoConfig() {
+  if (fuyaoSaveLoading.value || !window.confirm('移除系统保存的 API Key？之后将使用部署环境中的配置；环境未配置时将回退到备用行情源。')) return
+  fuyaoSaveLoading.value = true
+  fuyaoConfigError.value = ''
+  try {
+    fuyaoConfig.value = await api.resetFuyaoConfig()
+    fuyaoApiKey.value = ''
+    window.dispatchEvent(new Event('advisor-market-config-changed'))
+    message.success('已恢复部署环境配置')
+    fuyaoStatus.value = await api.getFuyaoStatus()
+  } catch (reason) {
+    fuyaoConfigError.value = (reason as Error).message
+  } finally {
+    fuyaoSaveLoading.value = false
   }
 }
 
@@ -138,13 +180,12 @@ function selectSection(section: SettingSection) {
 }
 
 function setTheme(value: 'light' | 'dark') {
-  theme.value = value
-  localStorage.setItem(THEME_KEY, value)
-  window.dispatchEvent(new CustomEvent('advisor-theme-changed', { detail: { theme: value } }))
+  setThemePref(value)
 }
 
 watch(() => route.query.section, (value) => { activeSection.value = sectionFromQuery(value) })
 onMounted(() => void load())
+onBeforeUnmount(() => { fuyaoApiKey.value = '' })
 </script>
 
 <template>
@@ -171,13 +212,24 @@ onMounted(() => void load())
               <MetricTile label="可用模型供应商" :value="providers.filter((item) => item.enabled).length" />
             </div>
           </SectionCard>
-          <SectionCard title="同花顺金融数据" description="Fuyao 是主要 production financial data provider；能力不可用时，核心行情仍按配置回退，状态不会被伪装为健康。">
-            <template #actions><n-button secondary size="small" :loading="fuyaoProbeLoading" :disabled="!fuyaoStatus?.configured" @click="probeFuyao"><template #icon><RefreshCw :size="14" /></template>探测能力</n-button></template>
-            <div class="fuyao-summary"><div><span>连接状态</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(fuyaoStatus?.connection_status)">{{ fuyaoStatus?.connection_status || '未读取' }}</n-tag></div><div><span>配置状态</span><n-tag size="small" :bordered="false" :type="fuyaoStatus?.configured ? 'success' : 'warning'">{{ fuyaoStatus?.configured ? '已配置' : '未配置' }}</n-tag></div></div>
-            <div class="capability-grid"><div v-for="item in fuyaoCapabilities" :key="item.key"><span>{{ item.label }}</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(item.value)">{{ item.value.status || '未知' }}</n-tag></div><p v-if="!fuyaoCapabilities.length" class="muted">暂未读取能力状态。</p></div>
-            <p class="fuyao-note">API Key 仅在后端运行时使用；此处不会显示、保存或回传密钥。</p>
+          <SectionCard title="同花顺金融数据" description="通过 Fuyao 接口提供主要金融数据；连接不可用时，核心行情按配置使用备用数据源。">
+            <template #actions><n-button secondary size="small" :loading="fuyaoProbeLoading" :disabled="!fuyaoStatus?.configured || fuyaoSaveLoading" @click="probeFuyao"><template #icon><RefreshCw :size="14" /></template>探测能力</n-button></template>
+            <div class="fuyao-summary"><div><span>连接状态</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(fuyaoStatus?.connection_status)">{{ fuyaoStatus?.connection_status === 'FIXTURE' ? '验收模拟数据' : fuyaoStatus?.connection_status || '未读取' }}</n-tag></div><div><span>配置状态</span><n-tag size="small" :bordered="false" :type="fuyaoConfig?.configured ? 'success' : 'warning'">{{ fuyaoConfig?.configured ? '已配置' : '未配置' }}</n-tag></div></div>
+            <n-form class="fuyao-config-form" label-placement="top" @submit.prevent="saveFuyaoConfig">
+              <n-form-item label="API Key" :validation-status="fuyaoConfigError ? 'error' : undefined" :feedback="fuyaoConfigError">
+                <n-input v-model:value="fuyaoApiKey" type="password" show-password-on="click" :input-props="{ 'aria-label': '同花顺金融数据 API Key', autocomplete: 'new-password' }" :maxlength="4096" :disabled="!fuyaoConfig?.can_manage || fuyaoSaveLoading" :placeholder="fuyaoConfig?.configured ? '已配置；输入新密钥可替换' : '输入同花顺金融数据 API Key'" />
+              </n-form-item>
+              <div class="fuyao-config-actions">
+                <n-button type="primary" attr-type="submit" :loading="fuyaoSaveLoading" :disabled="!fuyaoConfig?.can_manage || !fuyaoApiKey.trim() || fuyaoProbeLoading">保存 API Key</n-button>
+                <n-button v-if="fuyaoConfig?.source === 'system' && fuyaoConfig.can_manage" secondary :disabled="fuyaoSaveLoading || fuyaoProbeLoading" @click="resetFuyaoConfig">恢复环境配置</n-button>
+                <span class="muted">当前来源：{{ fuyaoSourceLabel }}</span>
+              </div>
+              <p v-if="fuyaoConfig && !fuyaoConfig.can_manage" class="muted">共享行情密钥由实例管理员（首个注册账户）配置。</p>
+            </n-form>
+            <div class="capability-grid"><div v-for="item in fuyaoCapabilities" :key="item.key"><span>{{ item.label }}</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(item.value)">{{ item.value.status === 'FIXTURE' ? '验收模拟数据' : item.value.status || '未知' }}</n-tag></div><p v-if="!fuyaoCapabilities.length" class="muted">暂未读取能力状态。</p></div>
+            <p class="fuyao-note">密钥在服务器加密保存，优先于部署环境配置；保存后生效。页面不会回显已保存的密钥，连接权限以探测结果为准。</p>
           </SectionCard>
-          <SectionCard title="我的组合" description="组合仍由后端 Auth/Ownership 保护；这里只提供进入持仓工作流的入口。">
+          <SectionCard title="我的组合" description="每个账户只能访问自己的投资组合；从这里进入持仓工作流。">
             <template #actions><n-button secondary size="small" @click="createOpen = true"><template #icon><Plus :size="15" /></template>新建组合</n-button></template>
             <div v-if="portfolios.length" class="portfolio-list">
               <div v-for="portfolio in portfolios" :key="portfolio.id" class="portfolio-row">
@@ -190,7 +242,7 @@ onMounted(() => void load())
               <template #action><n-button type="primary" @click="router.push({ name: 'holdings', query: { action: 'update' } })">开始导入</n-button></template>
             </EmptyState>
           </SectionCard>
-          <SectionCard title="数据工作流" description="低质量识别不会自动确认；所有用于分析的持仓都必须经过 Review → Confirm。">
+          <SectionCard title="数据工作流" description="低质量识别不会自动确认；所有用于分析的持仓都必须经过核对与确认。">
             <div class="flow-summary"><div><strong>1</strong><span>导入券商截图</span></div><div><strong>2</strong><span>核对并修正</span></div><div><strong>3</strong><span>确认快照</span></div><div><strong>4</strong><span>开始分析</span></div></div>
             <div class="section-actions"><n-button type="primary" @click="router.push({ name: 'holdings', query: { action: 'update' } })">更新持仓</n-button><n-button secondary @click="router.push({ name: 'settings', query: { section: 'system' } })">检查系统状态</n-button></div>
           </SectionCard>
@@ -249,6 +301,8 @@ onMounted(() => void load())
 .flow-summary strong { color: var(--primary); font-size: 22px; }
 .flow-summary span { color: var(--text-muted); font-size: 12px; }
 .section-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.fuyao-config-form { margin-bottom: 18px; }
+.fuyao-config-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .fuyao-summary { display: flex; flex-wrap: wrap; gap: 12px 28px; margin-bottom: 16px; }.fuyao-summary > div { display: flex; align-items: center; gap: 8px; }.fuyao-summary span, .capability-grid span { color: var(--text-muted); font-size: 12px; }.capability-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }.capability-grid > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border); padding: 10px 0; }.capability-grid p { grid-column: 1 / -1; margin: 0; }.fuyao-note { margin: 16px 0 0; color: var(--text-muted); font-size: 12px; }
 .appearance-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .theme-choice { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 13px; color: var(--text); text-align: left; cursor: pointer; }

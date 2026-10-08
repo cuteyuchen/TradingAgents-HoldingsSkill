@@ -17,6 +17,7 @@ import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingState from '../components/LoadingState.vue'
 import { fmtDateTime, formatPercent, unavailableText } from '../utils/ui'
+import { historyDataLabels, systemCheckLabels, systemReasonLabel, systemStatusLabel } from '../utils/systemLocale'
 import type {
   HistoryCoverage,
   HistoryCoverageItem,
@@ -72,7 +73,7 @@ function fmt(value?: string | null): string {
 }
 
 function shortHash(value?: string | null): string {
-  return value && value !== 'UNKNOWN' ? value.slice(0, 12) : (value || '—')
+  return value && value !== 'UNKNOWN' ? value.slice(0, 12) : (value ? '未知' : '—')
 }
 
 function humanSize(bytes?: number | null): string {
@@ -82,32 +83,15 @@ function humanSize(bytes?: number | null): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`
 }
 
-const liveCheckLabels: Record<string, string> = {
-  database: '数据库',
-  schema: 'Schema',
-  disk: '磁盘空间',
-  backup: '备份策略',
-  scheduler: '调度器权威',
-  worker_recovery: 'Worker 恢复',
-  governance: '参数治理',
-  trading_calendar: '交易日历',
-  market_provider: '行情 Provider',
-  quote_pipeline: 'Quote Pipeline',
-  market_refresh: '行情刷新',
-  portfolio_snapshot: '组合快照',
-  analysis_smoke: '分析 Smoke',
-  candidate_smoke: '候选 Smoke',
-  shadow_subsystem: 'Shadow 子系统',
-  future_quote_observation: '未来行情观察',
-  real_broker_write_path: '真实券商写入路径',
-}
+const liveCheckLabels = systemCheckLabels
 const liveCheckRows = computed(() => Object.entries(liveReadiness.value?.checks || {}).map(([key, check]) => ({
   key,
-  label: liveCheckLabels[key] || key,
+  label: liveCheckLabels[key] || '其他检查',
   check,
 })))
-function checkReason(check?: { reason?: string | null; status?: string | null }) {
-  return check?.reason || (String(check?.status || '').toUpperCase() === 'OK' ? '检查通过' : unavailableText)
+function checkReason(check?: { reason?: string | null; reasons?: string[]; status?: string | null }) {
+  const reason = check?.reason || check?.reasons?.join(';')
+  return reason ? systemReasonLabel(reason) : String(check?.status || '').toUpperCase() === 'OK' ? '检查通过' : unavailableText
 }
 
 async function load() {
@@ -149,7 +133,7 @@ async function runHistorySync() {
       provider: syncProvider.value,
       market: 'CN',
     })
-    message.success('历史 sync 已执行')
+    message.success('历史数据同步已执行')
     await load()
   } catch (error) {
     message.error((error as Error).message)
@@ -159,7 +143,7 @@ async function runHistorySync() {
 }
 
 async function createBackup() {
-  if (!window.confirm('创建一次 verified SQLite backup？')) return
+  if (!window.confirm('创建一次经过校验的数据库备份？')) return
   if (backupLoading.value) return
   backupLoading.value = 'create'
   try {
@@ -188,12 +172,12 @@ async function verifyBackup(backup: SystemBackup) {
 }
 
 async function runRestoreDrill(backup: SystemBackup) {
-  if (!window.confirm(`对备份 ${backup.backup_id} 执行 restore drill？不会修改生产 DB。`)) return
+  if (!window.confirm(`对备份 ${backup.backup_id} 执行恢复演练？不会修改正式数据库。`)) return
   if (backupLoading.value) return
   backupLoading.value = 'drill-' + backup.backup_id
   try {
     const result = await api.restoreDrill(backup.backup_id)
-    message.success(`Restore drill：${String(result.status || 'DONE')}`)
+    message.success(`恢复演练：${systemStatusLabel(String(result.status || 'DONE'))}`)
     await load()
   } catch (error) {
     message.error((error as Error).message)
@@ -223,35 +207,35 @@ async function generateDiagnostics() {
 }
 
 const backupColumns: DataTableColumns<SystemBackup> = [
-  { title: 'ID', key: 'backup_id', ellipsis: { tooltip: true } },
-  { title: '类型', key: 'type', width: 120 },
+  { title: '编号', key: 'backup_id', ellipsis: { tooltip: true } },
+  { title: '类型', key: 'type', width: 120, render: (row) => systemStatusLabel(row.type) },
   { title: '完成时间', key: 'completed_at', width: 190, render: (row) => fmt(row.completed_at) },
   { title: '大小', key: 'backup_size', width: 90, render: (row) => humanSize(row.backup_size) },
   { title: 'SHA-256', key: 'sha256', width: 150, render: (row) => shortHash(row.sha256) },
   { title: '操作', key: 'actions', width: 170, render: (row) => {
       return h('div', { style: 'display:flex;gap:6px' }, [
-        h('button', { class: 'link-action', onClick: () => void verifyBackup(row) }, 'Verify'),
-        h('button', { class: 'link-action', onClick: () => void runRestoreDrill(row) }, 'Drill'),
+        h('button', { class: 'link-action', onClick: () => void verifyBackup(row) }, '校验'),
+        h('button', { class: 'link-action', onClick: () => void runRestoreDrill(row) }, '恢复演练'),
       ])
   } },
 ]
 
 const historyColumns: DataTableColumns<HistoryCoverageItem> = [
-  { title: 'Data Type', key: 'data_type', width: 170 },
-  { title: 'Status', key: 'status', width: 120, render: (row) => h('span', { class: 'status-text' }, row.status) },
-  { title: 'Coverage', key: 'coverage', width: 100, render: (row) => row.coverage === null || row.coverage === undefined ? '—' : `${(row.coverage * 100).toFixed(1)}%` },
-  { title: 'Earliest', key: 'earliest_supported_at', render: (row) => fmt(row.earliest_supported_at) },
-  { title: 'Latest', key: 'latest_supported_at', render: (row) => fmt(row.latest_supported_at) },
-  { title: 'Last Sync', key: 'last_sync', render: (row) => row.last_sync ? `${row.last_sync.status} · ${row.last_sync.inserted_count} in` : '—' },
+  { title: '数据类型', key: 'data_type', width: 170, render: (row) => historyDataLabels[row.data_type] || '其他数据' },
+  { title: '状态', key: 'status', width: 120, render: (row) => h('span', { class: 'status-text' }, systemStatusLabel(row.status)) },
+  { title: '覆盖率', key: 'coverage', width: 100, render: (row) => row.coverage === null || row.coverage === undefined ? '—' : `${(row.coverage * 100).toFixed(1)}%` },
+  { title: '最早时间', key: 'earliest_supported_at', render: (row) => fmt(row.earliest_supported_at) },
+  { title: '最新时间', key: 'latest_supported_at', render: (row) => fmt(row.latest_supported_at) },
+  { title: '最近同步', key: 'last_sync', render: (row) => row.last_sync ? `${systemStatusLabel(row.last_sync.status)} · 新增 ${row.last_sync.inserted_count} 条` : '—' },
 ]
 
 const syncRunColumns: DataTableColumns<HistorySyncRun> = [
-  { title: 'ID', key: 'id', width: 60 },
-  { title: 'Type', key: 'data_type', width: 150 },
-  { title: 'Status', key: 'status', width: 120 },
-  { title: 'Progress', key: 'progress_percent', width: 90, render: (row) => `${row.progress_percent}%` },
-  { title: 'In/Up/Skip', key: 'counts', width: 110, render: (row) => `${row.inserted_count}/${row.updated_count}/${row.skipped_count}` },
-  { title: 'Created', key: 'created_at', render: (row) => fmt(row.created_at) },
+  { title: '编号', key: 'id', width: 60 },
+  { title: '类型', key: 'data_type', width: 150, render: (row) => historyDataLabels[row.data_type] || '其他数据' },
+  { title: '状态', key: 'status', width: 120, render: (row) => systemStatusLabel(row.status) },
+  { title: '进度', key: 'progress_percent', width: 90, render: (row) => `${row.progress_percent}%` },
+  { title: '新增/更新/跳过', key: 'counts', width: 110, render: (row) => `${row.inserted_count}/${row.updated_count}/${row.skipped_count}` },
+  { title: '创建时间', key: 'created_at', render: (row) => fmt(row.created_at) },
 ]
 
 onMounted(() => void load())
@@ -265,7 +249,7 @@ onMounted(() => void load())
         <span class="muted">系统健康、数据新鲜度与真实验证前置检查</span>
       </div>
       <div class="head-actions">
-        <n-tag v-if="liveReadiness" :type="statusType(liveReadiness.status)" size="large">{{ liveReadiness.status }}</n-tag>
+        <n-tag v-if="liveReadiness" :type="statusType(liveReadiness.status)" size="large">{{ systemStatusLabel(liveReadiness.status) }}</n-tag>
         <n-button :loading="loading" @click="load"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
       </div>
     </div>
@@ -275,8 +259,8 @@ onMounted(() => void load())
       <section class="panel-card live-readiness-card">
         <div class="section-title">
           <ShieldCheck :size="18" />
-          <div><strong>Live Validation Readiness</strong><p>是否可以开始真实验证的只读检查，不会启动交易或修改系统状态。</p></div>
-          <n-tag v-if="liveReadiness" size="large" :type="statusType(liveReadiness.status)">{{ liveReadiness.status }}</n-tag>
+          <div><strong>真实验证就绪检查</strong><p>是否可以开始真实验证的只读检查，不会启动交易或修改系统状态。</p></div>
+          <n-tag v-if="liveReadiness" size="large" :type="statusType(liveReadiness.status)">{{ systemStatusLabel(liveReadiness.status) }}</n-tag>
         </div>
         <LoadingState v-if="!liveReadiness && loading" message="正在评估真实验证就绪度" />
         <template v-else-if="liveReadiness">
@@ -285,105 +269,105 @@ onMounted(() => void load())
             <span>评估时间：{{ fmt(liveReadiness.evaluated_at) }}</span>
           </div>
           <div v-if="liveReadiness.blockers.length" class="reason-group blocker-group">
-            <strong>Blockers</strong>
-            <span v-for="item in liveReadiness.blockers" :key="item.key">{{ liveCheckLabels[item.key] || item.key }}：{{ item.reason }}</span>
+            <strong>阻断项</strong>
+            <span v-for="item in liveReadiness.blockers" :key="item.key" :title="item.reason">{{ liveCheckLabels[item.key] || '其他检查' }}：{{ systemReasonLabel(item.reason) }}</span>
           </div>
           <div v-if="liveReadiness.warnings.length" class="reason-group warning-group">
-            <strong>Warnings</strong>
-            <span v-for="item in liveReadiness.warnings" :key="item.key">{{ liveCheckLabels[item.key] || item.key }}：{{ item.reason }}</span>
+            <strong>提醒项</strong>
+            <span v-for="item in liveReadiness.warnings" :key="item.key" :title="item.reason">{{ liveCheckLabels[item.key] || '其他检查' }}：{{ systemReasonLabel(item.reason) }}</span>
           </div>
           <div class="live-check-grid">
             <div v-for="item in liveCheckRows" :key="item.key" class="live-check-row">
-              <div><strong>{{ item.label }}</strong><small>{{ checkReason(item.check) }}</small></div>
-              <n-tag size="small" :type="statusType(item.check.status)">{{ item.check.status }}</n-tag>
+              <div><strong>{{ item.label }}</strong><small :title="item.check.reason || undefined">{{ checkReason(item.check) }}</small></div>
+              <n-tag size="small" :type="statusType(item.check.status)">{{ systemStatusLabel(item.check.status) }}</n-tag>
             </div>
           </div>
         </template>
-        <EmptyState v-else description="暂无 Live Validation Readiness 结果">
+        <EmptyState v-else description="暂无真实验证就绪检查结果">
           <template #action><n-button secondary size="small" @click="load">重新检查</n-button></template>
         </EmptyState>
       </section>
 
       <div class="system-grid">
         <section class="panel-card system-section">
-          <div class="section-title"><Server :size="18" /><strong>Release</strong></div>
+          <div class="section-title"><Server :size="18" /><strong>版本信息</strong></div>
           <div v-if="release" class="kv-list">
-            <div><span>App Version</span><code>{{ release.app_version }}</code></div>
-            <div><span>Git SHA</span><code>{{ shortHash(release.git_sha) }}</code></div>
-            <div><span>Schema</span><span>{{ release.schema_state }} <template v-if="release.alembic_db_revision">· {{ release.alembic_db_revision }}</template></span></div>
-            <div><span>Code Head</span><code>{{ release.alembic_code_head_revision }}</code></div>
-            <div><span>Runtime</span><span>{{ release.runtime_contract_version }} / {{ release.decision_contract_version }}</span></div>
-            <div><span>Parameter Set</span><span>{{ release.active_parameter_set_version || '—' }} · {{ shortHash(release.active_parameter_set_hash) }}</span></div>
-            <div><span>Uptime</span><span>{{ Math.floor(release.uptime_seconds / 60) }} min</span></div>
+            <div><span>应用版本</span><code>{{ release.app_version }}</code></div>
+            <div><span>代码提交</span><code>{{ shortHash(release.git_sha) }}</code></div>
+            <div><span>数据库结构</span><span>{{ systemStatusLabel(release.schema_state) }} <template v-if="release.alembic_db_revision">· {{ release.alembic_db_revision }}</template></span></div>
+            <div><span>最新迁移版本</span><code>{{ release.alembic_code_head_revision }}</code></div>
+            <div><span>运行协议</span><span>{{ release.runtime_contract_version }} / {{ release.decision_contract_version }}</span></div>
+            <div><span>策略参数版本</span><span>{{ release.active_parameter_set_version || '—' }} · {{ shortHash(release.active_parameter_set_hash) }}</span></div>
+            <div><span>运行时长</span><span>{{ Math.floor(release.uptime_seconds / 60) }} 分钟</span></div>
           </div>
         </section>
 
         <section class="panel-card system-section">
-          <div class="section-title"><Activity :size="18" /><strong>Readiness</strong></div>
+          <div class="section-title"><Activity :size="18" /><strong>基础就绪检查</strong></div>
           <div v-if="readiness" class="check-list">
             <div v-for="(check, key) in readiness.checks" :key="key" class="check-row">
-              <div><span>{{ key }}</span><small>{{ check.reason || '检查通过' }}</small></div>
-              <n-tag size="small" :type="statusType(check.status)">{{ check.status }}</n-tag>
+              <div><span>{{ systemCheckLabels[key] || '其他检查' }}</span><small :title="check.reason || undefined">{{ checkReason(check) }}</small></div>
+              <n-tag size="small" :type="statusType(check.status)">{{ systemStatusLabel(check.status) }}</n-tag>
             </div>
           </div>
-          <EmptyState v-else description="暂无基础 readiness 结果" />
+          <EmptyState v-else description="暂无基础就绪检查结果" />
         </section>
       </div>
 
       <div class="system-grid">
         <section class="panel-card system-section">
           <div class="section-title">
-            <Archive :size="18" /><strong>Backup</strong>
-            <n-button size="small" type="primary" :loading="backupLoading === 'create'" :disabled="Boolean(backupLoading)" @click="createBackup">Create Backup</n-button>
+            <Archive :size="18" /><strong>备份</strong>
+            <n-button size="small" type="primary" :loading="backupLoading === 'create'" :disabled="Boolean(backupLoading)" @click="createBackup">创建备份</n-button>
           </div>
           <n-data-table v-if="backups.length" size="small" :columns="backupColumns" :data="backups" :max-height="280" />
-          <EmptyState v-else description="还没有 verified backup">
+          <EmptyState v-else description="还没有通过校验的备份">
             <template #action><n-button secondary size="small" @click="createBackup">创建第一份备份</n-button></template>
           </EmptyState>
         </section>
 
         <section class="panel-card system-section">
-          <div class="section-title"><Database :size="18" /><strong>Database / Runtime</strong></div>
+          <div class="section-title"><Database :size="18" /><strong>数据库与后台服务</strong></div>
           <div v-if="health" class="kv-list">
-            <div><span>DB</span><span>{{ health.components.database?.status }} · {{ health.components.database?.quick_check || '—' }}</span></div>
-            <div><span>WAL</span><span>{{ humanSize(health.components.database?.wal_size) }}</span></div>
-            <div><span>Disk Free</span><span>{{ formatPercent(health.components.storage?.free_ratio) }}</span></div>
-            <div><span>Scheduler</span><span>{{ health.components.scheduler?.status }}</span></div>
-            <div><span>Monitor</span><span>{{ health.components.realtime_monitor?.status }}</span></div>
-            <div><span>Recovery</span><span>{{ health.components.worker_recovery?.status }} · {{ recovery ? Object.values(recovery.counts).reduce((a, b) => a + b, 0) : '—' }} stale</span></div>
-            <div><span>Backup</span><span>{{ health.components.backup?.status }} · {{ health.components.backup?.backup_count ?? unavailableText }}</span></div>
-            <div><span>Shadow</span><span>{{ health.components.shadow?.status }} · {{ health.components.shadow?.pending_intents ?? unavailableText }} pending / {{ health.components.shadow?.blocked_intents ?? unavailableText }} blocked</span></div>
+            <div><span>数据库</span><span :title="health.components.database?.quick_check">{{ systemStatusLabel(health.components.database?.status) }} · {{ health.components.database?.quick_check === 'ok' ? '校验通过' : systemStatusLabel(health.components.database?.quick_check) }}</span></div>
+            <div><span>数据库写入日志</span><span>{{ humanSize(health.components.database?.wal_size) }}</span></div>
+            <div><span>磁盘可用空间</span><span>{{ formatPercent(health.components.storage?.free_ratio) }}</span></div>
+            <div><span>调度器</span><span>{{ systemStatusLabel(health.components.scheduler?.status) }}</span></div>
+            <div><span>实时监控</span><span>{{ systemStatusLabel(health.components.realtime_monitor?.status) }}</span></div>
+            <div><span>任务恢复</span><span>{{ systemStatusLabel(health.components.worker_recovery?.status) }} · {{ recovery ? Object.values(recovery.counts).reduce((a, b) => a + b, 0) : '—' }} 个过期任务</span></div>
+            <div><span>备份</span><span>{{ systemStatusLabel(health.components.backup?.status) }} · {{ health.components.backup?.backup_count ?? unavailableText }}</span></div>
+            <div><span>模拟交易</span><span>{{ systemStatusLabel(health.components.shadow?.status) }} · {{ health.components.shadow?.pending_intents ?? unavailableText }} 个待处理 / {{ health.components.shadow?.blocked_intents ?? unavailableText }} 个受阻</span></div>
           </div>
         </section>
       </div>
 
       <div class="panel-card system-section">
         <div class="section-title">
-          <FileArchive :size="18" /><strong>Diagnostics</strong>
-          <n-button size="small" :loading="diagnosticsLoading" :disabled="diagnosticsLoading" @click="generateDiagnostics"><template #icon><Download :size="15" /></template>Generate Bundle</n-button>
+          <FileArchive :size="18" /><strong>系统诊断</strong>
+          <n-button size="small" :loading="diagnosticsLoading" :disabled="diagnosticsLoading" @click="generateDiagnostics"><template #icon><Download :size="15" /></template>生成诊断包</n-button>
         </div>
         <div class="muted small">
-          <ShieldCheck :size="14" /> 诊断包已做 secret redaction，不包含 DB、backup 或 token。
+          <ShieldCheck :size="14" /> 诊断包已隐藏敏感信息，不包含数据库、备份文件或密钥。
         </div>
       </div>
 
       <section class="panel-card system-section">
         <div class="section-title">
-          <Database :size="18" /><strong>Historical Data</strong>
-          <n-tag v-if="historyCoverage" size="small" :type="statusType(historyStatus)">{{ historyStatus }}</n-tag>
+          <Database :size="18" /><strong>历史数据</strong>
+          <n-tag v-if="historyCoverage" size="small" :type="statusType(historyStatus)">{{ systemStatusLabel(historyStatus) }}</n-tag>
         </div>
         <div class="sync-bar">
-          <select v-model="syncDataType" class="sync-select" aria-label="Data Type">
-            <option v-for="item in ['security_lifecycle', 'trading_status', 'st_classification', 'valuation', 'fundamentals', 'etf_metadata', 'price_basis']" :key="item" :value="item">{{ item }}</option>
+          <select v-model="syncDataType" class="sync-select" aria-label="数据类型">
+            <option v-for="item in ['security_lifecycle', 'trading_status', 'st_classification', 'valuation', 'fundamentals', 'etf_metadata', 'price_basis']" :key="item" :value="item">{{ historyDataLabels[item] || item }}</option>
           </select>
-          <input v-model="syncStartDate" type="date" aria-label="Start Date" />
-          <input v-model="syncEndDate" type="date" aria-label="End Date" />
-          <input v-model="syncProvider" class="sync-provider" placeholder="Provider" aria-label="Provider" />
-          <n-button size="small" type="primary" :loading="syncLoading" @click="runHistorySync">Run Sync</n-button>
-          <n-button size="small" @click="load">刷新 Runs</n-button>
+          <input v-model="syncStartDate" type="date" aria-label="开始日期" />
+          <input v-model="syncEndDate" type="date" aria-label="结束日期" />
+          <input v-model="syncProvider" class="sync-provider" placeholder="数据源（AUTO 为自动）" aria-label="数据源" />
+          <n-button size="small" type="primary" :loading="syncLoading" @click="runHistorySync">执行同步</n-button>
+          <n-button size="small" @click="load">刷新记录</n-button>
         </div>
         <n-data-table v-if="syncRuns.length" size="small" :columns="syncRunColumns" :data="syncRuns" :max-height="220" />
-        <n-empty v-else description="还没有历史 sync run" />
+        <n-empty v-else description="还没有历史同步记录" />
         <n-data-table
           v-if="historyCoverage && historyCoverage.items.length"
           size="small"
@@ -391,7 +375,7 @@ onMounted(() => void load())
           :data="historyCoverage.items"
           :max-height="300"
         />
-        <n-empty v-else description="Historical PIT 数据尚未导入" />
+        <n-empty v-else description="历史时点数据尚未导入" />
       </section>
     </n-spin>
   </div>

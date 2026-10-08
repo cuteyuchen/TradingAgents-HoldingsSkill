@@ -17,7 +17,7 @@ async function waitForVisualContent(page: Parameters<typeof login>[0], route: st
   if (route.startsWith('/settings')) {
     if (route.includes('section=system')) {
       await expect(page.getByRole('heading', { name: '系统运维', exact: true })).toBeVisible()
-      await expect(page.getByText('Live Validation Readiness', { exact: true })).toBeVisible()
+      await expect(page.getByText('真实验证就绪检查', { exact: true })).toBeVisible()
     } else {
       await expect(page.getByRole('heading', { name: '数据与行情', exact: true })).toBeVisible()
     }

@@ -85,8 +85,7 @@ export async function login(page: Page, user: AcceptanceFacts['users']['a']): Pr
   await page.getByRole('button', { name: '登录', exact: true }).click()
   await expect(page).toHaveURL(/\/dashboard(?:\?.*)?$/)
   await expect(page.getByRole('heading', { name: /今天/ })).toBeVisible({ timeout: 20_000 })
-  // /dashboard is now V3 shell; legacy topbar remains for other pages.
-  await expect(page.locator('[data-testid="v3-topbar"], header.topbar')).toBeVisible()
+  await expect(page.getByTestId('v3-topbar')).toBeVisible()
   await expect(page.locator('.shared-loading')).toHaveCount(0, { timeout: 20_000 })
 }
 
@@ -104,10 +103,10 @@ export async function selectPortfolio(page: Page, label: string): Promise<void> 
     expect(selectedText).toContain(label)
     return
   }
-  const control = page.locator('.global-portfolio-select .n-base-selection')
+  const control = page.locator('.global-portfolio-select')
   await expect(control).toBeVisible({ timeout: 20_000 })
   await control.click()
-  const option = page.locator('.n-base-select-option').filter({ hasText: label }).last()
+  const option = page.getByRole('option', { name: label, exact: true })
   await expect(option).toBeVisible()
   await option.click()
   await expect(control).toContainText(label)

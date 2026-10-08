@@ -14,6 +14,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Palette,
+  Settings,
 } from 'lucide-vue-next'
 
 const props = withDefaults(
@@ -38,6 +39,7 @@ const navigation = [
   { name: 'analysis', label: '分析', icon: BarChart3 },
   { name: 'simulation', label: '模拟', icon: Activity },
   { name: 'history', label: '历史', icon: History },
+  { name: 'settings', label: '设置', icon: Settings },
 ]
 
 /** Foundation 仅 development / flag 开启时展示 */
@@ -66,7 +68,7 @@ function isActive(name: string): boolean {
       'v3-sidebar--collapsed': collapsed,
       'v3-sidebar--mobile': mobile,
     }"
-    aria-label="V3 主导航"
+    aria-label="主导航"
     data-testid="v3-sidebar"
   >
     <div class="v3-sidebar__brand">

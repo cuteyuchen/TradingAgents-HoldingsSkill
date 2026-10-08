@@ -409,10 +409,11 @@ def client_from_settings(**overrides: Any) -> FuyaoClient:
     """Build the configured client lazily to keep provider primitives importable."""
 
     from ...config import settings
+    from ...services.market_provider_settings import get_fuyao_api_key
 
     values = {
         "base_url": settings.FUYAO_BASE_URL,
-        "api_key": settings.FUYAO_API_KEY,
+        "api_key": overrides["api_key"] if "api_key" in overrides else get_fuyao_api_key(),
         "connect_timeout": settings.FUYAO_CONNECT_TIMEOUT_SECONDS,
         "read_timeout": settings.FUYAO_READ_TIMEOUT_SECONDS,
         "max_retries": settings.FUYAO_MAX_RETRIES,

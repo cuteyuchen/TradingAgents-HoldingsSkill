@@ -73,6 +73,7 @@ onBeforeUnmount(() => {
     <!-- 桌面常驻 Sidebar -->
     <q-drawer
       v-if="!isMobile"
+      side="left"
       :model-value="true"
       :width="collapsed ? 64 : 224"
       :breakpoint="0"
@@ -110,6 +111,7 @@ onBeforeUnmount(() => {
         @open-settings="openSettings"
         @logout="logout"
       >
+        <template #center><slot name="topbar-center" /></template>
         <template #status>
           <slot name="topbar-status" />
         </template>

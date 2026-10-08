@@ -124,6 +124,8 @@ ALLOW_REGISTRATION=false
 
 ### 3. 系统内配置
 
+首个注册账户可在“设置 → 数据与行情 → 同花顺金融数据”保存 API Key，并探测接口能力。密钥在服务器加密保存，优先于 `FUYAO_API_KEY` 环境变量；详细规则见 [金融数据配置](docs/MARKET_PROVIDER_SETTINGS.md)。
+
 1. 在“系统设置 → 模型配置”新增模型供应商。
 2. 配置至少一个默认 `vision` 模型。
 3. 配置至少一个默认 `analysis` 或 `deep_analysis` 模型。

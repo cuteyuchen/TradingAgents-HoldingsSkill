@@ -76,6 +76,17 @@ class ModelProvider(Base):
     profiles: Mapped[list["ModelProfile"]] = relationship(back_populates="provider", cascade="all, delete-orphan")
 
 
+class MarketProviderSetting(Base):
+    """Instance-wide market credentials, encrypted like model credentials."""
+
+    __tablename__ = "market_provider_settings"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    encrypted_api_key: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class ModelProfile(Base):
     __tablename__ = "model_profiles"
     __table_args__ = (UniqueConstraint("user_id", "purpose", "model_name", name="uq_model_profile_user_purpose_model"),)

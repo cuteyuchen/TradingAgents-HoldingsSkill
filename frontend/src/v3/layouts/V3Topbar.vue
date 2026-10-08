@@ -54,7 +54,7 @@ function cycleTheme(): void {
       >
         <Menu :size="20" aria-hidden="true" />
       </button>
-      <h2 v-if="pageTitle" class="v3-topbar__title" data-testid="v3-topbar-title">{{ pageTitle }}</h2>
+      <span v-if="pageTitle" class="v3-topbar__title" data-testid="v3-topbar-title">{{ pageTitle }}</span>
       <slot name="title" />
     </div>
 
