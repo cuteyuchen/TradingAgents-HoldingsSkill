@@ -96,9 +96,12 @@ jobs:
         shell: bash
         run: |
           docker buildx imagetools inspect "$IMAGE_REF"
+          docker buildx imagetools inspect "$IMAGE_REF" --raw > "$RUNNER_TEMP/release-manifest.json"
           for arch in amd64 arm64; do
+            arch_digest="$(jq -er --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "$RUNNER_TEMP/release-manifest.json")"
+            arch_image="${IMAGE_REF%@*}@$arch_digest"
             docker run --rm --platform "linux/$arch" --entrypoint python \
-              -e EXPECTED_VERSION="$RELEASE_VERSION" -e EXPECTED_ARCH="$arch" "$IMAGE_REF" -c '
+              -e EXPECTED_VERSION="$RELEASE_VERSION" -e EXPECTED_ARCH="$arch" "$arch_image" -c '
           import os, platform
           import pyarrow, cryptography, sqlalchemy
           from pathlib import Path
