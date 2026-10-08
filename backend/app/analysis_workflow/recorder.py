@@ -25,7 +25,7 @@ from .constants import (
     node_spec,
     phase_spec,
 )
-from .hashing import sha256_content
+from .hashing import _json_safe, sha256_content
 from .models import AnalysisArtifact, AnalysisClaim, AnalysisNode, AnalysisNodeAttempt, AnalysisStage
 from .serializers import redact_payload
 
@@ -294,7 +294,7 @@ class WorkflowAuditRecorder:
             "workflow_version": workflow_version,
             "legacy_fallback_used": legacy_fallback_used,
         }
-        run.structured_result_json = payload
+        run.structured_result_json = _json_safe(payload)
         self._commit()
         self.db.refresh(run)
         self.run_id = run.id
@@ -823,7 +823,7 @@ class WorkflowAuditRecorder:
                 payload["skill_runtime"] = existing_payload["skill_runtime"]
             if existing_payload.get("workflow_execution"):
                 payload["workflow_execution"] = existing_payload["workflow_execution"]
-            run.structured_result_json = payload
+            run.structured_result_json = _json_safe(payload)
         run.status = status
         run.completed_at = _now()
         run.summary = summary

@@ -1,6 +1,7 @@
 """Redact and normalize workflow payloads before they are persisted."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..system.logging import SECRET_FIELD_NAMES, redact_object, redact_text
@@ -49,7 +50,7 @@ def prepare_artifact_content(value: Any) -> tuple[dict | list | None, str | None
     if isinstance(redacted, (dict, list)):
         encoded = canonical_json(redacted)
         digest = sha256_content(encoded)
-        return redacted, None, digest, len(encoded.encode("utf-8")), True
+        return json.loads(encoded), None, digest, len(encoded.encode("utf-8")), True
     text = redact_text("" if redacted is None else str(redacted))
     digest = sha256_content(text)
     return None, text, digest, len(text.encode("utf-8")), True
