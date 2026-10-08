@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../../utils/businessLocale'
 import { computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Camera, CheckCircle2, ClipboardPaste, Play, Plus, RefreshCw, Save } from 'lucide-vue-next'
@@ -81,7 +82,7 @@ const statusText = computed(() => {
     failed: '识别失败',
     needs_model: '缺少识图模型',
   }
-  return map[String(upload.value?.parsing_status || '').toLowerCase()] || String(upload.value?.parsing_status || '未知')
+  return map[String(upload.value?.parsing_status || '').toLowerCase()] || businessLabel(upload.value?.parsing_status || 'UNKNOWN')
 })
 
 watch(() => props.modelValue, async (value) => {

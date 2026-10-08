@@ -45,7 +45,7 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
   await expect(shadowDialog).toBeVisible()
   await shadowDialog.locator('input').fill('Acceptance UI Shadow')
   await shadowDialog.getByRole('button', { name: '确认创建', exact: true }).click()
-  await expect(page.locator('body')).toContainText('paper-only')
+  await expect(page.locator('body')).toContainText('仅模拟记账 (Paper-only)')
 
   await page.goto('/upload')
   const invalidDrawer = page.getByTestId('v3-holdings-update-drawer')

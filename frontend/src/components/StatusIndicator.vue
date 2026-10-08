@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { systemStatusLabel } from '../utils/systemLocale'
 import { computed } from 'vue'
 
 const props = withDefaults(defineProps<{
@@ -7,11 +8,11 @@ const props = withDefaults(defineProps<{
 }>(), { status: 'unknown', label: '' })
 
 const normalized = computed(() => String(props.status || 'unknown').toLowerCase())
-const text = computed(() => props.label || ({ ok: '正常', setup: '需要配置', degraded: '数据不完整', error: '异常', unknown: '状态未知' }[normalized.value] || props.status || '状态未知'))
+const text = computed(() => props.label || ({ ok: '正常', setup: '需要配置', degraded: '数据不完整', error: '异常', unknown: '状态未知' }[normalized.value] || systemStatusLabel(props.status)))
 </script>
 
 <template>
-  <span class="status-indicator" :class="`status-${normalized}`" :title="String(status || '').toUpperCase()">
+  <span class="status-indicator" :class="`status-${normalized}`" :data-status="String(status || '').toUpperCase()">
     <span class="status-dot" aria-hidden="true" />
     <span>{{ text }}</span>
   </span>

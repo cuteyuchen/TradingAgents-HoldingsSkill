@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { riskLevelLabel } from '../../utils/ui'
 import V3LoadingState from '../components/V3LoadingState.vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
 import { formatNumber, formatPercentFromPoints, formatRatioPercent } from './dashboard-formatters'
@@ -38,7 +39,8 @@ const trendLabel = computed(() => {
       <V3LoadingState v-if="loading && !risk" label="加载风险…" :rows="1" variant="text" />
       <V3StatusBadge
         v-else-if="risk"
-        :label="risk.level"
+        :label="riskLevelLabel(risk.level)"
+        :data-level="risk.level"
         :tone="risk.riskTone"
         size="md"
         data-testid="v3-risk-level"
@@ -48,7 +50,7 @@ const trendLabel = computed(() => {
     <div v-if="risk" class="systemic__risk-row">
       <div class="risk-block" :class="`risk-block--${risk.level.toLowerCase()}`">
         <span class="risk-block__label">风险等级</span>
-        <strong class="risk-block__value" data-testid="v3-risk-level-text">{{ risk.level }}</strong>
+        <strong class="risk-block__value" data-testid="v3-risk-level-text" :data-level="risk.level">{{ riskLevelLabel(risk.level) }}</strong>
         <span class="risk-block__score v3-number" data-testid="v3-risk-score">
           分值 {{ risk.score === null ? '—' : formatNumber(risk.score, 1) }}
         </span>
@@ -132,7 +134,7 @@ const trendLabel = computed(() => {
       </article>
 
       <article class="panel" data-testid="v3-top5-concentration">
-        <h3 class="panel__title">Top 5% 成交集中度</h3>
+        <h3 class="panel__title">成交额前5%标的集中度</h3>
         <dl class="metrics">
           <div>
             <dt>当前</dt>

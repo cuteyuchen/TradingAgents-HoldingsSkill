@@ -12,7 +12,7 @@ const type = computed(() => text.value === 'FRESH' ? 'success' : ['STALE', 'FROZ
 <template>
   <span class="freshness-label">
     <Clock3 :size="13" aria-hidden="true" />
-    <n-tag size="small" :type="type" :bordered="false" :title="text">{{ label }}</n-tag>
+    <n-tag size="small" :type="type" :bordered="false" :data-freshness="text">{{ label }}</n-tag>
     <span v-if="at">{{ fmtDateTime(at) }}</span>
   </span>
 </template>

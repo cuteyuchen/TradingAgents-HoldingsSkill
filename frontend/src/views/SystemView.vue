@@ -362,7 +362,7 @@ onMounted(() => void load())
           </select>
           <input v-model="syncStartDate" type="date" aria-label="开始日期" />
           <input v-model="syncEndDate" type="date" aria-label="结束日期" />
-          <input v-model="syncProvider" class="sync-provider" placeholder="数据源（AUTO 为自动）" aria-label="数据源" />
+          <input v-model="syncProvider" class="sync-provider" placeholder="数据源（自动选择）" aria-label="数据源" />
           <n-button size="small" type="primary" :loading="syncLoading" @click="runHistorySync">执行同步</n-button>
           <n-button size="small" @click="load">刷新记录</n-button>
         </div>

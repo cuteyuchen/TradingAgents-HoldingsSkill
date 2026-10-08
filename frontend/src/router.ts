@@ -56,7 +56,7 @@ const router = createRouter({
       path: '/v3/instrument-drawer-host',
       name: 'v3-instrument-drawer-host',
       component: () => import('./v3/instrument-detail/V3InstrumentDrawerHostView.vue'),
-      meta: { uiSystem: 'v3', title: 'Drawer Host', foundation: true },
+      meta: { uiSystem: 'v3', title: '标的详情抽屉', foundation: true },
       beforeEnter: () => foundationEnabled() || { name: 'dashboard' },
     },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },

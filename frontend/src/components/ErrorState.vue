@@ -27,7 +27,7 @@ const kind = computed(() => props.error instanceof ApiError ? props.error.kind :
       <small v-if="requestId">请求 ID：{{ requestId }}</small>
       <n-collapse v-if="kind !== 'network' && (props.error instanceof ApiError)" class="error-details">
         <n-collapse-item title="技术详情" name="error">
-          <dl><div><dt>Code</dt><dd>{{ (props.error as ApiError).code || '—' }}</dd></div><div><dt>Status</dt><dd>{{ (props.error as ApiError).status || '—' }}</dd></div><div><dt>Request ID</dt><dd>{{ requestId || '—' }}</dd></div></dl>
+          <dl><div><dt>错误代码</dt><dd>{{ (props.error as ApiError).code || '—' }}</dd></div><div><dt>状态码</dt><dd>{{ (props.error as ApiError).status || '—' }}</dd></div><div><dt>请求 ID</dt><dd>{{ requestId || '—' }}</dd></div></dl>
         </n-collapse-item>
       </n-collapse>
     </div>

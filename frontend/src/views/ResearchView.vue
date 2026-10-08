@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   CalendarRange,
@@ -17,7 +18,7 @@ import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingState from '../components/LoadingState.vue'
 import { usePortfolioContext } from '../composables/portfolio'
-import { fmtDateTime, unavailableText } from '../utils/ui'
+import { fmtDateTime, unavailableText, statusLabel } from '../utils/ui'
 import type {
   BacktestRun,
   CalibrationReport,
@@ -82,26 +83,26 @@ const calibrationForm = reactive({
 })
 
 const scopeOptions = [
-  { label: 'Market Score', value: 'MARKET' },
-  { label: 'Candidate', value: 'CANDIDATE' },
-  { label: 'Portfolio Decision', value: 'PORTFOLIO_DECISION' },
-  { label: 'Decision Memory', value: 'MEMORY_DECISION' },
-  { label: 'Bar Factor Diagnostic', value: 'BAR_FACTOR' },
+  { label: '市场评分', value: 'MARKET' },
+  { label: '候选机会', value: 'CANDIDATE' },
+  { label: '组合决策', value: 'PORTFOLIO_DECISION' },
+  { label: '历史经验决策', value: 'MEMORY_DECISION' },
+  { label: '行情因子诊断', value: 'BAR_FACTOR' },
 ]
 const replayModeOptions = [
-  { label: 'Production Replay', value: 'PRODUCTION_REPLAY' },
-  { label: 'Deterministic Recompute', value: 'DETERMINISTIC_RECOMPUTE' },
-  { label: 'Bar-only Diagnostic', value: 'BAR_ONLY_DIAGNOSTIC' },
+  { label: '生产决策回放', value: 'PRODUCTION_REPLAY' },
+  { label: '确定性重算', value: 'DETERMINISTIC_RECOMPUTE' },
+  { label: '仅行情诊断', value: 'BAR_ONLY_DIAGNOSTIC' },
 ]
 const horizonOptions = [1, 5, 10, 20, 60, 120]
 const availabilityKeys = [
-  ['market_score', 'Market Score'],
-  ['candidate_runs', 'Candidate'],
-  ['portfolio_snapshots', 'Portfolio'],
-  ['fundamentals', 'Fundamental'],
-  ['valuation', 'Valuation'],
-  ['daily_bars', 'DailyBar'],
-  ['decision_memory', 'Memory'],
+  ['market_score', '市场评分'],
+  ['candidate_runs', '候选机会'],
+  ['portfolio_snapshots', '投资组合'],
+  ['fundamentals', '财务基本面'],
+  ['valuation', '估值'],
+  ['daily_bars', '日线行情'],
+  ['decision_memory', '决策经验'],
 ] as const
 
 const availabilityRows = computed(() => availabilityKeys.map(([key, label]) => ({
@@ -126,7 +127,7 @@ const selectedRecompute = computed(() => {
 })
 const calibrationRunOptions = computed(() => runs.value
   .filter((run) => run.status === 'COMPLETED')
-  .map((run) => ({ label: `#${run.id} ${run.scope} ${run.start_date} → ${run.end_date}`, value: run.id })))
+  .map((run) => ({ label: `#${run.id} ${businessLabel(run.scope)} ${run.start_date} → ${run.end_date}`, value: run.id })))
 
 function statusType(status?: string | null): 'success' | 'warning' | 'error' | 'info' | 'default' {
   const value = String(status || '').toUpperCase()
@@ -137,15 +138,7 @@ function statusType(status?: string | null): 'success' | 'warning' | 'error' | '
 }
 
 function statusText(status?: string | null): string {
-  const labels: Record<string, string> = {
-    FULL: 'FULL', FULL_PIT_EQUIVALENT: '完整 PIT 重算', PARTIAL: 'PARTIAL', PARTIAL_PIT_RECOMPUTE: '部分历史输入缺失，仅供研究', DIAGNOSTIC_ONLY: '仅诊断', DATA_GAP: 'DATA_GAP',
-    UNSUPPORTED: 'UNSUPPORTED', LEAKAGE_BLOCKED: 'LEAKAGE_BLOCKED', COMPLETED: 'COMPLETED',
-    RUNNING: 'RUNNING', QUEUED: 'QUEUED', CANCELLED: 'CANCELLED', FAILED: 'FAILED',
-    INVALIDATED: 'INVALIDATED', INSUFFICIENT_DATA: 'INSUFFICIENT_DATA',
-    KEEP_CURRENT: 'KEEP_CURRENT', CONSIDER_CHANGE: 'CONSIDER_CHANGE',
-    INSUFFICIENT_EVIDENCE: 'INSUFFICIENT_EVIDENCE', REJECT_CHANGE: 'REJECT_CHANGE',
-  }
-  return labels[String(status || '').toUpperCase()] || String(status || 'UNKNOWN')
+  return statusLabel(status)
 }
 
 function pct(value?: number | null): string {
@@ -265,7 +258,7 @@ async function createRun() {
     return
   }
   if (!runForm.horizons.length) {
-    message.warning('至少选择一个 Forward Horizon')
+    message.warning('至少选择一个远期观察窗口')
     return
   }
   running.value = true
@@ -283,7 +276,7 @@ async function createRun() {
     selectedRun.value = run
     startRunPolling()
     await load()
-    message.success('研究 Run 已提交，页面会持续同步进度')
+    message.success('研究回测已提交，页面会持续同步进度')
   } catch (error) {
     message.error((error as Error).message)
   } finally {
@@ -298,7 +291,7 @@ async function cancelRun() {
     selectedRun.value = await api.cancelBacktest(selectedRun.value.id)
     stopRunPolling()
     await load()
-    message.info('研究 Run 已取消')
+    message.info('研究回测已取消')
   } catch (error) {
     message.error((error as Error).message)
   } finally {
@@ -328,7 +321,7 @@ async function createCalibration() {
   running.value = true
   try {
     if (!calibrationForm.backtest_run_id) {
-      message.warning('请先选择已完成的 Backtest Run')
+      message.warning('请先选择已完成的回测')
       return
     }
     const report = await api.createCalibration({
@@ -339,7 +332,7 @@ async function createCalibration() {
     })
     selectedReport.value = report
     await load()
-    message.success('Calibration Report 已生成')
+    message.success('参数校准报告已生成')
   } catch (error) {
     message.error((error as Error).message)
   } finally {
@@ -381,9 +374,9 @@ watch(selectedPortfolioId, (value) => {
   <section class="research-page">
     <header class="research-header">
       <div>
-        <div class="research-eyebrow"><FlaskConical :size="15" /> OFFLINE RESEARCH</div>
+        <div class="research-eyebrow"><FlaskConical :size="15" /> 策略离线研究</div>
         <h1>历史回放与参数校准</h1>
-        <p>只读取已持久化事实，输出可复现的 Backtest Evidence 与人工评审报告。<span v-if="selectedPortfolio">当前组合：{{ selectedPortfolio.name }}</span></p>
+        <p>只读取已持久化事实，输出可复现的回测证据与人工评审报告。<span v-if="selectedPortfolio">当前组合：{{ selectedPortfolio.name }}</span></p>
       </div>
       <n-button secondary :loading="loading" @click="load">
         <template #icon><RefreshCw :size="16" /></template>
@@ -396,22 +389,22 @@ watch(selectedPortfolioId, (value) => {
     <div class="research-grid research-grid-top">
       <n-card class="panel-card" :bordered="false">
         <template #header>
-          <div class="card-heading"><Database :size="17" /><span>Data Availability</span></div>
+          <div class="card-heading"><Database :size="17" /><span>数据可用性</span></div>
         </template>
         <div class="availability-list">
           <div v-for="row in availabilityRows" :key="row.key" class="availability-row">
             <div class="availability-name">
               <strong>{{ row.label }}</strong>
-              <span>{{ row.item ? (row.item.row_count ?? unavailableText) : unavailableText }} rows · {{ row.item ? pct(row.item.coverage) : unavailableText }}</span>
+              <span>{{ row.item ? (row.item.row_count ?? unavailableText) : unavailableText }} 条记录 · {{ row.item ? pct(row.item.coverage) : unavailableText }}</span>
             </div>
             <n-tag size="small" :type="statusType(row.item?.status)">{{ statusText(row.item?.status) }}</n-tag>
           </div>
         </div>
         <n-alert v-if="survivorship?.status === 'LEAKAGE_BLOCKED'" class="research-alert" type="warning" :show-icon="true">
-          当前 SecurityMaster 没有历史生命周期，Candidate 全市场重建会被标记为 LEAKAGE_BLOCKED。
+          当前证券主数据缺少历史生命周期；全市场候选重建将因时间泄露风险受阻。
         </n-alert>
         <div class="availability-foot">
-          <span class="muted">Manifest hash</span>
+          <span class="muted">清册哈希</span>
           <code>{{ availability?.data_hash || '—' }}</code>
           <n-button quaternary circle aria-label="刷新可用性" @click="refreshAvailability">
             <template #icon><RefreshCw :size="15" /></template>
@@ -421,19 +414,19 @@ watch(selectedPortfolioId, (value) => {
 
       <n-card class="panel-card" :bordered="false">
         <template #header>
-          <div class="card-heading"><CalendarRange :size="17" /><span>Backtest Run</span></div>
+          <div class="card-heading"><CalendarRange :size="17" /><span>回测执行</span></div>
         </template>
         <div class="form-grid">
-          <label>Scope<n-select v-model:value="runForm.scope" :options="scopeOptions" /></label>
-          <label>Replay Mode<n-select v-model:value="runForm.replay_mode" :options="replayModeOptions" /></label>
+          <label>评估范围<n-select v-model:value="runForm.scope" :options="scopeOptions" /></label>
+          <label>回放模式<n-select v-model:value="runForm.replay_mode" :options="replayModeOptions" /></label>
           <label>开始日期<input v-model="runForm.start_date" type="date" /></label>
           <label>结束日期<input v-model="runForm.end_date" type="date" /></label>
           <label>研究组合<n-select v-model:value="runForm.portfolio_id" :options="portfolioOptions" /></label>
-          <label>Experiment 名称<n-input v-model:value="runForm.experiment_name" placeholder="threshold sensitivity" /></label>
+          <label>实验名称<n-input v-model:value="runForm.experiment_name" placeholder="例如：阈值敏感性研究" /></label>
         </div>
         <div v-if="canPreviewRecompute" class="recompute-preview">
           <div class="preview-heading">
-            <strong>Recompute Capability Preview</strong>
+            <strong>重算能力预览</strong>
             <n-spin v-if="previewLoading" size="small" />
             <n-tag v-else-if="recomputePreview" size="small" :type="statusType(recomputePreview.capability)">
               {{ statusText(recomputePreview.capability) }}
@@ -441,40 +434,40 @@ watch(selectedPortfolioId, (value) => {
           </div>
           <template v-if="recomputePreview">
             <div class="preview-meta">
-              <span>Parameter <code>{{ recomputePreview.parameter_version || '—' }}</code></span>
-              <span>Config <code>{{ recomputePreview.config_hash ? recomputePreview.config_hash.slice(0, 12) : '—' }}</code></span>
-              <span>Universe <code>{{ recomputePreview.universe_version }}</code></span>
-              <span>Checkpoint <code>{{ recomputePreview.checkpoint }}</code></span>
+              <span>参数 <code>{{ recomputePreview.parameter_version || '—' }}</code></span>
+              <span>配置 <code>{{ recomputePreview.config_hash ? recomputePreview.config_hash.slice(0, 12) : '—' }}</code></span>
+              <span>标的池 <code>{{ recomputePreview.universe_version }}</code></span>
+              <span>检查点 <code>{{ businessLabel(recomputePreview.checkpoint) }}</code></span>
             </div>
             <div class="preview-chips">
-              <span v-for="key in recomputePreview.missing_inputs" :key="`missing-${key}`" class="chip chip-error">{{ key }}</span>
-              <span v-for="key in recomputePreview.partial_inputs" :key="`partial-${key}`" class="chip chip-warning">{{ key }}</span>
-              <span v-if="!recomputePreview.missing_inputs.length && !recomputePreview.partial_inputs.length" class="chip chip-ok">required inputs available</span>
+              <span v-for="key in recomputePreview.missing_inputs" :key="`missing-${key}`" class="chip chip-error">{{ businessLabel(key) }}</span>
+              <span v-for="key in recomputePreview.partial_inputs" :key="`partial-${key}`" class="chip chip-warning">{{ businessLabel(key) }}</span>
+              <span v-if="!recomputePreview.missing_inputs.length && !recomputePreview.partial_inputs.length" class="chip chip-ok">必要输入项均齐备</span>
             </div>
             <div v-if="recomputePreview.limitations.length" class="preview-limits">
               <span v-for="item in recomputePreview.limitations" :key="item">{{ item }}</span>
             </div>
             <div v-if="recomputePreview.capability !== 'FULL_PIT_EQUIVALENT'" class="preview-warning">
-              {{ recomputePreview.capability }} 不是 FULL 等价回测；运行后以实际 capability 为准。
+              {{ statusText(recomputePreview.capability) }} 并非完整等价回测，实际数据能力以运行结果为准。
             </div>
           </template>
-          <div v-else-if="!previewLoading" class="preview-warning">Capability 预览暂不可用。</div>
+          <div v-else-if="!previewLoading" class="preview-warning">数据能力 预览暂不可用。</div>
         </div>
         <div class="horizon-line">
-          <span class="field-label">Forward Horizon</span>
+          <span class="field-label">远期观察窗口</span>
           <n-checkbox-group v-model:value="runForm.horizons">
             <n-space :size="10">
-              <n-checkbox v-for="horizon in horizonOptions" :key="horizon" :value="horizon">{{ horizon }}d</n-checkbox>
+              <n-checkbox v-for="horizon in horizonOptions" :key="horizon" :value="horizon">{{ horizon }}个交易日</n-checkbox>
             </n-space>
           </n-checkbox-group>
         </div>
         <n-alert class="research-alert" type="info" :show-icon="true">
-          Backtest 使用 {{ runForm.replay_mode }}；结果不会写入 DecisionMemory、TradeLedger 或生产配置。
+          回测使用 {{ businessLabel(runForm.replay_mode) }}；结果不会写入决策经验库、成交账本或生产配置。
         </n-alert>
         <div class="form-actions">
           <n-button type="primary" :loading="running" :disabled="loading" @click="createRun">
             <template #icon><Play :size="16" /></template>
-            启动研究 Run
+            启动研究回测
           </n-button>
         </div>
       </n-card>
@@ -482,17 +475,17 @@ watch(selectedPortfolioId, (value) => {
 
     <n-card class="panel-card" :bordered="false">
       <template #header>
-        <div class="card-heading"><FlaskConical :size="17" /><span>Backtest Runs</span><small>{{ runs.length }} runs</small></div>
+        <div class="card-heading"><FlaskConical :size="17" /><span>回测执行记录</span><small>{{ runs.length }} 次运行</small></div>
       </template>
-      <LoadingState v-if="loading && !runs.length" message="正在读取 Backtest Runs" />
-      <EmptyState v-else-if="!runs.length" description="暂无研究 Run">
+      <LoadingState v-if="loading && !runs.length" message="正在读取 回测执行记录" />
+      <EmptyState v-else-if="!runs.length" description="暂无研究回测">
         <template #action><n-button secondary size="small" @click="createRun">按当前条件启动研究</n-button></template>
       </EmptyState>
       <div v-else class="run-table">
         <button v-for="run in runs" :key="run.id" class="run-row" :class="{ selected: selectedRun?.id === run.id }" @click="selectRun(run)">
           <span class="run-id">#{{ run.id }}</span>
-          <span class="run-main"><strong>{{ run.scope }}</strong><small>{{ run.start_date }} → {{ run.end_date }} · {{ run.replay_mode }}</small></span>
-          <span class="run-samples">N={{ run.sample_count }}<small>{{ run.unique_trade_dates }} dates</small><n-progress v-if="['QUEUED', 'RUNNING'].includes(run.status)" type="line" :percentage="run.progress_percent" :show-indicator="false" /></span>
+          <span class="run-main"><strong>{{ businessLabel(run.scope) }}</strong><small>{{ run.start_date }} → {{ run.end_date }} · {{ businessLabel(run.replay_mode) }}</small></span>
+          <span class="run-samples">样本 {{ run.sample_count }}<small>{{ run.unique_trade_dates }} 个交易日</small><n-progress v-if="['QUEUED', 'RUNNING'].includes(run.status)" type="line" :percentage="run.progress_percent" :show-indicator="false" /></span>
           <n-tag size="small" :type="statusType(run.status)">{{ statusText(run.status) }}</n-tag>
         </button>
       </div>
@@ -501,42 +494,42 @@ watch(selectedPortfolioId, (value) => {
     <div class="research-grid research-grid-bottom">
       <n-card class="panel-card" :bordered="false">
         <template #header>
-          <div class="card-heading"><ShieldAlert :size="17" /><span>Run Evidence</span></div>
+          <div class="card-heading"><ShieldAlert :size="17" /><span>运行证据</span></div>
         </template>
-        <EmptyState v-if="!selectedRun" description="选择一个 Run 查看 Evidence" />
+        <EmptyState v-if="!selectedRun" description="选择一次回测查看运行证据" />
         <template v-else>
           <div class="evidence-summary">
             <div><span>状态</span><n-tag size="small" :type="statusType(selectedRun.status)">{{ statusText(selectedRun.status) }}</n-tag></div>
-            <div><span>Quality</span><n-tag size="small" :type="statusType(selectedRun.quality_status)">{{ statusText(selectedRun.quality_status) }}</n-tag></div>
-            <div><span>Leakage</span><n-tag size="small" :type="statusType(selectedRun.leakage_status)">{{ statusText(selectedRun.leakage_status) }}</n-tag></div>
-            <div><span>Attempt</span><strong>{{ selectedRun.attempt_count }}</strong></div>
+            <div><span>数据质量</span><n-tag size="small" :type="statusType(selectedRun.quality_status)">{{ statusText(selectedRun.quality_status) }}</n-tag></div>
+            <div><span>时间泄露</span><n-tag size="small" :type="statusType(selectedRun.leakage_status)">{{ statusText(selectedRun.leakage_status) }}</n-tag></div>
+            <div><span>尝试次数</span><strong>{{ selectedRun.attempt_count }}</strong></div>
           </div>
           <div class="evidence-meta">
-            <span>Stage {{ selectedRun.current_stage }} · {{ selectedRun.progress_percent }}%</span>
-            <span>Heartbeat {{ fmt(selectedRun.last_heartbeat_at) }}</span>
-            <span>Data {{ selectedRun.data_hash }}</span>
+            <span>执行阶段 {{ businessLabel(selectedRun.current_stage) }} · {{ selectedRun.progress_percent }}%</span>
+            <span>最近心跳 {{ fmt(selectedRun.last_heartbeat_at) }}</span>
+            <span>数据 {{ selectedRun.data_hash }}</span>
           </div>
           <div v-if="selectedRecompute" class="recompute-result">
             <div class="preview-heading">
-              <strong>Deterministic Recompute</strong>
+              <strong>确定性重算结果</strong>
               <n-tag size="small" :type="statusType(selectedRecompute.capability)">
-                {{ selectedRecompute.capability }} · {{ statusText(selectedRecompute.capability) }}
+                {{ statusText(selectedRecompute.capability) }}
               </n-tag>
             </div>
             <div class="preview-meta">
-              <span>Dates <code>{{ selectedRecompute.date_count ?? '—' }}</code></span>
-              <span>Queries <code>{{ selectedRecompute.query_count ?? '—' }}</code></span>
-              <span>Hash <code>{{ selectedRecompute.deterministic_hash ? selectedRecompute.deterministic_hash.slice(0, 16) : '—' }}</code></span>
-              <span>Cases <code>{{ selectedRecompute.candidate_case_count ?? '—' }}</code></span>
-              <span>Candidate Action <code>{{ selectedRecompute.candidate_action_count ?? '—' }}</code></span>
-              <span>No-action Rate <code>{{ selectedRecompute.candidate_no_action_rate === null || selectedRecompute.candidate_no_action_rate === undefined ? '—' : `${(selectedRecompute.candidate_no_action_rate * 100).toFixed(1)}%` }}</code></span>
+              <span>交易日期数 <code>{{ selectedRecompute.date_count ?? '—' }}</code></span>
+              <span>查询数 <code>{{ selectedRecompute.query_count ?? '—' }}</code></span>
+              <span>哈希校验 <code>{{ selectedRecompute.deterministic_hash ? selectedRecompute.deterministic_hash.slice(0, 16) : '—' }}</code></span>
+              <span>案例数 <code>{{ selectedRecompute.candidate_case_count ?? '—' }}</code></span>
+              <span>候选行动 <code>{{ selectedRecompute.candidate_action_count ?? '—' }}</code></span>
+              <span>无操作比例 <code>{{ selectedRecompute.candidate_no_action_rate === null || selectedRecompute.candidate_no_action_rate === undefined ? '—' : `${(selectedRecompute.candidate_no_action_rate * 100).toFixed(1)}%` }}</code></span>
               <span v-if="selectedRecompute.portfolio_action_count !== undefined || selectedRecompute.portfolio_no_action_count !== undefined">
-                Portfolio <code>{{ selectedRecompute.portfolio_action_count }} ACTION / {{ selectedRecompute.portfolio_no_action_count }} NO_ACTION</code>
+                投资组合 <code>{{ selectedRecompute.portfolio_action_count }} 需要调整／ {{ selectedRecompute.portfolio_no_action_count }} 无需操作</code>
               </span>
             </div>
             <div class="preview-chips">
-              <span v-for="key in selectedRecompute.missing_inputs || []" :key="`run-missing-${key}`" class="chip chip-error">{{ key }}</span>
-              <span v-for="key in selectedRecompute.partial_inputs || []" :key="`run-partial-${key}`" class="chip chip-warning">{{ key }}</span>
+              <span v-for="key in selectedRecompute.missing_inputs || []" :key="`run-missing-${key}`" class="chip chip-error">{{ businessLabel(key) }}</span>
+              <span v-for="key in selectedRecompute.partial_inputs || []" :key="`run-partial-${key}`" class="chip chip-warning">{{ businessLabel(key) }}</span>
             </div>
             <div v-if="selectedRecompute.limitations?.length" class="preview-limits">
               <span v-for="item in selectedRecompute.limitations" :key="item">{{ item }}</span>
@@ -548,8 +541,8 @@ watch(selectedPortfolioId, (value) => {
           </div>
           <div class="metric-list">
             <div v-for="item in selectedMetricRows" :key="item.id" class="metric-row">
-              <div><strong>{{ item.metric_family }}</strong><small>{{ item.score_bucket || item.stage || 'aggregate' }} · {{ item.horizon ? `${item.horizon}d` : '—' }}</small></div>
-              <div class="metric-value"><span>median {{ item.metrics?.median === null || item.metrics?.median === undefined ? '—' : `${(item.metrics.median * 100).toFixed(2)}%` }}</span><small>N={{ item.sample_count }} · {{ item.quality_status }}</small></div>
+              <div><strong>{{ businessLabel(item.metric_family) }}</strong><small>{{ businessLabel(item.score_bucket || item.stage || 'aggregate') }} · {{ item.horizon ? `${item.horizon}个交易日` : '—' }}</small></div>
+              <div class="metric-value"><span>中位数 {{ item.metrics?.median === null || item.metrics?.median === undefined ? '—' : `${(item.metrics.median * 100).toFixed(2)}%` }}</span><small>样本 {{ item.sample_count }} · {{ statusText(item.quality_status) }}</small></div>
             </div>
           </div>
           <div class="evidence-actions">
@@ -559,7 +552,7 @@ watch(selectedPortfolioId, (value) => {
             </n-button>
             <n-button v-if="canCancel" quaternary type="error" :loading="cancelLoading" :disabled="running" @click="cancelRun">
               <template #icon><Square :size="14" /></template>
-              取消 Run
+              取消回测
             </n-button>
           </div>
         </template>
@@ -567,25 +560,25 @@ watch(selectedPortfolioId, (value) => {
 
       <n-card class="panel-card" :bordered="false">
         <template #header>
-          <div class="card-heading"><FlaskConical :size="17" /><span>Calibration Candidate</span><small>人工评审</small></div>
+          <div class="card-heading"><FlaskConical :size="17" /><span>校准候选参数</span><small>人工评审</small></div>
         </template>
         <div class="form-grid">
-          <label>Target Parameter<n-input v-model:value="calibrationForm.target_parameter" /></label>
-          <label>Backtest Run<n-select v-model:value="calibrationForm.backtest_run_id" :options="calibrationRunOptions" placeholder="选择已完成的 Run" /></label>
-          <label>Safe Grid<n-input v-model:value="calibrationForm.parameter_grid" placeholder="4,5,6,7" /></label>
+          <label>目标参数<n-input v-model:value="calibrationForm.target_parameter" /></label>
+          <label>回测执行<n-select v-model:value="calibrationForm.backtest_run_id" :options="calibrationRunOptions" placeholder="选择已完成的回测" /></label>
+          <label>安全搜索网格<n-input v-model:value="calibrationForm.parameter_grid" placeholder="4,5,6,7" /></label>
         </div>
         <n-alert class="research-alert" type="warning" :show-icon="true">
-          Calibration 只基于已完成的 Backtest Run；Global Final Test 只用于最终报告，没有 Apply 按钮，参数变更必须人工批准。
+          参数校准仅基于已完成的回测；全局最终测试仅用于最终报告，参数变更须经人工批准。
         </n-alert>
         <div class="form-actions">
           <n-button type="primary" secondary :loading="running" @click="createCalibration">
             <template #icon><Play :size="16" /></template>
-            生成 Calibration Report
+            生成 参数校准报告
           </n-button>
         </div>
         <div class="report-list">
           <button v-for="report in reports" :key="report.id" class="report-row" :class="{ selected: selectedReport?.id === report.id }" @click="selectReport(report)">
-            <span><strong>{{ report.target_parameter }}</strong><small>#{{ report.id }} · {{ fmt(report.created_at) }}</small></span>
+            <span><strong>{{ businessLabel(report.target_parameter) }}</strong><small>#{{ report.id }} · {{ fmt(report.created_at) }}</small></span>
             <n-tag size="small" :type="statusType(report.recommendation)">{{ statusText(report.recommendation) }}</n-tag>
           </button>
         </div>
@@ -594,15 +587,15 @@ watch(selectedPortfolioId, (value) => {
 
     <n-card v-if="selectedReport" class="panel-card report-detail" :bordered="false">
       <template #header>
-        <div class="card-heading"><FlaskConical :size="17" /><span>Calibration Report #{{ selectedReport.id }}</span><n-tag size="small" :type="statusType(selectedReport.recommendation)">{{ statusText(selectedReport.recommendation) }}</n-tag></div>
+        <div class="card-heading"><FlaskConical :size="17" /><span>参数校准报告 #{{ selectedReport.id }}</span><n-tag size="small" :type="statusType(selectedReport.recommendation)">{{ statusText(selectedReport.recommendation) }}</n-tag></div>
       </template>
       <div class="report-columns">
-        <div><span>Current</span><strong>{{ JSON.stringify(selectedReport.current_value) }}</strong></div>
-        <div><span>Challenger</span><strong>{{ JSON.stringify(selectedReport.challenger_value) }}</strong></div>
-        <div><span>Train N</span><strong>{{ selectedReport.sample_counts?.train_case_count ?? unavailableText }}</strong></div>
-        <div><span>Validation N</span><strong>{{ selectedReport.sample_counts?.validation_case_count ?? unavailableText }}</strong></div>
-        <div><span>Test N</span><strong>{{ selectedReport.sample_counts?.test_case_count ?? unavailableText }}</strong></div>
-        <div><span>Robustness</span><strong>{{ selectedReport.robustness?.status || '—' }}</strong></div>
+        <div><span>当前值</span><strong>{{ JSON.stringify(selectedReport.current_value) }}</strong></div>
+        <div><span>挑战值</span><strong>{{ JSON.stringify(selectedReport.challenger_value) }}</strong></div>
+        <div><span>训练样本数</span><strong>{{ selectedReport.sample_counts?.train_case_count ?? unavailableText }}</strong></div>
+        <div><span>验证样本数</span><strong>{{ selectedReport.sample_counts?.validation_case_count ?? unavailableText }}</strong></div>
+        <div><span>测试样本数</span><strong>{{ selectedReport.sample_counts?.test_case_count ?? unavailableText }}</strong></div>
+        <div><span>稳健性得分</span><strong>{{ statusText(selectedReport.robustness?.status) }}</strong></div>
       </div>
       <n-alert v-if="selectedReport.recommendation === 'INSUFFICIENT_EVIDENCE'" class="research-alert" type="warning" :show-icon="true">
         样本不足或数据质量不足，不能据此调整生产参数。
@@ -686,4 +679,13 @@ input { width: 100%; min-height: 34px; border: 1px solid var(--app-border); bord
   .evidence-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .report-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.card-heading, .preview-heading { flex-wrap: wrap; }
+.research-page, .research-grid, .form-grid > label { min-width: 0; }
+.evidence-summary { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+.evidence-summary :deep(.n-tag) { width: fit-content; }
+.report-columns strong { white-space: nowrap; }
+.run-row > :deep(.n-tag) { justify-self: end; }
+@media (max-width: 620px) { .evidence-summary { grid-template-columns: 1fr; } .run-row { grid-template-columns: 38px minmax(0, 1fr); } .run-row > :deep(.n-tag) { grid-column: 2; justify-self: start; } }
+
 </style>

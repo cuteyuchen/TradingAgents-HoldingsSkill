@@ -6,6 +6,7 @@
  * - Batch quotes only
  * - Lazy bounded SVG sparkline cache
  */
+import { businessLabel } from '../../utils/businessLocale'
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, ApiError } from '../../api'
@@ -187,7 +188,7 @@ export function useV3Holdings() {
       quotesAsOf: quotesOwnerId.value === selectedPortfolioId.value ? quotesAsOf.value : null,
       quoteCoverage: quoteCoverage.value,
       session: (session.value?.session ?? null) as V3HoldingsViewModel['timestamps']['session'],
-      sessionLabel: session.value?.display_label || session.value?.session || '状态未知',
+      sessionLabel: businessLabel(session.value?.session || session.value?.display_label || 'UNKNOWN'),
       filter: filter.value,
       sort: sort.value,
     }),

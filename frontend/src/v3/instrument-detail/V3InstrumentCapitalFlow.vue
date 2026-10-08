@@ -176,8 +176,8 @@ const historyMetrics: { name: HistoryMetric; label: string }[] = [
     </div>
 
     <p class="flow__disclaimer" data-testid="flow-disclaimer">
-      资金流为数据提供方分类估算，不代表交易所确认的投资者身份或 Level-2 真值。
-      <span v-if="capitalFlow?.provider_derived" data-testid="flow-provider-derived"> provider_derived · {{ capitalFlow.methodology }}</span>
+      资金流为数据提供方分类估算，不代表交易所确认的投资者身份或 逐笔行情真实数据。
+      <span v-if="capitalFlow?.provider_derived" data-testid="flow-provider-derived"> 数据源估算 · {{ capitalFlow.methodology }}</span>
     </p>
 
     <V3EmptyState
@@ -213,7 +213,7 @@ const historyMetrics: { name: HistoryMetric; label: string }[] = [
         <div v-for="card in currentCards" :key="card.key" class="flow__card" :data-testid="`flow-${card.key}`">
           <span class="flow__label">{{ card.label }}</span>
           <strong class="v3-number" :class="`trend-${card.trend}`">{{ card.value }}</strong>
-          <span class="flow__sign">正=净流入 负=净流出 · CNY</span>
+          <span class="flow__sign">正=净流入 负=净流出 · 元</span>
         </div>
       </div>
 
@@ -235,7 +235,7 @@ const historyMetrics: { name: HistoryMetric; label: string }[] = [
           class="flow__chart"
           style="height: 240px"
           role="img"
-          :aria-label="`资金流历史：${capitalFlow.instrument.code} ${historyMetric} 指标柱状图`"
+          :aria-label="`资金流历史：${capitalFlow.instrument.code} ${historyMetrics.find((item) => item.name === historyMetric)?.label || '资金流'}指标柱状图`"
           data-testid="flow-history-chart"
         />
       </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { systemStatusLabel } from '../utils/systemLocale'
 import {computed, onMounted, reactive, ref, watch} from 'vue'
 import {Bell, Bot, CalendarClock, CheckCircle2, KeyRound, Pencil, Play, Plus, TestTube2, Trash2} from 'lucide-vue-next'
 import {useDialog, useMessage} from 'naive-ui'
@@ -67,7 +68,7 @@ const scheduleForm = reactive({
 const notificationForm = reactive({type: 'dingtalk', name: '', webhook: '', secret: '', enabled: true})
 
 const providerOptions = [
-  {label: 'OpenAI', value: 'openai'}, {label: 'OpenAI Compatible', value: 'openai_compatible'},
+  {label: 'OpenAI', value: 'openai'}, {label: '兼容 OpenAI 的接口', value: 'openai_compatible'},
   {label: 'DeepSeek', value: 'deepseek'}, {label: '通义千问 Qwen', value: 'qwen'},
   {label: '智谱 GLM', value: 'glm'}, {label: 'MiniMax', value: 'minimax'},
   {label: 'Anthropic', value: 'anthropic'}, {label: 'Google Gemini', value: 'gemini'},
@@ -343,9 +344,9 @@ onMounted(load)
 <template>
   <section class="page-stack">
     <div class="page-heading">
-      <div><p class="eyebrow">SYSTEM CONFIGURATION</p>
+      <div><p class="eyebrow">系统与运行配置</p>
         <h1>系统设置</h1>
-        <p>模型密钥、Webhook 和加签 Secret 均加密保存，页面不会回显明文。</p></div>
+        <p>模型密钥、回调地址 (Webhook) 和加签密钥均加密保存，页面不会回显明文。</p></div>
     </div>
 
     <ErrorState v-if="loadError" :error="loadError" @retry="load" />
@@ -356,7 +357,7 @@ onMounted(load)
           <section class="panel-card">
             <div class="section-title">
               <div><h2>模型供应商</h2>
-                <p>支持官方接口、OpenAI Compatible 和本地 Ollama</p></div>
+                <p>支持官方接口、兼容 OpenAI 的接口和本地 Ollama</p></div>
               <n-button type="primary" :disabled="Boolean(writeLoading)" @click="openCreateProvider">
                 <template #icon>
                   <Plus :size="16"/>
@@ -375,7 +376,7 @@ onMounted(load)
                     row.enabled ? '启用' : '停用'
                   }}
                 </n-tag>
-                <div class="secret-state">API Key：{{ row.has_api_key ? row.api_key_masked : '未配置' }}</div>
+                <div class="secret-state">接口密钥 (API Key)：{{ row.has_api_key ? row.api_key_masked : '未配置' }}</div>
                 <div class="setting-actions">
                   <n-button quaternary circle title="编辑供应商" :disabled="Boolean(writeLoading)" @click="openEditProvider(row)">
                     <template #icon><Pencil :size="16"/></template>
@@ -387,7 +388,7 @@ onMounted(load)
                 </div>
               </article>
             </div>
-            <n-empty v-else description="先配置模型供应商和 API Key"/>
+            <n-empty v-else description="先配置模型供应商和 接口密钥 (API Key)"/>
           </section>
 
           <section class="panel-card">
@@ -411,7 +412,7 @@ onMounted(load)
                 <n-tag v-if="row.is_default" :bordered="false" type="success">默认</n-tag>
                 <n-tag v-else :bordered="false">备用</n-tag>
                 <span class="health" :class="row.last_health_status || ''"><CheckCircle2
-                    :size="14"/>{{ row.last_health_status || '未测试' }}</span>
+                    :size="14"/>{{ row.last_health_status ? systemStatusLabel(row.last_health_status) : '未测试' }}</span>
                 <n-button v-if="!row.is_default" text type="primary" :loading="writeLoading === 'profile-default-' + row.id" :disabled="Boolean(writeLoading)" @click="setDefault(row)">设为默认</n-button>
                 <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="testProfile(row.id)">
                   <template #icon>
@@ -497,7 +498,7 @@ onMounted(load)
                 <p>{{ row.type === 'dingtalk' ? '钉钉机器人' : '企业微信机器人' }} · {{ row.webhook_masked }}</p></div>
               <n-tag :bordered="false"
                      :type="row.last_test_status === 'ok' ? 'success' : row.last_test_status === 'failed' ? 'error' : 'default'">
-                {{ row.last_test_status || '未测试' }}
+                {{ row.last_test_status ? systemStatusLabel(row.last_test_status) : '未测试' }}
               </n-tag>
               <div class="secret-state">加签：{{ row.has_secret ? '已配置' : '未配置' }}</div>
               <n-button secondary :loading="testingId === row.id" :disabled="Boolean(writeLoading)" @click="testNotification(row)">
@@ -533,10 +534,10 @@ onMounted(load)
         <n-form-item label="显示名称">
           <n-input v-model:value="providerForm.display_name" placeholder="例如：我的 DeepSeek"/>
         </n-form-item>
-        <n-form-item label="Base URL">
+        <n-form-item label="接口地址 (Base URL)">
           <n-input v-model:value="providerForm.base_url" placeholder="可留空使用内置默认地址"/>
         </n-form-item>
-        <n-form-item label="API Key">
+        <n-form-item label="接口密钥 (API Key)">
           <n-input v-model:value="providerForm.api_key" type="password" show-password-on="mousedown"
                    :placeholder="editingProviderId === null ? '本地无鉴权模型可留空' : '留空则保留现有 API Key'"/>
         </n-form-item>
@@ -559,10 +560,10 @@ onMounted(load)
           <n-input v-model:value="profileForm.model_name" placeholder="例如 gpt-4.1-mini / qwen-vl-max"/>
         </n-form-item>
         <div class="form-grid model-param-grid">
-          <n-form-item label="Temperature">
+          <n-form-item label="采样温度 (Temperature)">
             <n-input-number v-model:value="profileForm.temperature" :min="0" :max="2" :step="0.1"/>
           </n-form-item>
-          <n-form-item label="Max Tokens">
+          <n-form-item label="最大回复长度 (Max Tokens)">
             <n-input-number v-model:value="profileForm.max_tokens" :min="256" :max="128000"/>
           </n-form-item>
           <n-form-item :label="profileForm.stream ? '静默超时（秒）' : '超时（秒）'">
@@ -623,10 +624,10 @@ onMounted(load)
         <n-form-item label="渠道名称">
           <n-input v-model:value="notificationForm.name" placeholder="例如：交易提醒群"/>
         </n-form-item>
-        <n-form-item label="Webhook">
+        <n-form-item label="回调地址 (Webhook)">
           <n-input v-model:value="notificationForm.webhook" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }"/>
         </n-form-item>
-        <n-form-item label="加签 Secret（可选）">
+        <n-form-item label="加签密钥（可选）">
           <n-input v-model:value="notificationForm.secret" type="password" show-password-on="mousedown"/>
         </n-form-item>
         <n-button type="primary" block :loading="saving" :disabled="Boolean(writeLoading)" @click="createNotification">保存渠道</n-button>
@@ -853,4 +854,10 @@ h1 {
     grid-column: auto;
   }
 }
+
+.setting-card { min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; }
+.setting-card .setting-copy, .form-grid > * { min-width: 0; overflow-wrap: anywhere; }
+.card-grid, .profile-row, .schedule-row { min-width: 0; }
+@media (max-width: 620px) { .setting-card { grid-template-columns: minmax(0, 1fr); } .setting-card > :last-child { justify-self: start; } }
+
 </style>

@@ -46,15 +46,15 @@ const columns = [
 
 /** 演示数据 — 非真实行情 */
 const showcaseRows = [
-  { id: 1, code: '000001.SH', name: '上证指数（演示）', price: '3120.50', change: '+0.85%', status: 'FRESH' },
-  { id: 2, code: '399001.SZ', name: '深证成指（演示）', price: '9845.20', change: '-0.42%', status: 'FRESH' },
-  { id: 3, code: '600519.SH', name: '贵州茅台（演示）', price: '1688.00', change: '+1.12%', status: 'STALE' },
+  { id: 1, code: '000001.SH', name: '上证指数（演示）', price: '3120.50', change: '+0.85%', status: '最新' },
+  { id: 2, code: '399001.SZ', name: '深证成指（演示）', price: '9845.20', change: '-0.42%', status: '最新' },
+  { id: 3, code: '600519.SH', name: '贵州茅台（演示）', price: '1688.00', change: '+1.12%', status: '已过期' },
 ]
 
 async function handleConfirm(): Promise<void> {
   const ok = await dialog.confirm({
     title: '确认操作',
-    message: '这是 Foundation 演示确认框，不会触发任何真实交易。',
+    message: '这是组件演示确认框，不会触发任何真实交易。',
   })
   if (ok) notify.success('已确认（演示）')
   else notify.info('已取消（演示）')
@@ -71,47 +71,47 @@ function toggleLoading(): void {
 <template>
   <div class="v3-foundation" data-testid="v3-foundation">
     <V3PageHeader
-      eyebrow="V3 UI Foundation"
-      title="Foundation Showcase"
-      description="Quasar + V3 Design System 基础能力演示。本页数据均为 development showcase data，不可冒充真实市场行情。"
+      eyebrow="前端组件基础"
+      title="组件示例"
+      description="基础组件能力演示。本页均为演示数据，不代表真实市场行情。"
     >
       <template #status>
-        <V3StatusBadge label="DEVELOPMENT SHOWCASE" tone="warning" />
+        <V3StatusBadge label="开发演示数据" tone="warning" />
       </template>
       <template #actions>
-        <q-btn color="primary" no-caps unelevated data-testid="v3-foundation-notify" @click="notify.success('Notify 抽象可用', 'useV3Notify')">
-          触发 Notify
+        <q-btn color="primary" no-caps unelevated data-testid="v3-foundation-notify" @click="notify.success('通知组件可用', '组件演示')">
+          显示通知
         </q-btn>
         <q-btn outline no-caps color="primary" data-testid="v3-foundation-dialog" @click="handleConfirm">
-          打开 Dialog
+          打开确认框
         </q-btn>
         <q-btn outline no-caps color="primary" data-testid="v3-foundation-drawer-open" @click="drawerOpen = true">
-          打开 DetailDrawer
+          打开详情抽屉
         </q-btn>
       </template>
     </V3PageHeader>
 
     <!-- Theme -->
-    <V3Section title="Light / Dark / System" description="单一 theme authority，持久化到 localStorage advisor_theme。" compact class="v3-foundation__block">
+    <V3Section title="浅色／深色／跟随系统" description="主题设置统一保存，并随系统偏好切换。" compact class="v3-foundation__block">
       <div class="v3-foundation__row" data-testid="v3-theme-switcher">
         <q-btn-toggle
           :model-value="themePref"
           toggle-color="primary"
           no-caps
           :options="[
-            { label: 'Light', value: 'light' },
-            { label: 'Dark', value: 'dark' },
-            { label: 'System', value: 'system' },
+            { label: '浅色', value: 'light' },
+            { label: '深色', value: 'dark' },
+            { label: '跟随系统', value: 'system' },
           ]"
           data-testid="v3-theme-options"
           @update:model-value="(v) => setThemePref(v as 'light' | 'dark' | 'system')"
         />
-        <span class="v3-foundation__meta">resolved: <strong data-testid="v3-resolved-theme">{{ resolvedTheme }}</strong></span>
+        <span class="v3-foundation__meta">当前主题： <strong data-testid="v3-resolved-theme">{{ resolvedTheme === 'dark' ? '深色' : '浅色' }}</strong></span>
       </div>
     </V3Section>
 
     <!-- Metrics + Market colors -->
-    <V3Section title="Metrics · A 股涨跌色" description="上涨=红，下跌=绿。trend 使用 market token，不使用 success/error。" class="v3-foundation__block">
+    <V3Section title="指标与A股涨跌色" description="上涨为红色，下跌为绿色；涨跌方向与业务状态分别表达。" class="v3-foundation__block">
       <div class="v3-foundation__metrics">
         <V3Metric label="上证指数（演示）" value="3120.50" secondary="+26.30" trend="up" />
         <V3Metric label="深证成指（演示）" value="9845.20" secondary="-41.50" trend="down" />
@@ -119,27 +119,27 @@ function toggleLoading(): void {
         <V3Metric label="组合市值（演示）" value="1,250,000" secondary="持仓 8 只" />
       </div>
       <div class="v3-foundation__swatches" data-testid="v3-market-colors">
-        <span class="v3-swatch v3-swatch--up">market-up 涨</span>
-        <span class="v3-swatch v3-swatch--down">market-down 跌</span>
-        <span class="v3-swatch v3-swatch--flat">market-flat 平</span>
+        <span class="v3-swatch v3-swatch--up">上涨</span>
+        <span class="v3-swatch v3-swatch--down">下跌</span>
+        <span class="v3-swatch v3-swatch--flat">平盘</span>
       </div>
     </V3Section>
 
     <!-- Risk / Status -->
-    <V3Section title="Risk / Status 语义" description="风险与错误状态独立于涨跌色，禁止 risk-high = market-up。" class="v3-foundation__block">
+    <V3Section title="风险与状态" description="风险和错误状态采用独立的颜色，避免与涨跌方向混淆。" class="v3-foundation__block">
       <div class="v3-foundation__badges" data-testid="v3-status-colors">
-        <V3StatusBadge label="neutral" tone="neutral" />
-        <V3StatusBadge label="info" tone="info" />
-        <V3StatusBadge label="success" tone="success" />
-        <V3StatusBadge label="warning" tone="warning" />
-        <V3StatusBadge label="danger" tone="danger" />
-        <V3StatusBadge label="blocked" tone="blocked" />
+        <V3StatusBadge label="一般" tone="neutral" />
+        <V3StatusBadge label="提示" tone="info" />
+        <V3StatusBadge label="成功" tone="success" />
+        <V3StatusBadge label="需关注" tone="warning" />
+        <V3StatusBadge label="危险" tone="danger" />
+        <V3StatusBadge label="受阻" tone="blocked" />
       </div>
       <div class="v3-foundation__badges" data-testid="v3-risk-colors">
-        <span class="v3-risk-chip v3-risk-chip--low">risk-low</span>
-        <span class="v3-risk-chip v3-risk-chip--medium">risk-medium</span>
-        <span class="v3-risk-chip v3-risk-chip--high">risk-high</span>
-        <span class="v3-risk-chip v3-risk-chip--unknown">risk-unknown</span>
+        <span class="v3-risk-chip v3-risk-chip--low">低风险</span>
+        <span class="v3-risk-chip v3-risk-chip--medium">中风险</span>
+        <span class="v3-risk-chip v3-risk-chip--high">高风险</span>
+        <span class="v3-risk-chip v3-risk-chip--unknown">风险未知</span>
       </div>
     </V3Section>
 
@@ -153,56 +153,56 @@ function toggleLoading(): void {
     </V3Section>
 
     <!-- Buttons -->
-    <V3Section title="Buttons" compact class="v3-foundation__block">
+    <V3Section title="按钮" compact class="v3-foundation__block">
       <div class="v3-foundation__row">
-        <q-btn color="primary" no-caps unelevated>Primary</q-btn>
-        <q-btn outline color="primary" no-caps>Outline</q-btn>
-        <q-btn flat color="primary" no-caps>Flat</q-btn>
-        <q-btn unelevated color="negative" no-caps data-testid="v3-btn-danger">Danger</q-btn>
-        <q-btn unelevated color="positive" no-caps>Success</q-btn>
-        <q-btn unelevated color="warning" no-caps>Warning</q-btn>
+        <q-btn color="primary" no-caps unelevated>主要操作</q-btn>
+        <q-btn outline color="primary" no-caps>边框按钮</q-btn>
+        <q-btn flat color="primary" no-caps>文字按钮</q-btn>
+        <q-btn unelevated color="negative" no-caps data-testid="v3-btn-danger">危险操作</q-btn>
+        <q-btn unelevated color="positive" no-caps>成功</q-btn>
+        <q-btn unelevated color="warning" no-caps>警示</q-btn>
       </div>
     </V3Section>
 
     <!-- Tabs -->
-    <V3Section title="Tabs" class="v3-foundation__block">
+    <V3Section title="选项卡" class="v3-foundation__block">
       <V3Tabs v-model="activeTab" :items="tabs">
         <div data-testid="v3-tabs-panel">
           当前面板：<strong>{{ activeTab }}</strong>
-          <p class="v3-foundation__meta">为后续 InstrumentDetail 的行情 / 盘口 / 资金 / 分析 / 新闻 / 历史预留。</p>
+          <p class="v3-foundation__meta">为标的详情的行情、盘口、资金、分析、新闻和历史记录预留。</p>
         </div>
       </V3Tabs>
     </V3Section>
 
     <!-- Table -->
-    <V3Section title="DataTable" description="通用基础表格（演示数据）。" class="v3-foundation__block">
+    <V3Section title="数据表格" description="通用基础表格（演示数据）。" class="v3-foundation__block">
       <V3DataTable :columns="columns" :rows="showcaseRows" />
     </V3Section>
 
     <!-- States -->
-    <V3Section title="Loading / Empty / Error" class="v3-foundation__block">
+    <V3Section title="加载中／空数据／错误" class="v3-foundation__block">
       <div class="v3-foundation__states">
         <div class="v3-foundation__state-box">
-          <div class="v3-foundation__state-label">Loading（skeleton）</div>
+          <div class="v3-foundation__state-label">加载中（骨架屏）</div>
           <V3LoadingState v-if="loadingDemo" variant="metric" :rows="2" />
           <div v-else class="v3-foundation__row">
-            <q-btn outline no-caps dense @click="toggleLoading">播放 Loading</q-btn>
+            <q-btn outline no-caps dense @click="toggleLoading">演示加载过程</q-btn>
           </div>
         </div>
         <div class="v3-foundation__state-box">
-          <div class="v3-foundation__state-label">Empty</div>
+          <div class="v3-foundation__state-label">空数据</div>
           <V3EmptyState title="暂无分析记录" description="运行一次分析后将在此展示结果。" />
         </div>
         <div class="v3-foundation__state-box">
-          <div class="v3-foundation__state-label">Error</div>
+          <div class="v3-foundation__state-label">错误</div>
           <V3ErrorState
             v-if="errorDemo"
             title="演示：加载失败"
-            description="AbortError 不应弹 Toast，此处仅为错误态展示。"
+            description="请求取消时不显示错误通知，此处仅演示错误状态。"
             @retry="errorDemo = false"
           />
           <div v-else class="v3-foundation__row">
-            <q-btn outline no-caps dense @click="errorDemo = true">重置 Error</q-btn>
+            <q-btn outline no-caps dense @click="errorDemo = true">重置错误</q-btn>
             <V3StatusBadge label="已恢复" tone="success" />
           </div>
         </div>
@@ -210,16 +210,16 @@ function toggleLoading(): void {
     </V3Section>
 
     <!-- Chart container -->
-    <V3Section title="Chart Container" description="只提供壳，不自造 K 线。" class="v3-foundation__block">
+    <V3Section title="图表容器" description="只提供壳，不自造 K 线。" class="v3-foundation__block">
       <V3ChartContainer title="价格走势（占位）" :height="180">
         <div class="v3-foundation__chart-placeholder" data-testid="v3-chart-placeholder">
-          <span>Chart slot — 后续可接 ECharts / Lightweight Charts</span>
+          <span>图表占位，接入行情后即可展示走势</span>
         </div>
       </V3ChartContainer>
     </V3Section>
 
     <!-- Typography -->
-    <V3Section title="Typography · tabular-nums" class="v3-foundation__block">
+    <V3Section title="字体与等宽数字" class="v3-foundation__block">
       <div class="v3-foundation__type">
         <p class="v3-foundation__h">页面标题 H1</p>
         <p class="v3-foundation__h2">区块标题 H2</p>
@@ -242,7 +242,7 @@ function toggleLoading(): void {
       </template>
       <V3Section title="抽屉内容占位" compact>
         <p class="v3-foundation__meta">
-          UI-0 不接真实 Instrument 数据。下一阶段 V3-UI-1 将在此接入 Unified InstrumentDetail。
+          当前仅展示演示数据，接入统一标的接口后即可查看真实详情。
         </p>
         <div class="v3-foundation__metrics">
           <V3Metric label="现价（演示）" value="3120.50" trend="up" />

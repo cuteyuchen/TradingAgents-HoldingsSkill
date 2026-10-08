@@ -51,7 +51,7 @@ const foundationEnabled = computed(() => {
 const items = computed(() => {
   const list = [...navigation]
   if (foundationEnabled.value) {
-    list.push({ name: 'v3-foundation', label: 'Foundation', icon: Palette })
+    list.push({ name: 'v3-foundation', label: '组件示例', icon: Palette })
   }
   return list
 })

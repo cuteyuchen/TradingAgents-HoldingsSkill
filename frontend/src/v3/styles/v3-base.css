@@ -16,7 +16,15 @@
 .v3-root .v3-number {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum';
+  white-space: nowrap;
 }
+
+.v3-root .q-table__middle {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.v3-root .q-table th { white-space: nowrap; }
 
 /* 方向色语义类 */
 .v3-root .text-market-up { color: var(--v3-market-up); }

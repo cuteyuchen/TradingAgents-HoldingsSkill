@@ -2,6 +2,8 @@
  * Dashboard pure formatters and adapter helpers.
  * Missing/unknown never becomes 0.
  */
+import { riskLevelLabel, localizedValue } from '../../utils/ui'
+import { businessLabel } from '../../utils/businessLocale'
 import { dashboardDecisionSource, dashboardDecisionState, decisionLabel, decisionSummary } from '../../utils/decision'
 import type {
   DailyDashboard,
@@ -196,7 +198,7 @@ export function mapSystemicRisk(snapshot: SystemicRiskSnapshot | null | undefine
   return {
     level,
     score: numOrNull(snapshot.risk_score),
-    stateText: level === 'UNKNOWN' ? '风险状态未知' : `系统性风险 · ${level}`,
+    stateText: level === 'UNKNOWN' ? '风险状态未知' : `系统性风险 · ${riskLevelLabel(level)}`,
     factors: Array.isArray(snapshot.risk_factors) ? snapshot.risk_factors.filter((item) => typeof item === 'string') : [],
     riskTone: riskTone(level),
     asOf: strOrNull(snapshot.as_of),
@@ -398,7 +400,7 @@ export function mapDecision(
       title: analysisInProgress ? '暂无有效策略结论' : '暂无有效策略结论',
       subtitle: analysisInProgress
         ? '分析进行中，完成后才会给出今日结论。'
-        : '今日尚无有效 latest decision / analysis，不能视为明确无需操作。',
+        : '今日尚无有效最新决策或分析结果，不能视为明确无需操作。',
       tone: 'blocked',
       actionCount: 0,
       holdingActions: [],
@@ -438,7 +440,7 @@ export function mapDecision(
       actionCount: 0,
       holdingActions,
       candidateActions,
-      reasons: collectReasons(source, null, ['数据质量不足', quality || 'BLOCKED']),
+      reasons: collectReasons(source, null, ['数据质量不足', localizedValue(quality || 'BLOCKED')]),
       conclusion: 'BLOCKED',
       quality,
       decisionAt: strOrNull(source.decision_at || source.finished_at),
@@ -588,9 +590,9 @@ export function mapImportantEvents(dashboard: DailyDashboard | null): V3Importan
   const events: V3ImportantEventVM[] = items.map((item, index) => ({
     key: strOrNull(item.key) || `timeline-${index}`,
     time: strOrNull(item.time || item.scheduled_at),
-    label: strOrNull(item.label) || strOrNull(item.key) || '检查点',
+    label: businessLabel(strOrNull(item.label) || strOrNull(item.key) || '检查点'),
     kind: strOrNull(item.kind) || 'timeline',
-    detail: strOrNull(item.mode || item.status),
+    detail: item.mode || item.status ? businessLabel(strOrNull(item.mode || item.status)) : null,
     isCurrent: Boolean(item.is_current),
   }))
   const nextCheckpoint = events.find((item) => item.isCurrent && item.kind !== 'notification') || events.find((item) => item.kind.includes('CHECK') || item.kind.includes('REVIEW') || item.kind.includes('FAST') || item.kind.includes('DEEP')) || events[0] || null
@@ -602,9 +604,9 @@ export function mapImportantEvents(dashboard: DailyDashboard | null): V3Importan
   const triggers: V3ImportantEventVM[] = triggerItems.slice(0, 5).map((row, index) => ({
     key: `trigger-${numOrNull(row.id) ?? index}`,
     time: strOrNull(row.detected_at),
-    label: strOrNull(row.reason || row.trigger_type) || '触发器',
+    label: strOrNull(row.reason) || businessLabel(strOrNull(row.trigger_type) || '触发器'),
     kind: 'trigger',
-    detail: strOrNull(row.status),
+    detail: row.status ? businessLabel(strOrNull(row.status)) : null,
     isCurrent: strOrNull(row.status) === 'ACTIVE',
   }))
 

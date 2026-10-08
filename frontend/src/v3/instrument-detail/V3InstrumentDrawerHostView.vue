@@ -12,7 +12,7 @@ const open = ref(false)
 
 <template>
   <div class="drawer-host" data-testid="instrument-drawer-host">
-    <h1>Instrument Detail Drawer Host</h1>
+    <h1>标的详情抽屉</h1>
     <label>
       代码
       <input v-model="code" data-testid="drawer-host-code" aria-label="标的代码" />

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { localizedValue } from '../../utils/ui'
 import { computed } from 'vue'
 import V3EmptyState from '../components/V3EmptyState.vue'
 import V3LoadingState from '../components/V3LoadingState.vue'
@@ -23,7 +24,7 @@ const freshnessLabel = computed(() => {
     FROZEN: '快照冻结',
     UNKNOWN: '状态未知',
   }
-  return map[props.portfolio?.freshness || 'UNKNOWN'] || props.portfolio?.freshness || '状态未知'
+  return map[props.portfolio?.freshness || 'UNKNOWN'] || '状态未知'
 })
 
 /** Initial load failed with no last-success data — localized error, not a blank section. */
@@ -74,19 +75,19 @@ const showInitialError = computed(() => Boolean(props.error && props.hasPortfoli
       <V3Metric label="持仓数" :value="portfolio.positionCount === null ? '—' : String(portfolio.positionCount)" />
       <V3Metric
         label="组合质量"
-        :value="portfolio.qualityStatus"
+        :value="localizedValue(portfolio.qualityStatus)"
         :status="portfolio.qualityStatus === 'VALID' || portfolio.qualityStatus === 'OK' ? 'info' : 'warning'"
       />
       <V3Metric
         label="当日收益"
         :value="portfolio.dayReturnAvailable ? formatNumber(portfolio.dayReturn, 2) : '—'"
-        secondary="无 authoritative 合约"
+        secondary="暂无权威数据接口"
         data-testid="v3-portfolio-day-return"
       />
       <V3Metric
         label="浮动盈亏"
         :value="portfolio.floatingPnlAvailable ? formatMoney(portfolio.floatingPnl) : '—'"
-        secondary="无 authoritative 合约"
+        secondary="暂无权威数据接口"
         data-testid="v3-portfolio-floating-pnl"
       />
     </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { FilePlus2, RefreshCw, ShieldCheck, Undo2 } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
@@ -65,18 +66,8 @@ const statusType = (status?: string | null): 'success' | 'warning' | 'error' | '
   if (['REJECTED', 'BLOCKED', 'ROLLED_BACK'].includes(value)) return 'error'
   return 'info'
 }
-const statusLabel = (status?: string | null) => {
-  const value = String(status || '').toUpperCase()
-  return ({
-    DRAFT: 'DRAFT',
-    PENDING_REVIEW: 'REVIEW',
-    APPROVED: 'REVIEW / 已审批待激活',
-    ACTIVE: 'ACTIVE',
-    SUPERSEDED: 'SUPERSEDED',
-    REJECTED: 'REJECTED',
-    ROLLED_BACK: 'SUPERSEDED',
-  }[value] || value || 'UNKNOWN')
-}
+const statusLabel = (status?: string | null) => status === 'APPROVED' ? '已审批待激活' : businessLabel(status)
+
 const fmt = (value?: string | null) => fmtDateTime(value)
 const pretty = (value: unknown): string => {
   if (value === null || value === undefined) return '—'
@@ -84,7 +75,7 @@ const pretty = (value: unknown): string => {
   return String(value)
 }
 const specFor = (key: string): GovernanceParameter | undefined => registry.value?.registry?.[key]
-const specLabel = (key: string) => specFor(key)?.display_name || key
+const specLabel = (key: string) => specFor(key)?.display_name || businessLabel(key)
 const beginAction = (key: string) => {
   if (actionLoading.value) return false
   actionLoading.value = key
@@ -200,7 +191,7 @@ async function approveProposal(proposal: ParameterChangeProposal) {
   if (!beginAction('approve-' + proposal.id)) return
   try {
     await api.approveGovernanceProposal(proposal.id)
-    message.success('已生成 APPROVED 参数版本，需再次显式激活')
+    message.success('已生成已批准的参数版本，需再次显式激活')
     await load()
   } catch (error) {
     message.error((error as Error).message)
@@ -240,7 +231,7 @@ async function activateVersion(version: ParameterSetVersion) {
   if (version.status !== 'APPROVED') return
   const diff = pretty(version.diff || '未记录结构化变更')
   const evidence = version.source_proposal_id ? 'Proposal #' + version.source_proposal_id : '无关联提案'
-  if (!window.confirm('准备激活参数版本 v' + version.version + '？当前 ACTIVE 版本将被 SUPERSEDED。')) return
+  if (!window.confirm('准备激活参数版本 v' + version.version + '？当前启用版本将被新版本替代。')) return
   if (!window.confirm('二次确认：这会让生产运行时读取该版本。\n\n版本：v' + version.version + '\nConfig Hash：' + version.config_hash + '\n关键变更：' + diff + '\n证据来源：' + evidence + '\n\n确认继续？')) return
   const reasonInput = window.prompt('填写本次手工激活原因（可留空；取消则不激活）')
   if (reasonInput === null) return
@@ -283,7 +274,7 @@ onMounted(() => void load())
     <div class="page-head">
       <div>
         <h1>参数治理</h1>
-        <span class="muted">Research 提议 · 人工审批 · 版本验证 · 手工激活；不会自动应用参数</span>
+        <span class="muted">研究提议 · 人工审批 · 版本验证 · 手工激活；不会自动应用参数</span>
       </div>
       <div class="head-actions">
         <n-tag v-if="health" :type="statusType(health.status)" size="large">
@@ -299,7 +290,7 @@ onMounted(() => void load())
         <section class="panel-card gov-section">
           <div class="section-title">
             <ShieldCheck :size="18" />
-            <strong>当前 ACTIVE 版本</strong>
+            <strong>当前启用版本</strong>
           </div>
           <template v-if="active">
             <div class="active-banner">
@@ -308,30 +299,30 @@ onMounted(() => void load())
               <n-tag :type="statusType(active.status)" size="small">{{ statusLabel(active.status) }}</n-tag>
             </div>
             <div class="kv-list">
-              <div><span>Config Hash</span><code>{{ active.config_hash }}</code></div>
-              <div><span>Runtime</span><code>{{ active.runtime_contract_version }}</code></div>
-              <div><span>Decision</span><code>{{ active.decision_contract_version }}</code></div>
-              <div><span>Source</span><span>{{ active.source_proposal_id ? `Proposal #${active.source_proposal_id}` : (active.activation_reason || 'SYSTEM_BOOTSTRAP') }}</span></div>
+              <div><span>配置哈希</span><code>{{ active.config_hash }}</code></div>
+              <div><span>运行时契约版本</span><code>{{ active.runtime_contract_version }}</code></div>
+              <div><span>决策契约版本</span><code>{{ active.decision_contract_version }}</code></div>
+              <div><span>参数来源</span><span>{{ active.source_proposal_id ? `提案 #${active.source_proposal_id}` : businessLabel(active.activation_reason || 'SYSTEM_BOOTSTRAP') }}</span></div>
             </div>
           </template>
-          <n-empty v-else description="没有 ACTIVE 参数版本" />
+          <n-empty v-else description="没有启用参数版本" />
         </section>
 
         <section class="panel-card gov-section">
           <div class="section-title">
             <FilePlus2 :size="18" />
-            <strong>Calibration 建议</strong>
+            <strong>参数校准建议</strong>
           </div>
           <div v-if="suggestions.length" class="suggestion-list">
             <div v-for="report in suggestions" :key="report.id" class="suggestion-row">
               <div>
-                <strong>{{ report.target_parameter }}</strong>
+                <strong>{{ businessLabel(report.target_parameter) }}</strong>
                 <span>#{{ report.id }} · {{ report.challenger_value !== undefined ? `建议 ${pretty(report.challenger_value)}` : '' }}</span>
               </div>
-              <n-button size="small" @click="openCalibration(report)">Create Proposal</n-button>
+              <n-button size="small" @click="openCalibration(report)">创建参数变更提案</n-button>
             </div>
           </div>
-          <n-empty v-else description="暂无 CONSIDER_CHANGE 建议" />
+          <n-empty v-else description="暂无建议变更的校准结果" />
         </section>
       </div>
 
@@ -380,7 +371,7 @@ onMounted(() => void load())
               </div>
               <div class="muted small">
                 {{ fmt(version.activated_at || version.approved_at || version.created_at) }}
-                <template v-if="version.rollback_from_version_id"> · rollback from v{{ (versions.find((v) => v.id === version.rollback_from_version_id))?.version }}</template>
+                <template v-if="version.rollback_from_version_id"> · 回滚来源：版本{{ (versions.find((v) => v.id === version.rollback_from_version_id))?.version }}</template>
               </div>
               <code class="small">{{ version.config_hash }}</code>
               <div v-if="version.diff" class="version-line"><span>关键变更</span><code>{{ pretty(version.diff) }}</code></div>
@@ -397,13 +388,13 @@ onMounted(() => void load())
       <div class="panel-card gov-section">
         <div class="section-title"><ShieldCheck :size="18" /><strong>治理审计</strong></div>
         <n-timeline v-if="events.length">
-          <n-timeline-item v-for="event in events" :key="event.id" :title="event.event_type" :content="`#${event.id} · proposal ${event.proposal_id ?? '—'} · version ${event.parameter_set_version_id ?? '—'}`" :time="fmt(event.occurred_at)" />
+          <n-timeline-item v-for="event in events" :key="event.id" :title="businessLabel(event.event_type)" :content="`#${event.id} · 提案 ${event.proposal_id ?? '—'} · 版本 ${event.parameter_set_version_id ?? '—'}`" :time="fmt(event.occurred_at)" />
         </n-timeline>
         <n-empty v-else description="暂无审计事件" />
       </div>
     </n-spin>
 
-    <n-modal v-model:show="calibrationModal" preset="card" title="从 Calibration 创建提案" class="gov-modal">
+    <n-modal v-model:show="calibrationModal" preset="card" title="从参数校准创建提案" class="gov-modal">
       <n-form label-placement="top">
         <n-form-item label="目标参数">
           <n-input :value="calibrationForm.reportId ? (suggestions.find((item) => item.id === calibrationForm.reportId)?.target_parameter || '') : ''" disabled />

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Camera, CheckCircle2, ClipboardPaste, FileImage, Play, Plus, RefreshCw, Save, X } from 'lucide-vue-next'
@@ -64,7 +65,7 @@ const stageLabels: Record<string, string> = {
 }
 
 function uploadStatusText(status?: string | null) {
-  return ({ uploaded: '已上传', vision_parsing: '识别中', identity_resolving: '正在匹配证券身份...', waiting_confirmation: '待人工确认', confirmed: '已确认', failed: '识别失败', needs_model: '缺少识图模型' }[String(status || '').toLowerCase()] || String(status || '未知'))
+  return ({ uploaded: '已上传', vision_parsing: '识别中', identity_resolving: '正在匹配证券身份...', waiting_confirmation: '待人工确认', confirmed: '已确认', failed: '识别失败', needs_model: '缺少识图模型' }[String(status || '').toLowerCase()] || businessLabel(status || 'UNKNOWN'))
 }
 
 function emptyParsed(): ParsedHoldings {
@@ -372,7 +373,7 @@ onUnmounted(() => {
   <n-drawer :show="show" width="min(880px, 100vw)" placement="right" @update:show="emit('update:show', $event)">
     <n-drawer-content title="更新持仓" closable>
       <div class="drawer-stack">
-        <div class="drawer-intro"><div><p class="drawer-eyebrow">REVIEW BEFORE CONFIRM</p><h2>上传最新持仓截图</h2><p>识别结果会停留在核对阶段，确认后才会成为当前组合快照。</p></div><n-button quaternary circle aria-label="关闭更新持仓" @click="close"><template #icon><X :size="18" /></template></n-button></div>
+        <div class="drawer-intro"><div><p class="drawer-eyebrow">确认前仔细核对</p><h2>上传最新持仓截图</h2><p>识别结果会停留在核对阶段，确认后才会成为当前组合快照。</p></div><n-button quaternary circle aria-label="关闭更新持仓" @click="close"><template #icon><X :size="18" /></template></n-button></div>
 
         <section class="drawer-section">
           <div class="section-title"><div><h3>1. 上传截图</h3><p>支持 PNG、JPEG、WebP，也可以直接粘贴截图。</p></div><FileImage :size="19" /></div>
@@ -422,7 +423,7 @@ onUnmounted(() => {
           <div class="section-title"><div><h3>{{ parsed ? '3.' : '2.' }} 手动执行组合分析</h3><p>当前使用快照 #{{ snapshot.id }} · {{ fmtDateTime(snapshot.snapshot_time) }}</p></div><Play :size="18" /></div>
           <n-alert v-if="snapshotIdentityBlocked" type="warning" :show-icon="false">证券身份不完整。该快照保留审计历史，但不会作为新的分析默认输入，请重新导入并修正。</n-alert>
           <div class="analysis-form"><n-form-item label="分析模式"><n-radio-group v-model:value="analysisMode"><n-radio-button value="fast">快速</n-radio-button><n-radio-button value="standard">标准</n-radio-button><n-radio-button value="deep">深度</n-radio-button></n-radio-group></n-form-item><n-form-item label="检查点"><n-select v-model:value="checkpoint" :options="['09:35', '10:30', '13:05', '14:30', '15:10'].map((value) => ({ label: value, value }))" /></n-form-item><n-form-item label="完成后通知"><n-switch v-model:value="notify" /></n-form-item><n-button type="primary" size="large" :loading="analysisStarting" :disabled="snapshotIdentityBlocked || Boolean(job && !terminalJob)" @click="runAnalysis"><template #icon><Play :size="16" /></template>开始分析</n-button></div>
-          <div v-if="job" class="job-status"><div><strong>{{ stageLabels[job.current_stage] || job.current_stage }}</strong><span>{{ job.progress_percent }}%</span></div><n-progress type="line" :percentage="job.progress_percent" :status="jobProgressStatus" :processing="!terminalJob" /><n-alert v-if="job.error_message" type="error" :show-icon="false">{{ job.error_message }}</n-alert><n-alert v-if="pollingError" type="warning" :show-icon="false">{{ pollingError }} 页面会继续尝试恢复。</n-alert><div class="job-actions"><n-button v-if="jobSucceeded" type="primary" @click="openAnalysis">查看今日分析</n-button><n-button v-if="jobRunning" secondary :loading="jobActionLoading" @click="cancelAnalysis">取消任务</n-button><n-button v-if="jobFailed" secondary :loading="jobActionLoading" @click="retryAnalysis">重新分析</n-button><n-button v-if="terminalJob" secondary @click="job = null">再次分析当前快照</n-button></div></div>
+          <div v-if="job" class="job-status"><div><strong>{{ stageLabels[job.current_stage] || businessLabel(job.current_stage) }}</strong><span>{{ job.progress_percent }}%</span></div><n-progress type="line" :percentage="job.progress_percent" :status="jobProgressStatus" :processing="!terminalJob" /><n-alert v-if="job.error_message" type="error" :show-icon="false">{{ job.error_message }}</n-alert><n-alert v-if="pollingError" type="warning" :show-icon="false">{{ pollingError }} 页面会继续尝试恢复。</n-alert><div class="job-actions"><n-button v-if="jobSucceeded" type="primary" @click="openAnalysis">查看今日分析</n-button><n-button v-if="jobRunning" secondary :loading="jobActionLoading" @click="cancelAnalysis">取消任务</n-button><n-button v-if="jobFailed" secondary :loading="jobActionLoading" @click="retryAnalysis">重新分析</n-button><n-button v-if="terminalJob" secondary @click="job = null">再次分析当前快照</n-button></div></div>
         </section>
       </div>
     </n-drawer-content>

@@ -6,7 +6,7 @@ import { useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { LedgerImportPreview, TradeLedgerEntry } from '../api/types'
 import { errorMessage } from '../api'
-import { fmtDateTime, formatCurrency } from '../utils/ui'
+import { fmtDateTime, formatCurrency, actionLabel, statusLabel, ledgerSourceLabel, ledgerEntryTypeLabel } from '../utils/ui'
 
 const props = defineProps<{ show: boolean; portfolioId: number | null }>()
 const emit = defineEmits<{
@@ -47,6 +47,10 @@ const voidingId = ref<number | null>(null)
 const voidReason = ref('')
 const mutating = ref(false)
 
+function ledgerFieldLabel(field: string): string {
+  return ({ entry_type: '业务类型', side: '成交方向', security_code: '证券代码', security_name: '证券名称', quantity: '成交数量', price: '成交价格', executed_at: '成交时间', trade_date: '交易日期', fees: '手续费', taxes: '税费', net_amount: '净金额', amount: '金额', notes: '备注', source_ref: '来源记录' } as Record<string, string>)[field] || '其他字段'
+}
+
 const tradeKinds = [
   { label: '买入', value: 'BUY' },
   { label: '卖出', value: 'SELL' },
@@ -60,13 +64,10 @@ const isTrade = computed(() => ['BUY', 'SELL'].includes(manual.value.kind))
 const readyRows = computed(() => (importPreview.value?.rows || []).filter((row) => row.status === 'READY'))
 
 function kindLabel(entry: TradeLedgerEntry): string {
-  if (entry.entry_type === 'TRADE') return entry.side === 'BUY' ? '买入' : '卖出'
-  return ({ CASH_IN: '现金转入', CASH_OUT: '现金转出', DIVIDEND: '股息红利', FEE: '手续费', TAX: '税费', TRANSFER_IN: '转入', TRANSFER_OUT: '转出', CORPORATE_ACTION: '公司行为', OTHER: '其他' } as Record<string, string>)[entry.entry_type] || entry.entry_type
+  return entry.entry_type === 'TRADE' ? actionLabel(entry.side) : ledgerEntryTypeLabel(entry.entry_type)
 }
 
-function statusLabel(status: string): string {
-  return ({ CONFIRMED: '已确认', PENDING_REVIEW: '待核对', VOIDED: '已撤销' } as Record<string, string>)[status] || status
-}
+
 
 function statusType(status: string): 'success' | 'warning' | 'default' {
   if (status === 'CONFIRMED') return 'success'
@@ -234,7 +235,7 @@ watch(() => props.show, (show) => {
       <div class="ledger-stack">
         <div class="ledger-intro">
           <div>
-            <p class="ledger-eyebrow">ACTUAL EXECUTION</p>
+            <p class="ledger-eyebrow">真实成交记录</p>
             <h2>用真实成交更新当前账户</h2>
             <p>确认后的成交会叠加在最近一次确认快照上，分析将使用更新后的持仓和可用资金。</p>
           </div>
@@ -258,7 +259,7 @@ watch(() => props.show, (show) => {
                 {{ entry.trade_date }} · {{ fmtDateTime(entry.executed_at) }}
                 <template v-if="entry.entry_type === 'TRADE'"> · {{ entry.quantity }} 股 @ {{ entry.price }}</template>
                 <template v-if="entry.net_amount != null"> · 金额 {{ formatCurrency(entry.net_amount) }}</template>
-                · 来源 {{ entry.source }}
+                · 来源 {{ ledgerSourceLabel(entry.source) }}
               </span>
             </div>
             <div class="ledger-side">
@@ -319,12 +320,12 @@ watch(() => props.show, (show) => {
               <span>重复 {{ importPreview.summary.duplicates }}</span>
               <span>异常 {{ importPreview.summary.invalid }}</span>
             </div>
-            <div class="mapping-line">字段映射：{{ Object.entries(importPreview.mapping).map(([field, header]) => `${field}→${header}`).join('；') || '未识别到表头' }}</div>
+            <div class="mapping-line">字段映射：{{ Object.entries(importPreview.mapping).map(([field, header]) => `${ledgerFieldLabel(field)}→${header}`).join('；') || '未识别到表头' }}</div>
             <div class="import-rows">
               <div v-for="row in importPreview.rows" :key="row.row_number" class="import-row" :class="row.status.toLowerCase()">
                 <div><strong>第 {{ row.row_number }} 行</strong><span>{{ row.status === 'READY' ? '可导入' : row.status === 'DUPLICATE' ? `重复（${row.duplicate_kind === 'IN_FILE' ? '文件内' : '已有记录'}）` : '无法解析' }}</span></div>
                 <div class="import-detail">
-                  <template v-if="row.normalized">{{ row.normalized.entry_type }} {{ row.normalized.security_code || '' }} {{ row.normalized.side || '' }} {{ row.normalized.quantity || '' }} {{ row.normalized.price || '' }}</template>
+                  <template v-if="row.normalized">{{ ledgerEntryTypeLabel(row.normalized.entry_type) }} {{ row.normalized.security_code || '' }} {{ row.normalized.side ? actionLabel(row.normalized.side) : '' }} {{ row.normalized.quantity || '' }} {{ row.normalized.price || '' }}</template>
                   <template v-if="row.issues?.length"> · {{ row.issues.map((item) => item.message).join('；') }}</template>
                 </div>
               </div>

@@ -19,6 +19,7 @@ const props = withDefaults(
 )
 
 const displayValue = computed(() => (props.value === null || props.value === undefined || props.value === '' ? '—' : String(props.value)))
+const isNumeric = computed(() => /^[￥¥+\-\d,.\s%万亿元股]+$/.test(displayValue.value))
 
 const trendClass = computed(() => {
   if (props.trend === 'up') return 'v3-metric__value--market-up'
@@ -47,7 +48,7 @@ const accentClass = computed(() => {
 <template>
   <div class="v3-metric" :class="accentClass">
     <span class="v3-metric__label">{{ label }}</span>
-    <strong class="v3-metric__value v3-number" :class="trendClass">{{ displayValue }}</strong>
+    <strong class="v3-metric__value v3-number" :class="[trendClass, { 'v3-metric__value--numeric': isNumeric }]">{{ displayValue }}</strong>
     <small v-if="secondary" class="v3-metric__secondary v3-number">{{ secondary }}</small>
   </div>
 </template>
@@ -66,12 +67,13 @@ const accentClass = computed(() => {
   font-size: var(--v3-font-size-sm);
 }
 .v3-metric__value {
-  overflow-wrap: anywhere;
-  font-size: var(--v3-font-size-2xl);
+  white-space: normal; overflow-wrap: anywhere;
+  font-size: clamp(16px, 1.6vw, 20px);
   line-height: 1.2;
   font-weight: 700;
 }
-.v3-metric__secondary { min-height: 18px; }
+.v3-metric__secondary { min-height: 18px; white-space: normal; }
+.v3-metric__value--numeric { white-space: nowrap; }
 
 /* A 股涨跌 */
 .v3-metric__value--market-up { color: var(--v3-market-up); }

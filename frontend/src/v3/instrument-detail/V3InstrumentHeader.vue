@@ -5,6 +5,7 @@ import {
   DASH,
   formatExchangeLabel,
   formatInstrumentType,
+  formatQuality,
 } from './formatters'
 import V3DataTimestamp from '../components/V3DataTimestamp.vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
@@ -47,7 +48,7 @@ const board = computed(() => props.identity?.board || DASH)
         />
         <V3StatusBadge
           v-if="identity?.is_st"
-          label="ST"
+          label="风险警示 (ST)"
           tone="warning"
           data-testid="instrument-st"
         />
@@ -62,7 +63,7 @@ const board = computed(() => props.identity?.board || DASH)
       <div class="inst-header__status">
         <V3StatusBadge
           v-if="quality"
-          :label="`质量 ${quality}`"
+          :label="`质量 ${formatQuality(quality)}`"
           :tone="quality === 'A' ? 'success' : quality === 'B' ? 'info' : quality === 'F' ? 'danger' : 'warning'"
           data-testid="instrument-quality"
         />

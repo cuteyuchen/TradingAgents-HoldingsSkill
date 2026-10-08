@@ -4,6 +4,7 @@
  */
 import type { App } from 'vue'
 import { Dark, Dialog, Loading, Notify, Quasar } from 'quasar'
+import zhCN from 'quasar/lang/zh-CN'
 
 // 仅引入 Quasar 核心 CSS（按需组件由 vite-plugin 处理）
 import 'quasar/src/css/index.sass'
@@ -13,6 +14,7 @@ import '../v3/styles/v3-base.css'
 
 export function installQuasar(app: App): void {
   app.use(Quasar, {
+    lang: zhCN,
     plugins: { Notify, Dialog, Loading, Dark },
     config: {
       notify: {

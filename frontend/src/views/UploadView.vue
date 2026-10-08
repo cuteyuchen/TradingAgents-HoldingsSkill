@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Camera, CheckCircle2, ClipboardPaste, FileImage, Play, Plus, RefreshCw, Save } from 'lucide-vue-next'
@@ -82,7 +83,7 @@ function uploadStatusText(status?: string | null) {
     failed: '识别失败',
     identity_resolving: '正在匹配证券身份...',
     needs_model: '缺少识图模型',
-  }[String(status || '').toLowerCase()] || String(status || '未知'))
+  }[String(status || '').toLowerCase()] || businessLabel(status || 'UNKNOWN'))
 }
 
 function emptyParsed(): ParsedHoldings {
@@ -395,7 +396,7 @@ onUnmounted(() => {
 <template>
   <section class="page-stack">
     <div class="page-heading">
-      <div><p class="eyebrow">DAILY HOLDINGS</p><h1>上传与手动分析</h1><p>上传新截图，或直接使用该组合最近一次已确认持仓发起分析。</p></div>
+      <div><p class="eyebrow">每日持仓快照</p><h1>上传与手动分析</h1><p>上传新截图，或直接使用该组合最近一次已确认持仓发起分析。</p></div>
       <n-tag v-if="snapshot" type="success" :bordered="false"><CheckCircle2 :size="14" /> 当前快照 #{{ snapshot.id }}</n-tag>
     </div>
 
@@ -487,7 +488,7 @@ onUnmounted(() => {
         <n-button type="primary" size="large" :loading="analysisStarting" :disabled="snapshotIdentityBlocked || Boolean(job && !terminalJob)" @click="runAnalysis"><template #icon><Play :size="17" /></template>手动开始分析</n-button>
       </div>
       <div v-if="job" class="job-status">
-        <div><strong>{{ stageLabels[job.current_stage] || job.current_stage }}</strong><span>{{ job.progress_percent }}%</span></div>
+        <div><strong>{{ stageLabels[job.current_stage] || businessLabel(job.current_stage) }}</strong><span>{{ job.progress_percent }}%</span></div>
         <n-progress type="line" :percentage="job.progress_percent" :status="job.status === 'failed' ? 'error' : job.status === 'succeeded' ? 'success' : 'default'" :processing="!terminalJob" />
         <n-alert v-if="job.error_message" type="error" :show-icon="false">{{ job.error_message }}</n-alert>
         <n-alert v-if="pollingError" type="warning" :show-icon="false">{{ pollingError }} 页面会继续尝试恢复。</n-alert>

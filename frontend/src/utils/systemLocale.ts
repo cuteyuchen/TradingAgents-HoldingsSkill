@@ -1,10 +1,10 @@
 /** Chinese presentation only; API status and readiness decisions remain intact. */
-const statuses: Record<string, string> = {
+export const statuses: Record<string, string> = {
   OK: '正常', READY: '已就绪', NOT_READY: '未就绪', READY_WITH_WARNINGS: '已就绪，有提醒',
   BLOCKED: '受阻', DEGRADED: '功能受限', CURRENT: '已更新', BEHIND: '待升级',
   AHEAD: '版本超前', BROKEN: '异常', UNKNOWN: '未知', ACTIVE: '启用中',
   PASS: '通过', WARNING: '需关注', FAILED: '失败', ERROR: '错误', FULL: '完整',
-  PARTIAL: '部分完成', DATA_GAP: '数据缺失', LEAKAGE_BLOCKED: '时间信息泄漏，已阻止',
+  PARTIAL: '部分完成', DATA_GAP: '数据不足', LEAKAGE_BLOCKED: '时间信息泄漏，已阻止',
   PENDING: '待处理', RUNNING: '运行中', PAUSED: '已暂停', DISABLED: '已停用',
   ENABLED: '已启用', COMPLETED: '已完成', DONE: '已完成', QUEUED: '排队中',
   CANCELLED: '已取消', STOPPED: '已停止', VALID: '有效', MISSING: '缺失',
@@ -12,6 +12,46 @@ const statuses: Record<string, string> = {
   NOT_CONFIGURED: '未配置', NOT_INSTALLED: '未安装', UNAVAILABLE: '不可用',
   VERIFIED: '已校验', MANUAL: '手动', DAILY: '每日', WEEKLY: '每周', PRE_UPGRADE: '升级前',
   SCHEDULED: '自动计划', PRE_RESTORE_SAFETY: '恢复前保护备份', RESTORED: '已恢复', NOT_RECENTLY_CHECKED: '最近未检查',
+  SUCCESS: '成功', SUCCEEDED: '成功', FAIL: '失败', PASSED: '通过', EXPIRED: '已过期',
+  HOLD: '持有', HOLD_ONLY: '仅持有', BUY: '买入', SELL: '卖出', ACTION: '需要调整', ACTIONABLE: '建议调整',
+  NO_ACTION: '无需操作', WAITING: '等待条件', FILLED: '已成交', VOIDED: '已撤销', VETO: '未批准',
+  DRAFT: '草稿', REVIEW: '待审核', PENDING_REVIEW: '待核对', CONFIRMED: '已确认',
+  APPROVED: '已批准', REJECTED: '已拒绝', SUPERSEDED: '已被替代', CLOSED: '已关闭',
+  OPEN: '待回应', ADDRESSED: '已回应', RESOLVED: '已定论', UNRESOLVED: '未解决', ACCEPTED: '已采纳',
+  AMBIGUOUS: '存在歧义', INVALID: '无效', INVALIDATED: '已失效', INCOMPLETE: '未完成',
+  AVAILABLE: '可用', UNSUPPORTED: '不支持', EMPTY: '暂无数据', PARSING: '识别中', PARSED: '已识别',
+  WATCH: '持续观察', WATCHLIST: '持续观察', WATCH_ONLY: '仅观察', OBSERVING: '持续观察',
+  GATE_BLOCKED: '门禁受阻', DECISION_BLOCKED: '决策受阻', NO_PORTFOLIO: '未选组合',
+  INSUFFICIENT: '不足', INSUFFICIENT_DATA: '数据不足', INSUFFICIENT_EVIDENCE: '证据不足',
+  INSUFFICIENT_LIVE_EVIDENCE: '实盘证据不足', DIAGNOSTIC_ONLY: '仅供诊断',
+  FULL_PIT_EQUIVALENT: '完整历史时点重算', PARTIAL_PIT_RECOMPUTE: '部分历史输入缺失，仅供研究',
+  KEEP_CURRENT: '保持当前参数', CONSIDER_CHANGE: '建议评审变更', REJECT_CHANGE: '不建议变更',
+  ALIGNED: '已对齐', NO_MATCH: '未匹配', MATCHED: '已匹配', DUPLICATE: '重复记录',
+  ELIGIBLE: '符合条件', INELIGIBLE: '不符合条件', LIVE: '实时', HISTORICAL: '历史',
+  LIVE_ELIGIBLE: '符合实盘验证条件', LIVE_INELIGIBLE: '不符合实盘验证条件',
+  CAUTION: '谨慎', CLEAN: '未发现泄露', NO_LEAKAGE: '未发现泄露',
+  CANCELING: '取消中', CANCELLING: '取消中', CANCELED: '已取消', RETRYING: '重试中',
+  NOT_STARTED: '未开始', NOT_APPLICABLE: '不适用', SKIPPED: '已跳过', TIMED_OUT: '已超时',
+  NOT_PROVEN: '尚未证明', UNPROVEN: '尚未证明', PROVEN: '已证明',
+  UNVERIFIED: '待校验', UNCONFIRMED: '未确认', ROLLED_BACK: '已回滚', ACTIVATED: '已激活',
+  IDLE: '空闲', BUSY: '忙碌', CREATED: '已创建', DETECTED: '已检测', ANALYZING: '分析中',
+  DISPATCHING: '分发中', CLAIMED: '已领取', RECLAIMED: '已重新领取', FAILURE: '失败',
+  SENDING: '发送中', SENT: '已发送', LINKED: '已关联', RECHECKED: '已复核', FROZEN: '已冻结',
+  REUSED: '已复用', DEDUPED: '已去重', MISSED: '已错过', NOT_SCHEDULED: '未安排',
+  NOT_AVAILABLE: '不可用', NOT_MODELED: '未建模', REVIEW_ONLY: '仅供审核',
+  WAITING_DATA: '等待数据', BLOCKED_FOR_ACTION: '行动受阻', INSUFFICIENT_SAMPLE: '样本不足',
+  PARTIALLY_ACCEPTED: '部分采纳', PIT_INPUTS_READY: '历史时点输入已齐备',
+  ROBUST_PLATEAU: '稳健参数区间', CIRCUIT_OPEN: '数据源暂时熔断', PROVIDER_DISABLED: '数据源已停用',
+  FUTURE_QUOTE_AVAILABLE_UNFILLED: '后续行情已到达，尚未成交', NO_SHADOW_FILL: '尚无模拟成交',
+  SHADOW_ACCOUNT_DATA_GAP: '模拟账户数据不足', NON_EXECUTABLE_TARGET: '目标暂不可执行',
+  FRESH: '最新', UPLOADED: '已上传', VISION_PARSING: '识别中', IDENTITY_RESOLVING: '正在匹配证券身份',
+  WAITING_CONFIRMATION: '待人工确认', NEEDS_MODEL: '缺少识图模型',
+  A: 'A级', B: 'B级', C: 'C级', D: 'D级', F: 'F级',
+  COMPLETE: '完整', TRACEABLE: '可追溯', EVALUATED: '已评估', DESCRIPTIVE: '描述性统计',
+  CONDITION_PENDING: '等待条件', CONDITION_UNOBSERVED: '尚未观察到条件', NOT_TRIGGERED: '条件未触发',
+  TRIGGERED: '条件已触发', RECORDED_ADVICE: '已记录建议', EXECUTED: '已执行',
+  PARTIALLY_EXECUTED: '部分执行', EXECUTION_MISMATCH: '执行不一致', PROPOSED: '待验证', REFERENCE: '可参考',
+  ADD: '加仓', REDUCE: '减仓', EXIT: '清仓', CONDITIONAL_ADD: '条件加仓', CONDITIONAL_REDUCE: '条件减仓',
 }
 
 export const systemCheckLabels: Record<string, string> = {
@@ -63,7 +103,8 @@ const reasons: Record<string, string> = {
 
 export function systemStatusLabel(value?: string | null): string {
   if (!value) return '—'
-  return statuses[value.toUpperCase()] || (/\p{Script=Han}/u.test(value) ? value : '待确认')
+  const normalized = value.trim().replaceAll('-', '_').toUpperCase()
+  return statuses[normalized] || (/\p{Script=Han}/u.test(value) ? value : '待确认')
 }
 
 export function systemReasonLabel(value?: string | null): string {

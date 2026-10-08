@@ -275,7 +275,7 @@ export function resolveRowJudgment(input: {
     } else if (String(conclusion).toUpperCase() === 'NO_ACTION') {
       strategyStatus = 'NO_ACTION'
       status = 'HOLD'
-      secondary = '组合级 NO_ACTION'
+      secondary = '组合级无需操作 (NO_ACTION)'
     } else {
       status = 'DATA_INSUFFICIENT'
       secondary = '该持仓无对应系统判断'
@@ -572,7 +572,7 @@ function buildDecisionBar(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3
   const kind = String(conclusion).toUpperCase() === 'NO_ACTION' ? 'NO_ACTION' : 'ACTIONABLE'
   return {
     kind,
-    title: kind === 'NO_ACTION' ? '组合级 NO_ACTION' : '系统建议行动',
+    title: kind === 'NO_ACTION' ? '组合级无需操作 (NO_ACTION)' : '系统建议行动',
     subtitle: kind === 'NO_ACTION' ? '当前无需操作，持仓可继续观察' : `需处理 ${actionableCount} · 条件观察 ${conditionalCount}`,
     conclusion: strOrNull(conclusion),
     quality,

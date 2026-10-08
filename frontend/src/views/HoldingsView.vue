@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
+import { statusLabel, actionLabel } from '../utils/ui'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Camera, ChevronRight, CircleAlert, ClipboardList, RefreshCw } from 'lucide-vue-next'
@@ -202,7 +204,7 @@ onMounted(async () => { await load(); mounted = true })
     <template v-else>
       <div class="as-of-strip"><span>截至最近确认快照</span><strong>{{ snapshot?.snapshot_time ? new Date(snapshot.snapshot_time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '尚未确认' }}</strong><n-tag v-if="snapshot?.status === 'confirmed'" size="small" :bordered="false">已确认</n-tag><FreshnessLabel :freshness="freshness" /><span class="muted">{{ selectedPortfolio?.name }}</span></div>
       <n-alert v-if="ledgerEntryCount" type="info" :show-icon="false">当前账户已叠加 {{ ledgerEntryCount }} 笔已确认成交与资金事实：可用资金 {{ formatCurrency(cash, 2) }}<template v-if="pendingSellProceeds > 0">，待交收卖出资金 {{ formatCurrency(pendingSellProceeds, 2) }}</template>。分析将按更新后的持仓计算。</n-alert>
-      <n-alert v-if="snapshotIdentityIncomplete" type="warning" :show-icon="false">证券身份不完整。该快照保留审计历史，但不会作为新的 Analysis 默认输入，请重新导入并修正。</n-alert>
+      <n-alert v-if="snapshotIdentityIncomplete" type="warning" :show-icon="false">证券身份不完整。该快照保留审计历史，但不会作为新的 分析默认输入，请重新导入并修正。</n-alert>
 
       <SectionCard title="资产摘要" description="只显示已确认快照中的权威数据。">
         <div class="metric-grid four"><MetricTile label="总资产" :value="formatCurrency(totalAssets, 2)" /><MetricTile label="持仓市值" :value="formatCurrency(marketValue, 2)" /><MetricTile label="可用现金" :value="formatCurrency(cash, 2)" /><MetricTile label="仓位" :value="formatPercent(exposure)" tone="risk" /></div>
@@ -215,7 +217,7 @@ onMounted(async () => { await load(); mounted = true })
         </EmptyState>
       </SectionCard>
 
-      <div class="holdings-footnote"><CircleAlert :size="15" aria-hidden="true" /><span>成本与快照收益来自最近确认快照，数量与现金叠加已确认成交；实时价格、今日涨跌和贡献来自 Fuyao 当前行情，缺失报价不会按 0 计算。{{ contribution?.quality_status && contribution.quality_status !== 'VALID' ? `当前实时覆盖 ${Math.round((contribution.coverage || 0) * 100)}%，状态为${contribution.quality_status === 'MISSING' ? '缺失' : '降级'}。` : '' }}</span></div>
+      <div class="holdings-footnote"><CircleAlert :size="15" aria-hidden="true" /><span>成本与快照收益来自最近确认快照，数量与现金叠加已确认成交；实时价格、今日涨跌和贡献来自 同花顺金融数据 当前行情，缺失报价不会按 0 计算。{{ contribution?.quality_status && contribution.quality_status !== 'VALID' ? `当前实时覆盖 ${Math.round((contribution.coverage || 0) * 100)}%，状态为${contribution.quality_status === 'MISSING' ? '缺失' : '降级'}。` : '' }}</span></div>
     </template>
 
     <HoldingsUpdateDrawer :show="updateOpen" :portfolio-id="selectedPortfolioId" @update:show="closeUpdate" @confirmed="load" />
@@ -227,8 +229,8 @@ onMounted(async () => { await load(); mounted = true })
           <div class="detail-symbol"><strong>{{ selectedHolding.name || selectedHolding.code }}</strong><code>{{ selectedHolding.code || '—' }}</code></div>
           <section><h3>当前持仓</h3><dl class="detail-grid"><div><dt>数量</dt><dd>{{ formatNumber(selectedHolding.qty, 0) }}</dd></div><div><dt>成本</dt><dd>{{ formatNumber(selectedHolding.cost, 3) }}</dd></div><div><dt>市值</dt><dd>{{ formatCurrency(selectedHolding.market_value, 2) }}</dd></div><div><dt>仓位</dt><dd>{{ formatPercent(selectedHolding.weight) }}</dd></div><div><dt>收益</dt><dd :class="pctClass(selectedHolding.pnl)">{{ formatPercent(selectedHolding.pnl) }}</dd></div></dl></section>
           <section><h3>最新建议</h3><div class="advice-box"><strong>{{ adviceFor(selectedHolding).label }}</strong><p>{{ adviceFor(selectedHolding).detail }}</p></div></section>
-          <section><h3>实时标记</h3><div v-if="securityContextLoading" class="muted">正在读取 Fuyao 当前行情与证据…</div><template v-else><dl class="detail-grid"><div><dt>现价</dt><dd>{{ formatNumber(liveQuoteFor(selectedHolding)?.current_price, 3) }}</dd></div><div><dt>今日涨跌</dt><dd :class="sourcePercentClass(liveQuoteFor(selectedHolding)?.today_change_pct)">{{ sourcePercent(liveQuoteFor(selectedHolding)?.today_change_pct) }}</dd></div><div><dt>今日贡献</dt><dd :class="sourcePercentClass(liveQuoteFor(selectedHolding)?.contribution_pct)">{{ sourcePercent(liveQuoteFor(selectedHolding)?.contribution_pct) }}</dd></div><div><dt>报价质量</dt><dd>{{ quoteQualityLabel(liveQuoteFor(selectedHolding)?.quote_quality) }}</dd></div></dl></template></section>
-          <section v-if="securityContext?.fundamental_summary?.status === 'AVAILABLE'"><h3>基本面与估值</h3><dl class="detail-grid"><div><dt>成长</dt><dd>{{ securityContext.fundamental_summary.growth || unavailableText }}</dd></div><div><dt>盈利</dt><dd>{{ securityContext.fundamental_summary.profitability || unavailableText }}</dd></div><div><dt>现金流</dt><dd>{{ securityContext.fundamental_summary.cash_flow || unavailableText }}</dd></div><div><dt>估值</dt><dd>{{ securityContext.fundamental_summary.valuation || unavailableText }}</dd></div></dl><p class="muted">当前分析允许；历史 PIT：{{ securityContext.historical_pit_status || '未证明' }}。</p></section>
+          <section><h3>实时标记</h3><div v-if="securityContextLoading" class="muted">正在读取 同花顺金融数据 当前行情与证据…</div><template v-else><dl class="detail-grid"><div><dt>现价</dt><dd>{{ formatNumber(liveQuoteFor(selectedHolding)?.current_price, 3) }}</dd></div><div><dt>今日涨跌</dt><dd :class="sourcePercentClass(liveQuoteFor(selectedHolding)?.today_change_pct)">{{ sourcePercent(liveQuoteFor(selectedHolding)?.today_change_pct) }}</dd></div><div><dt>今日贡献</dt><dd :class="sourcePercentClass(liveQuoteFor(selectedHolding)?.contribution_pct)">{{ sourcePercent(liveQuoteFor(selectedHolding)?.contribution_pct) }}</dd></div><div><dt>报价质量</dt><dd>{{ quoteQualityLabel(liveQuoteFor(selectedHolding)?.quote_quality) }}</dd></div></dl></template></section>
+          <section v-if="securityContext?.fundamental_summary?.status === 'AVAILABLE'"><h3>基本面与估值</h3><dl class="detail-grid"><div><dt>成长</dt><dd>{{ securityContext.fundamental_summary.growth || unavailableText }}</dd></div><div><dt>盈利</dt><dd>{{ securityContext.fundamental_summary.profitability || unavailableText }}</dd></div><div><dt>现金流</dt><dd>{{ securityContext.fundamental_summary.cash_flow || unavailableText }}</dd></div><div><dt>估值</dt><dd>{{ securityContext.fundamental_summary.valuation || unavailableText }}</dd></div></dl><p class="muted">当前分析允许；历史时点数据：{{ statusLabel(securityContext.historical_pit_status) }}。</p></section>
           <section><h3>最近分析</h3><p class="muted">分析结论会根据当前组合和市场时点更新。</p><n-button secondary :disabled="snapshotIdentityIncomplete" @click="openAnalysis">查看今日分析</n-button></section>
           <TechnicalDetails title="高级持仓数据"><pre>{{ JSON.stringify(selectedHolding, null, 2) }}</pre></TechnicalDetails>
         </div>

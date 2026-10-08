@@ -209,7 +209,7 @@ function onRowClick(row: V3HoldingRowVM): void {
               <div class="trigger">
                 <span>{{ row.judgment.keyTrigger || '—' }}</span>
                 <small v-if="row.judgment.hardCap !== null" class="trigger__cap">
-                  权重 {{ formatRatioPercent(row.weight) }} / Hard Cap {{ formatRatioPercent(row.judgment.hardCap) }}
+                  权重 {{ formatRatioPercent(row.weight) }} ／仓位硬上限 {{ formatRatioPercent(row.judgment.hardCap) }}
                   <template v-if="row.judgment.headroom !== null"> / 剩余 {{ formatRatioPercent(row.judgment.headroom) }}</template>
                 </small>
               </div>

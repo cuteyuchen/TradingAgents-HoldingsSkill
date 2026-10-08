@@ -18,7 +18,7 @@ const stockRows = computed(() => {
     { label: '行业', value: m.industry || DASH },
     { label: '概念', value: m.concepts?.length ? m.concepts.join('、') : DASH },
     { label: '上市日期', value: formatDate(m.list_date) },
-    { label: 'ST', value: m.is_st ? '是' : '否' },
+    { label: '风险警示', value: m.is_st ? '是' : '否' },
     { label: '板块', value: m.board || DASH },
     { label: '每手股数', value: m.lot_size == null ? DASH : String(m.lot_size) },
     { label: '涨跌停规则', value: m.price_limit_rule || DASH },

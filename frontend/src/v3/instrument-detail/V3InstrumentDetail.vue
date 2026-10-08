@@ -97,7 +97,7 @@ function onTabChange(name: string | number) {
     <V3ErrorState
       v-else-if="pageNotFound"
       title="标的不存在或主数据未收录"
-      :description="pageError?.description || '请确认证券代码，SecurityMaster 中没有该标的时不会自动创建。'"
+      :description="pageError?.description || '请确认证券代码，该标的尚未收录在证券主数据中。'"
       data-testid="detail-not-found"
       @retry="refreshAll"
     />
@@ -168,7 +168,7 @@ function onTabChange(name: string | number) {
             <V3EmptyState
               v-else
               title="该标的不支持K线"
-              description="capabilities.bars=false"
+              description="数据源未提供该标的的K线数据。"
               data-testid="kline-unsupported"
             />
           </V3Section>
@@ -209,7 +209,7 @@ function onTabChange(name: string | number) {
         <div v-else-if="activeTab === 'analysis'" data-testid="tab-panel-analysis">
           <V3EmptyState
             title="当前版本暂无统一结构化标的分析接口"
-            description="将在结构化分析接口接通后提供；不会从 Markdown 报告或 Agent hidden reasoning 猜结论。"
+            description="接通结构化分析接口后即可查看标的分析。"
             data-testid="analysis-unavailable"
           />
         </div>
@@ -217,7 +217,7 @@ function onTabChange(name: string | number) {
         <div v-else-if="activeTab === 'news'" data-testid="tab-panel-news">
           <V3EmptyState
             title="当前版本暂无统一标的新闻数据接口"
-            description="将仅消费按 instrument code 查询的结构化新闻 contract，不前端直连外部源。"
+            description="接通结构化新闻接口后即可按证券代码查询。"
             data-testid="news-unavailable"
           />
         </div>
@@ -232,7 +232,7 @@ function onTabChange(name: string | number) {
       </V3Tabs>
 
       <p class="inst-detail__footer-meta v3-number" data-testid="detail-footer-meta">
-        canonical={{ canonicalCode || DASH }} · basis={{ formatDataBasis(headerDataBasis) }} · quality={{ formatQuality(headerQuality) }}
+        标准代码：{{ canonicalCode || DASH }} · 价格口径：{{ formatDataBasis(headerDataBasis) }} · 质量：{{ formatQuality(headerQuality) }}
       </p>
     </template>
   </div>

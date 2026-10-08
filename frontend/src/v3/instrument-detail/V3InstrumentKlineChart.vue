@@ -402,7 +402,7 @@ onBeforeUnmount(() => {
           data-testid="kline-indicator-macd"
           :aria-pressed="indicatorMode === 'macd'"
           @click="indicatorMode = 'macd'"
-        >MACD</button>
+        >指数平滑异同均线 (MACD)</button>
         <button
           type="button"
           class="kline__chip"
@@ -410,7 +410,7 @@ onBeforeUnmount(() => {
           data-testid="kline-indicator-rsi"
           :aria-pressed="indicatorMode === 'rsi'"
           @click="indicatorMode = 'rsi'"
-        >RSI14</button>
+        >14日相对强弱指标 (RSI)</button>
       </div>
     </div>
 

@@ -16,7 +16,7 @@ import SectionCard from '../components/SectionCard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import TechnicalDetails from '../components/TechnicalDetails.vue'
 import { usePortfolioContext } from '../composables/portfolio'
-import { formatCurrency, formatNumber, formatPercent, fmtDateTime } from '../utils/ui'
+import { formatCurrency, formatNumber, formatPercent, fmtDateTime, ratingLabel, localizedValue } from '../utils/ui'
 
 type HistoryTab = 'performance' | 'research'
 
@@ -188,7 +188,7 @@ onMounted(async () => { await load(); mounted = true })
               </div>
               <div class="history-note"><ShieldCheck :size="16" /><span>{{ sampleInsufficient ? '样本不足，暂不能判断策略效果。' : '结果来自已记录的 Shadow snapshot，不计算后端未提供的胜率。' }}</span><small>最近更新：{{ date(performance?.snapshots?.[0]?.trade_date) }}</small></div>
               <div v-if="chartLines.equity" class="history-chart panel-card">
-                <div class="chart-heading"><div><h3>模拟净值与基准</h3><p>仅使用真实 daily snapshot；缺少时序数据时不绘制图表。起始值归一为 100。</p></div><span>Shadow Equity vs Benchmark</span></div>
+                <div class="chart-heading"><div><h3>模拟净值与基准</h3><p>仅使用真实 每日快照；缺少时序数据时不绘制图表。起始值归一为 100。</p></div><span>模拟净值对比基准曲线</span></div>
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="模拟净值与基准曲线">
                   <line x1="0" y1="96" x2="100" y2="96" />
                   <polyline :points="chartLines.equity" fill="none" stroke="var(--primary)" stroke-width="1.8" vector-effect="non-scaling-stroke" />
@@ -204,7 +204,7 @@ onMounted(async () => { await load(); mounted = true })
             <div v-if="runs.length" class="history-run-list">
               <button v-for="run in runs" :key="run.id" class="history-run-row" @click="openRun(run)">
                 <div><strong>{{ run.summary || `分析记录 #${run.id}` }}</strong><small>#{{ run.id }} · {{ date(run.created_at) }}</small></div>
-                <div class="history-run-meta"><StatusBadge :status="run.data_quality_grade || 'UNKNOWN'" :label="`质量 ${run.data_quality_grade || '—'}`" /><span>{{ run.final_rating || '结论待查看' }}</span><ArrowRight :size="16" /></div>
+                <div class="history-run-meta"><StatusBadge :status="run.data_quality_grade || 'UNKNOWN'" :label="`质量 ${localizedValue(run.data_quality_grade)}`" /><span>{{ run.final_rating ? ratingLabel(run.final_rating) : '结论待查看' }}</span><ArrowRight :size="16" /></div>
               </button>
             </div>
             <EmptyState v-else title="还没有已保存的分析" description="完成一次组合分析后，这里会留下可回看的结论与证据。">

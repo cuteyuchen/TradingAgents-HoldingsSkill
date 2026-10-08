@@ -33,7 +33,7 @@ async function copyCode() {
     <V3PageHeader
       eyebrow="市场"
       title="标的详情"
-      description="统一身份 / 行情 / 时间语义 / 质量 / capability / provenance"
+      description="统一身份／行情／时间／质量／数据能力／来源记录"
     >
       <template #actions>
         <button type="button" class="page-btn" data-testid="detail-back" @click="goBack">

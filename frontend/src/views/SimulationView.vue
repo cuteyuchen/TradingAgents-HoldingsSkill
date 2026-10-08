@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Activity, ArrowDownToLine, ArrowRight, CalendarDays, CheckCircle2, Clock3, Database, Pause, Play, RefreshCw, RotateCcw, ShieldCheck, Target, WalletCards } from 'lucide-vue-next'
@@ -16,7 +17,7 @@ import SectionCard from '../components/SectionCard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import TechnicalDetails from '../components/TechnicalDetails.vue'
 import { usePortfolioContext } from '../composables/portfolio'
-import { formatCurrency, formatNumber, formatPercent, fmtDateTime, unavailableText } from '../utils/ui'
+import { formatCurrency, formatNumber, formatPercent, fmtDateTime, unavailableText, actionLabel, statusLabel } from '../utils/ui'
 
 const route = useRoute()
 const router = useRouter()
@@ -100,17 +101,20 @@ function actionType(action?: string | null): 'success' | 'warning' | 'error' | '
   return value === 'NO_ACTION' ? 'info' : 'success'
 }
 function actionText(action?: string | null) {
-  const value = String(action || '').toUpperCase()
-  return value === 'NO_ACTION' ? '暂不操作' : value === 'ACTION' ? '需要调整' : value || '—'
+  return actionLabel(action)
 }
 function accountStatusText(status?: string | null) {
-  const value = String(status || '').toUpperCase()
-  return value === 'ACTIVE' ? '运行中' : value === 'PAUSED' ? '已暂停' : value === 'CLOSED' ? '已关闭' : value || '未知'
+  return String(status || '').toUpperCase() === 'ACTIVE' ? '运行中' : statusLabel(status || 'UNKNOWN')
 }
-function basisText(value?: string | null) { return String(value || '').toUpperCase() === 'DAILY_BAR' ? 'DailyBar' : String(value || '').toUpperCase() === 'LIVE_QUOTE' ? 'Live Quote' : value || '—' }
-function validationOutcomeText(item: any) {
+function basisText(value?: string | null) {
+  return businessLabel(value)
+}
+
+function validationOutcomeText(item: ShadowValidation['cohorts'][number]) {
   const buckets = item.outcomes_by_target_horizon || []
-  return buckets.length ? buckets.slice(0, 2).map((bucket: any) => `${bucket.target_type}/${bucket.target_key} ${bucket.horizon_trading_days}D ${percent(bucket.mean_excess_return)}`).join(' · ') : '暂无已完成的目标结果'
+  return buckets.length
+    ? buckets.slice(0, 2).map((bucket) => `${businessLabel(bucket.target_type)}/${bucket.target_key} ${bucket.horizon_trading_days}个交易日 ${percent(bucket.mean_excess_return)}`).join(' · ')
+    : '暂无已完成的目标结果'
 }
 
 async function loadPortfolioData(portfolioId = selectedPortfolioId.value, preferredAccountId = selectedAccountId.value) {
@@ -197,13 +201,13 @@ function toggleAccountStatus() {
 
 function rebaseAccount() {
   if (!account.value || !latestSnapshotId.value || working.value) return
-  dialog.warning({ title: '创建新的模拟 Generation', content: `这会从最近确认快照 #${latestSnapshotId.value} 创建 G${account.value.shadow_generation + 1}，旧历史不会删除。`, positiveText: '确认 Rebase', negativeText: '取消', onPositiveClick: async () => { working.value = true; try { const row = await api.rebaseShadowAccount(account.value!.id, latestSnapshotId.value); message.success(`已切换到模拟 Generation G${row.shadow_generation}`); await loadPortfolioData(selectedPortfolioId.value, row.id) } catch (reason) { message.error((reason as Error).message) } finally { working.value = false } } })
+  dialog.warning({ title: '创建新的模拟账户代次', content: `这会从最近确认快照 #${latestSnapshotId.value} 创建 G${account.value.shadow_generation + 1}，旧历史不会删除。`, positiveText: '确认重置基线', negativeText: '取消', onPositiveClick: async () => { working.value = true; try { const row = await api.rebaseShadowAccount(account.value!.id, latestSnapshotId.value); message.success(`已切换到模拟账户代次 G${row.shadow_generation}`); await loadPortfolioData(selectedPortfolioId.value, row.id) } catch (reason) { message.error((reason as Error).message) } finally { working.value = false } } })
 }
 
 async function alignActual() {
   if (!selectedDecision.value || selectedDecision.value.final_action !== 'ACTION' || working.value) return
   working.value = true
-  try { await api.alignShadowDecision(selectedDecision.value.id); await selectDecision(selectedDecision.value.id); message.success('已按 Trade Ledger 事实刷新对齐结果') } catch (reason) { message.error((reason as Error).message) } finally { working.value = false }
+  try { await api.alignShadowDecision(selectedDecision.value.id); await selectDecision(selectedDecision.value.id); message.success('已按 成交账本 事实刷新对齐结果') } catch (reason) { message.error((reason as Error).message) } finally { working.value = false }
 }
 
 watch(selectedPortfolioId, (value, previous) => { if (mounted && value !== previous) { selectedAccountId.value = null; void router.replace({ name: 'simulation', query: { ...route.query, portfolio: value ? String(value) : undefined, shadow: undefined } }); void loadPortfolioData(value, null) } })
@@ -221,7 +225,7 @@ onMounted(async () => { await load(); mounted = true })
       </template>
     </PageHeader>
 
-    <div class="simulation-banner"><div><span class="tech-badge">SHADOW</span><strong>不会发送真实订单</strong><p>模拟账户独立于真实持仓，只记录 Decision → Execution → Outcome。</p></div><FreshnessLabel :freshness="performance?.status || (account ? 'FRESH' : 'MISSING')" :at="dailySnapshots[0]?.trade_date" /></div>
+    <div class="simulation-banner"><div><span class="tech-badge">模拟跟随 (SHADOW)</span><strong>不会发送真实订单</strong><p>模拟账户独立于真实持仓，只记录 决策 → 执行 → 结果验证。</p></div><FreshnessLabel :freshness="performance?.status || (account ? 'FRESH' : 'MISSING')" :at="dailySnapshots[0]?.trade_date" /></div>
     <ErrorState v-if="loadError" :error="loadError" @retry="load" />
     <LoadingState v-else-if="loading && !account && portfolios.length" message="正在读取模拟跟随数据" />
     <EmptyState v-else-if="!portfolios.length" title="还没有生产组合" description="先导入并确认一份持仓，系统才能从真实快照创建独立的模拟账户。">
@@ -235,31 +239,31 @@ onMounted(async () => { await load(); mounted = true })
 
     <template v-if="account">
       <SectionCard :title="account.name" :description="`${selectedPortfolio?.name || '当前组合'} · G${currentGeneration} · 独立纸面账户`">
-        <template #actions><StatusBadge :status="account.status" :label="accountStatusText(account.status)" /><code class="paper-badge">paper-only</code></template>
+        <template #actions><StatusBadge :status="account.status" :label="accountStatusText(account.status)" /><code class="paper-badge">仅模拟记账 (Paper-only)</code></template>
         <div class="metric-grid six"><MetricTile label="模拟资产" :value="money(performance?.current_equity)" /><MetricTile label="累计收益" :value="percent(performance?.cumulative_return)" tone="positive" /><MetricTile label="同期基准" :value="percent(performance?.benchmark_return)" /><MetricTile label="超额收益" :value="percent(performance?.excess_return)" tone="positive" /><MetricTile label="最大回撤" :value="percent(performance?.max_drawdown)" tone="risk" /><MetricTile label="样本天数" :value="sampleDaysDisplay" /></div>
-        <div class="performance-note"><span>当前现金 {{ money(performance?.current_cash ?? account.current_cash) }}</span><span>成交 {{ fills.length }} 笔</span><span>性能质量 {{ performance?.performance_quality || '—' }}</span></div>
+        <div class="performance-note"><span>当前现金 {{ money(performance?.current_cash ?? account.current_cash) }}</span><span>成交 {{ fills.length }} 笔</span><span>性能质量 {{ statusLabel(performance?.performance_quality) }}</span></div>
       </SectionCard>
 
       <div v-if="sampleInsufficient" class="sample-warning"><ShieldCheck :size="17" /><span>样本不足，暂不能判断策略效果。</span><small>当前样本：{{ sampleDaysDisplay }} 个交易日</small></div>
-      <div v-if="(performance?.snapshots?.length || 0) > 1 && chartLines.equity" class="chart-card panel-card"><div class="chart-header"><div><h2>模拟净值</h2><p>只使用真实 Shadow daily snapshots；没有时序数据时不绘制假图。起始值归一为 100。</p></div><span>Shadow Equity vs Benchmark</span></div><svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="模拟净值与基准曲线"><line x1="0" y1="96" x2="100" y2="96" /><polyline :points="chartLines.equity" fill="none" stroke="currentColor" stroke-width="1.8" vector-effect="non-scaling-stroke" /><polyline v-if="chartLines.benchmark" :points="chartLines.benchmark" fill="none" stroke="var(--text-muted)" stroke-width="1.2" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" /></svg><div class="chart-legend"><span><i class="legend-equity" />模拟净值</span><span v-if="chartLines.benchmark"><i class="legend-benchmark" />基准</span></div></div>
+      <div v-if="(performance?.snapshots?.length || 0) > 1 && chartLines.equity" class="chart-card panel-card"><div class="chart-header"><div><h2>模拟净值</h2><p>只使用真实 每日模拟快照；没有时序数据时不绘制假图。起始值归一为 100。</p></div><span>模拟净值对比基准曲线</span></div><svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="模拟净值与基准曲线"><line x1="0" y1="96" x2="100" y2="96" /><polyline :points="chartLines.equity" fill="none" stroke="currentColor" stroke-width="1.8" vector-effect="non-scaling-stroke" /><polyline v-if="chartLines.benchmark" :points="chartLines.benchmark" fill="none" stroke="var(--text-muted)" stroke-width="1.2" stroke-dasharray="3 2" vector-effect="non-scaling-stroke" /></svg><div class="chart-legend"><span><i class="legend-equity" />模拟净值</span><span v-if="chartLines.benchmark"><i class="legend-benchmark" />基准</span></div></div>
 
       <div class="simulation-grid">
-        <SectionCard title="最近记录" description="Decision → Execution → Outcome" class="timeline-panel">
-          <div v-if="selectedDecision" class="timeline-focus"><span>{{ selectedDecision.trade_date }} · {{ shortTime(selectedDecision.decision_finalized_at) }}</span><strong>{{ actionText(selectedDecision.final_action) }}</strong><p v-if="selectedDecision.reason_codes?.length">{{ selectedDecision.reason_codes.join('、') }}</p><div class="timeline-track"><div class="timeline-step done"><span>1</span><strong>Decision</strong><small>{{ selectedDecision.quality_status }}</small></div><div class="timeline-line" /><div class="timeline-step" :class="{ done: selectedDecision.execution?.intents?.length }"><span>2</span><strong>Execution</strong><small>{{ selectedDecision.execution?.intents?.length ? '已生成 Intent' : '未产生模拟订单' }}</small></div><div class="timeline-line" /><div class="timeline-step" :class="{ done: selectedDecision.outcomes?.length }"><span>3</span><strong>Outcome</strong><small>{{ selectedDecision.outcomes?.length ? '已有结果' : '尚未到期' }}</small></div></div><n-alert v-if="hasConditionalAdd" type="warning" :show-icon="false">条件加仓仅记录建议，V1 暂不模拟条件触发成交。</n-alert></div>
+        <SectionCard title="最近记录" description="决策 → 执行 → 结果验证" class="timeline-panel">
+          <div v-if="selectedDecision" class="timeline-focus"><span>{{ selectedDecision.trade_date }} · {{ shortTime(selectedDecision.decision_finalized_at) }}</span><strong>{{ actionText(selectedDecision.final_action) }}</strong><p v-if="selectedDecision.reason_codes?.length">{{ selectedDecision.reason_codes.join('、') }}</p><div class="timeline-track"><div class="timeline-step done"><span>1</span><strong>决策生成 (Decision)</strong><small>{{ statusLabel(selectedDecision.quality_status) }}</small></div><div class="timeline-line" /><div class="timeline-step" :class="{ done: selectedDecision.execution?.intents?.length }"><span>2</span><strong>模拟执行 (Execution)</strong><small>{{ selectedDecision.execution?.intents?.length ? '已生成报单意图' : '未产生模拟订单' }}</small></div><div class="timeline-line" /><div class="timeline-step" :class="{ done: selectedDecision.outcomes?.length }"><span>3</span><strong>结果验证 (Outcome)</strong><small>{{ selectedDecision.outcomes?.length ? '已有结果' : '尚未到期' }}</small></div></div><n-alert v-if="hasConditionalAdd" type="warning" :show-icon="false">条件加仓仅记录建议，V1 暂不模拟条件触发成交。</n-alert></div>
           <EmptyState v-else title="还没有模拟记录" description="下一次完成的组合决策会出现在这里。" />
-          <div v-if="decisions.length" class="decision-list"><div class="subheading"><Target :size="14" />Decision</div><button v-for="item in filteredDecisions.slice(0, 8)" :key="item.id" class="decision-row" :class="{ selected: selectedDecision?.id === item.id }" @click="selectDecision(item.id)"><span><strong>{{ item.trade_date }}</strong><small>{{ item.decision_checkpoint || item.decision_kind }} · {{ shortTime(item.decision_finalized_at) }}</small></span><span><StatusBadge :status="item.final_action" :label="item.final_action" /><small>{{ item.quality_status }}</small></span></button></div>
+          <div v-if="decisions.length" class="decision-list"><div class="subheading"><Target :size="14" />决策生成 (Decision)</div><button v-for="item in filteredDecisions.slice(0, 8)" :key="item.id" class="decision-row" :class="{ selected: selectedDecision?.id === item.id }" @click="selectDecision(item.id)"><span><strong>{{ item.trade_date }}</strong><small>{{ businessLabel(item.decision_checkpoint || item.decision_kind) }} · {{ shortTime(item.decision_finalized_at) }}</small></span><span><StatusBadge :status="item.final_action" :label="actionLabel(item.final_action)" /><small>{{ statusLabel(item.quality_status) }}</small></span></button></div>
         </SectionCard>
 
-        <SectionCard title="执行与结果" description="Intent、Fill、Outcome 分开记录。" class="execution-panel">
+        <SectionCard title="执行与结果" description="报单意图、模拟成交和结果验证分开记录。" class="execution-panel">
           <div class="execution-summary"><div><span>待处理</span><strong>{{ pendingOrders.length }}</strong></div><div><span>已成交</span><strong>{{ filledOrders.length }}</strong></div><div><span>未成交/阻断</span><strong>{{ blockedOrders.length }}</strong></div></div>
-          <div class="subheading"><Clock3 :size="14" />Execution</div><div v-if="orders.length" class="fact-list"><div v-for="item in orders.slice(0, 7)" :key="item.id" class="fact-row"><div><strong>{{ item.side }} {{ item.code }}</strong><small>最早 {{ fmtDateTime(item.earliest_executable_at) }}</small></div><StatusBadge :status="item.status" :label="item.status" /></div></div><p v-else class="empty-line">没有模拟订单 Intent</p>
-          <div class="subheading"><CheckCircle2 :size="14" />Outcome / Fill</div><div v-if="fills.length" class="fact-list"><div v-for="item in fills.slice(0, 5)" :key="item.id" class="fact-row"><div><strong>{{ item.side }} {{ item.code }} · {{ number(item.quantity, 0) }} 股</strong><small>{{ fmtDateTime(item.fill_at) }} · {{ basisText(item.price_basis) }}</small></div><strong>{{ money(item.price) }}</strong></div></div><p v-else class="empty-line">还没有 Paper Fill</p>
+          <div class="subheading"><Clock3 :size="14" />模拟执行 (Execution)</div><div v-if="orders.length" class="fact-list"><div v-for="item in orders.slice(0, 7)" :key="item.id" class="fact-row"><div><strong>{{ actionLabel(item.side) }} {{ item.code }}</strong><small>最早 {{ fmtDateTime(item.earliest_executable_at) }}</small></div><StatusBadge :status="item.status" :label="statusLabel(item.status)" /></div></div><p v-else class="empty-line">没有模拟订单 报单意图</p>
+          <div class="subheading"><CheckCircle2 :size="14" />结果验证／模拟成交</div><div v-if="fills.length" class="fact-list"><div v-for="item in fills.slice(0, 5)" :key="item.id" class="fact-row"><div><strong>{{ actionLabel(item.side) }} {{ item.code }} · {{ number(item.quantity, 0) }} 股</strong><small>{{ fmtDateTime(item.fill_at) }} · {{ basisText(item.price_basis) }}</small></div><strong>{{ money(item.price) }}</strong></div></div><p v-else class="empty-line">尚无模拟成交记录</p>
         </SectionCard>
       </div>
 
       <div class="simulation-grid">
-        <SectionCard title="证据状态" :description="validationText"><div class="metric-grid four"><MetricTile label="Live sample days" :value="validation?.live_sample_days ?? '—'" /><MetricTile label="Decision count" :value="validation?.decision_count ?? '—'" /><MetricTile label="Action rate" :value="validation?.decision_count ? percent(validation.cohorts.reduce((sum, item) => sum + item.action_count, 0) / validation.decision_count) : '—'" /><MetricTile label="Backtest 混入" value="否" /></div><div v-if="validation?.cohorts?.length" class="cohort-list"><div v-for="item in validation.cohorts.slice(0, 6)" :key="JSON.stringify(item.cohort)" class="cohort-row"><div><strong>{{ item.cohort.parameter_set_hash ? String(item.cohort.parameter_set_hash).slice(0, 12) : 'UNKNOWN' }}</strong><small>G{{ item.cohort.shadow_generation || '—' }} · {{ item.sample_days }} days · N={{ item.decision_count }}</small></div><div><StatusBadge :status="item.evidence_status" :label="item.evidence_status" /><small>{{ validationOutcomeText(item) }}</small></div></div></div><p v-else class="empty-line">尚未积累足够的 Live Evidence，继续观察即可。</p></SectionCard>
-        <SectionCard title="Daily Shadow Snapshot" :description="`${dailySnapshots?.length || 0} 天记录`"><div v-if="dailySnapshots.length" class="daily-list"><div v-for="item in dailySnapshots.slice(0, 7)" :key="item.id" class="daily-row"><div><strong>{{ item.trade_date }}</strong><small>{{ item.position_count }} 个持仓 · {{ item.price_basis || '价格基础未知' }}</small></div><div><strong>{{ money(item.total_equity) }}</strong><span>{{ percent(item.daily_return) }}</span></div></div></div><p v-else class="empty-line">尚未有收盘估值快照。</p><TechnicalDetails title="模拟账户技术详情"><pre>{{ JSON.stringify({ account, performance }, null, 2) }}</pre></TechnicalDetails></SectionCard>
+        <SectionCard title="证据状态" :description="validationText"><div class="metric-grid four"><MetricTile label="实盘样本天数" :value="validation?.live_sample_days ?? '—'" /><MetricTile label="决策总数" :value="validation?.decision_count ?? '—'" /><MetricTile label="行动建议率" :value="validation?.decision_count ? percent(validation.cohorts.reduce((sum, item) => sum + item.action_count, 0) / validation.decision_count) : '—'" /><MetricTile label="混入回测数据" value="否" /></div><div v-if="validation?.cohorts?.length" class="cohort-list"><div v-for="item in validation.cohorts.slice(0, 6)" :key="JSON.stringify(item.cohort)" class="cohort-row"><div><strong>{{ item.cohort.parameter_set_hash ? String(item.cohort.parameter_set_hash).slice(0, 12) : '未知' }}</strong><small>G{{ item.cohort.shadow_generation || '—' }} · {{ item.sample_days }} 天 · N={{ item.decision_count }}</small></div><div><StatusBadge :status="item.evidence_status" :label="statusLabel(item.evidence_status)" /><small>{{ validationOutcomeText(item) }}</small></div></div></div><p v-else class="empty-line">尚未积累足够的 实盘证据，继续观察即可。</p></SectionCard>
+        <SectionCard title="每日模拟快照" :description="`${dailySnapshots?.length || 0} 天记录`"><div v-if="dailySnapshots.length" class="daily-list"><div v-for="item in dailySnapshots.slice(0, 7)" :key="item.id" class="daily-row"><div><strong>{{ item.trade_date }}</strong><small>{{ item.position_count }} 个持仓 · {{ basisText(item.price_basis) }}</small></div><div><strong>{{ money(item.total_equity) }}</strong><span>{{ percent(item.daily_return) }}</span></div></div></div><p v-else class="empty-line">尚未有收盘估值快照。</p><TechnicalDetails title="模拟账户技术详情"><pre>{{ JSON.stringify({ account, performance }, null, 2) }}</pre></TechnicalDetails></SectionCard>
       </div>
     </template>
 
@@ -272,4 +276,12 @@ onMounted(async () => { await load(); mounted = true })
 @media (max-width: 900px) { .metric-grid.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }.simulation-grid { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .simulation-banner, .chart-header { align-items: flex-start; flex-direction: column; }.metric-grid.six, .metric-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }.sample-warning { align-items: flex-start; flex-wrap: wrap; }.sample-warning small { margin-left: 26px; }.timeline-track { align-items: flex-start; flex-direction: column; }.timeline-line { width: 1px; height: 12px; flex: none; margin-left: 11px; }.execution-summary { grid-template-columns: 1fr; } }
 @media (max-width: 420px) { .metric-grid.six, .metric-grid.four { grid-template-columns: 1fr; } }
+
+.timeline-step { flex: 0 1 auto; }
+.timeline-step strong { overflow-wrap: anywhere; }
+.subheading, .section-card-actions { flex-wrap: wrap; }
+.fact-row > strong, .daily-row strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.timeline-step.done span { color: var(--v3-text-inverse); }
+@media (max-width: 620px) { .fact-row, .cohort-row { flex-wrap: wrap; } .decision-row { align-items: flex-start; } }
+
 </style>

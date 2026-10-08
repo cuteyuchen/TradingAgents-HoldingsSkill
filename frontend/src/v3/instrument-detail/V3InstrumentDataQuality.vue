@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { CapitalFlow, InstrumentQuote, MarketDataProvenance, OrderBook } from '@/api/types'
-import { DASH, formatDataBasis, formatDateTime, formatQuality } from './formatters'
+import { DASH, formatDataBasis, formatDateTime, formatQuality, formatMarketStatus } from './formatters'
 
 const props = defineProps<{
   quote: InstrumentQuote | null
@@ -34,7 +34,7 @@ function project(module: string, p: MarketDataProvenance | null): ProvenanceRow 
     tradingDate: p?.trading_date || DASH,
     dataBasis: formatDataBasis(p?.data_basis),
     quality: formatQuality(p?.quality),
-    status: p?.status || DASH,
+    status: formatMarketStatus(p?.status),
     flags: p?.quality_flags?.length ? p.quality_flags.join(', ') : '—',
     errorCode: p?.error_code || '—',
   }
@@ -52,8 +52,8 @@ const rows = computed(() => [
   <div class="dq" data-testid="instrument-data-quality">
     <h3 class="dq__title">数据说明 / 数据质量</h3>
     <p class="dq__disclaimer">
-      provider / source 仅作溯源；行情时间以 observed_at 为准，fetched_at 为系统获取时间，二者不可混用。
-      资金流为数据提供方分类估算，不代表交易所确认的投资者身份或 Level-2 真值。
+      数据提供方与来源仅作溯源；行情观察时间和系统获取时间含义不同，请分别核对。
+      资金流为数据提供方分类估算，不代表交易所确认的投资者身份或 逐笔行情真实数据。
     </p>
     <div class="dq__table-wrap">
       <table class="dq__table">

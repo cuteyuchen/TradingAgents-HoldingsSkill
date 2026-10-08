@@ -21,23 +21,23 @@ test('Reports exposes final decision, checkpoint, mode, quality, market context,
 test('Research creates a deterministic run, recovers the durable result, and shows PARTIAL PIT capability', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   await openPage(page, '/research', '历史')
-  await expect(page.getByText('PARTIAL_PIT_RECOMPUTE', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('部分历史输入缺失，仅供研究', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('部分历史输入缺失，仅供研究', { exact: false })).toBeVisible()
 
-  const scope = page.locator('.form-grid > label').filter({ hasText: 'Scope' }).locator('.n-base-selection')
+  const scope = page.locator('.form-grid > label').filter({ hasText: '评估范围' }).locator('.n-base-selection')
   await scope.click()
-  await page.locator('.n-base-select-option').filter({ hasText: 'Portfolio Decision' }).last().click()
-  const replay = page.locator('.form-grid > label').filter({ hasText: 'Replay Mode' }).locator('.n-base-selection')
+  await page.locator('.n-base-select-option').filter({ hasText: '组合决策' }).last().click()
+  const replay = page.locator('.form-grid > label').filter({ hasText: '回放模式' }).locator('.n-base-selection')
   await replay.click()
-  await page.locator('.n-base-select-option').filter({ hasText: 'Deterministic Recompute' }).last().click()
+  await page.locator('.n-base-select-option').filter({ hasText: '确定性重算' }).last().click()
   await page.locator('input[type="date"]').nth(0).fill('2026-08-20')
   await page.locator('input[type="date"]').nth(1).fill('2026-08-21')
-  await page.getByRole('button', { name: '启动研究 Run', exact: true }).click()
-  await expect(page.getByText('COMPLETED', { exact: true }).first()).toBeVisible({ timeout: 20_000 })
+  await page.getByRole('button', { name: '启动研究回测', exact: true }).click()
+  await expect(page.getByText('已完成', { exact: true }).first()).toBeVisible({ timeout: 20_000 })
   await expect(page.locator('.recompute-result')).toContainText('部分历史输入缺失，仅供研究')
   await page.reload()
-  await expect(page.getByText('COMPLETED', { exact: true }).first()).toBeVisible({ timeout: 20_000 })
-  await expect(page.locator('.recompute-result')).toContainText('PARTIAL_PIT_RECOMPUTE')
+  await expect(page.getByText('已完成', { exact: true }).first()).toBeVisible({ timeout: 20_000 })
+  await expect(page.locator('.recompute-result')).toContainText('部分历史输入缺失，仅供研究')
 })
 
 test('Governance keeps proposal evidence and requires explicit activation confirmation', async ({ acceptancePage: page, facts }) => {
@@ -45,11 +45,11 @@ test('Governance keeps proposal evidence and requires explicit activation confir
   await openPage(page, '/governance', '设置')
   await expect(page.getByText('不会自动应用参数', { exact: false })).toBeVisible()
   await expect(page.locator('.proposal-row').filter({ hasText: `#${facts.governance.proposal_id}` })).toBeVisible()
-  await expect(page.getByText('Config Hash', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Runtime', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Decision', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('配置哈希', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('运行时契约版本', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('决策契约版本', { exact: true }).first()).toBeVisible()
 
-  const approvedVersion = page.locator('.version-row').filter({ hasText: 'APPROVED' })
+  const approvedVersion = page.locator('.version-row').filter({ hasText: '已审批待激活' })
   if (await approvedVersion.count()) {
     const dialogs: string[] = []
     page.on('dialog', async (dialog) => {

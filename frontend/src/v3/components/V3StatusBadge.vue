@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** V3 状态徽章：基础语义，不硬编码交易状态 */
 import { computed } from 'vue'
+import { systemStatusLabel } from '../../utils/systemLocale'
 
 export type V3StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger' | 'blocked'
 
@@ -14,12 +15,13 @@ const props = withDefaults(
 )
 
 const toneClass = computed(() => `v3-status-badge--${props.tone}`)
+const text = computed(() => /^[A-Za-z][A-Za-z_-]*$/.test(props.label.trim()) ? systemStatusLabel(props.label) : props.label)
 </script>
 
 <template>
   <span class="v3-status-badge" :class="[toneClass, `v3-status-badge--${size}`]">
     <span class="v3-status-badge__dot" aria-hidden="true" />
-    <span class="v3-status-badge__label">{{ label }}</span>
+    <span class="v3-status-badge__label">{{ text }}</span>
   </span>
 </template>
 
@@ -33,7 +35,10 @@ const toneClass = computed(() => `v3-status-badge--${props.tone}`)
   font-weight: 600;
   white-space: nowrap;
   line-height: 1;
+  max-width: 100%;
+  flex-shrink: 0;
 }
+.v3-status-badge__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .v3-status-badge--sm { padding: 4px 8px; font-size: var(--v3-font-size-xs); }
 .v3-status-badge--md { padding: 6px 10px; font-size: var(--v3-font-size-sm); }
 .v3-status-badge__dot {

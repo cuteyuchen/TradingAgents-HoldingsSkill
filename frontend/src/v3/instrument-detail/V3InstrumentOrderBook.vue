@@ -127,7 +127,7 @@ const unavailable = computed(() => status.value === 'unavailable')
         </dl>
       </div>
       <p v-if="derived" class="book__note" data-testid="book-derived-note">
-        委比/委差可由盘口总量推导，已标记 derived_fields。
+        委比/委差可由盘口总量推导，已标记 推导字段。
       </p>
     </template>
   </div>

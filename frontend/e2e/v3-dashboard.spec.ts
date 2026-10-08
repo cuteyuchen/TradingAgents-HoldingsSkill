@@ -458,7 +458,8 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await expect(page.getByTestId('v3-index-399001.SZ')).toHaveClass(/index-card--down/)
     await expect(page.getByTestId('v3-index-000688.SH')).toHaveClass(/index-card--unavailable/)
 
-    await expect(page.getByTestId('v3-risk-level-text')).toHaveText('MEDIUM')
+    await expect(page.getByTestId('v3-risk-level-text')).toHaveText('中风险')
+    await expect(page.getByTestId('v3-risk-level-text')).toHaveAttribute('data-level', 'MEDIUM')
     await expect(page.getByTestId('v3-typical-stock')).toContainText('典型个股表现')
     await expect(page.getByTestId('v3-all-a-median')).toBeVisible()
     await expect(page.getByTestId('v3-all-a-20d')).toBeVisible()
@@ -931,7 +932,8 @@ test.describe('V3 Dashboard Decision Workbench', () => {
     await mockDashboardToday(page, () => ({}), 500)
     await openDashboard(page)
     await expect(page.getByTestId('v3-index-000001.SH')).toBeVisible()
-    await expect(page.getByTestId('v3-risk-level-text')).toHaveText('MEDIUM')
+    await expect(page.getByTestId('v3-risk-level-text')).toHaveText('中风险')
+    await expect(page.getByTestId('v3-risk-level-text')).toHaveAttribute('data-level', 'MEDIUM')
     // Localized portfolio failure — market stays visible; no full-page V3ErrorState.
     await expect(page.getByTestId('v3-portfolio-error')).toBeVisible()
     await expect(page.getByTestId('v3-error-state')).toHaveCount(0)

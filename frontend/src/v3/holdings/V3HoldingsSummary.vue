@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { businessLabel } from '../../utils/businessLocale'
 import V3Metric from '../components/V3Metric.vue'
 import { formatMoney, formatRatioPercent } from './holdings-formatters'
 import type { V3HoldingsSummaryVM } from './holdings-types'
@@ -13,9 +15,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{ retry: []; openUpdate: [] }>()
 
-const coverageText = props.summary?.quoteCoverage == null
+const coverageText = computed(() => props.summary?.quoteCoverage == null
   ? ''
-  : `行情覆盖 ${(props.summary.quoteCoverage * 100).toFixed(0)}%`
+  : `行情覆盖 ${(props.summary.quoteCoverage * 100).toFixed(0)}%`)
 </script>
 
 <template>
@@ -71,7 +73,7 @@ const coverageText = props.summary?.quoteCoverage == null
       />
       <V3Metric
         label="组合风险"
-        :value="summary.riskFlags.length ? summary.riskFlags.join(' · ') : '无风险标记'"
+        :value="summary.riskFlags.length ? summary.riskFlags.map(businessLabel).join(' · ') : '无风险标记'"
         :status="summary.riskFlags.length || summary.hardCapBreaches.length ? 'warning' : 'neutral'"
         data-testid="v3-holdings-risk"
       />

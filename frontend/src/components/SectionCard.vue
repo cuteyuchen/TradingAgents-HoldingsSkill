@@ -19,4 +19,8 @@ withDefaults(defineProps<{ title?: string; description?: string }>(), { title: '
 .section-card-header p { margin: 5px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
 .section-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 600px) { .section-card { padding: 16px; } .section-card-header { align-items: stretch; flex-direction: column; } }
+
+.section-card-header > div:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.section-card-actions { flex-shrink: 0; max-width: 100%; align-items: center; }
+
 </style>

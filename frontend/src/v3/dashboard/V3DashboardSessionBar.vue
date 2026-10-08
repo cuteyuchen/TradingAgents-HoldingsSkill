@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../../utils/businessLocale'
 import { computed } from 'vue'
 import V3DataTimestamp from '../components/V3DataTimestamp.vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
@@ -16,7 +17,7 @@ const basisLabel = computed(() => {
     session_close: '收盘快照',
     previous_session_close: '上一交易日',
   }
-  return map[props.sessionBar.dataBasis] || props.sessionBar.dataBasis
+  return map[props.sessionBar.dataBasis] || businessLabel(props.sessionBar.dataBasis)
 })
 </script>
 

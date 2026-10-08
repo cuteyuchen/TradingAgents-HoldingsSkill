@@ -18,7 +18,7 @@ withDefaults(defineProps<{
 <style scoped>
 .metric-tile { display: grid; min-width: 0; gap: 4px; border-left: 2px solid var(--border-strong); padding: 2px 0 2px 12px; }
 .metric-tile > span, .metric-tile > small { color: var(--text-muted); font-size: 12px; }
-.metric-tile strong { overflow-wrap: anywhere; font-size: 20px; line-height: 1.2; }
+.metric-tile strong { white-space: nowrap; font-variant-numeric: tabular-nums; font-size: clamp(16px, 1.4vw, 20px); line-height: 1.3; }
 .metric-tile small { min-height: 18px; }
 .metric-positive { border-left-color: var(--positive); }.metric-positive strong { color: var(--positive); }
 .metric-negative { border-left-color: var(--negative); }.metric-negative strong { color: var(--negative); }

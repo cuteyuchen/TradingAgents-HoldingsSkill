@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { businessLabel } from '../../utils/businessLocale'
+import { ratingLabel, localizedValue } from '../../utils/ui'
 import V3EmptyState from '../components/V3EmptyState.vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
 import type { V3LatestAnalysisVM } from './dashboard-types'
@@ -54,16 +56,16 @@ const emit = defineEmits<{ goAnalysis: [] }>()
         </div>
         <div>
           <dt>模式 / 运行</dt>
-          <dd>{{ analysis.mode || '—' }}</dd>
+          <dd>{{ businessLabel(analysis.mode) }}</dd>
         </div>
         <div>
           <dt>组合结论</dt>
-          <dd data-testid="v3-analysis-conclusion">{{ analysis.conclusion || '—' }}</dd>
+          <dd data-testid="v3-analysis-conclusion">{{ ratingLabel(analysis.conclusion) }}</dd>
         </div>
         <div>
           <dt>质量 / 置信</dt>
           <dd>
-            {{ analysis.quality || '—' }}
+            {{ localizedValue(analysis.quality) }}
             <span v-if="analysis.confidence !== null"> / {{ analysis.confidence }}</span>
           </dd>
         </div>

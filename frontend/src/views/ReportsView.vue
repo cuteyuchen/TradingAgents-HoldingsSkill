@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
@@ -24,7 +25,7 @@ import { usePortfolioContext } from '../composables/portfolio'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingState from '../components/LoadingState.vue'
-import { fmtDateTime, formatNumber, formatPercent, unavailableText } from '../utils/ui'
+import { fmtDateTime, formatNumber, formatPercent, unavailableText, actionLabel, candidateStageLabel, statusLabel, analystLabel, speakerLabel, ratingLabel, localizedValue } from '../utils/ui'
 import type { AnalysisRunDetail, AnalysisRunSummary } from '../api/types'
 
 type AnyRecord = Record<string, any>
@@ -156,15 +157,6 @@ const labelMap: Record<string, string> = {
   unresolved_claims: '未解决论点', checkpoint_rule: '检查点规则', manager_verdict: '管理人裁决',
 }
 
-const speakerLabels: Record<string, string> = {
-  bull: '多头', bear: '空头', aggressive: '激进', neutral: '中立', conservative: '保守',
-}
-
-const actionLabels: Record<string, string> = {
-  add: '加仓', hold: '持有', reduce: '减仓', sell: '卖出', watch: '观察', watch_only: '仅观察', no_action: '无需调整',
-  rotate: '轮动', new_position: '新开仓', add_existing: '加仓现有持仓', rotation_watch: '轮动观察', conditional_add: '条件加仓', conditional_buy: '条件买入',
-}
-
 function fmt(value?: string | null) {
   return fmtDateTime(value)
 }
@@ -223,12 +215,12 @@ function sectionEntries(value: any): Array<[string, any]> {
 }
 
 function labelFor(key: string) {
-  return labelMap[key] || key.replaceAll('_', ' ')
+  return labelMap[key] || businessLabel(key)
 }
 
 function textValue(value: any): string {
   if (value === null || value === undefined || value === '') return ''
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return localizedValue(String(value))
   if (Array.isArray(value)) {
     return value.map((item) => typeof item === 'object' ? textValue(item.claim || item.summary || item.name || item) : String(item)).filter(Boolean).join('；')
   }
@@ -240,7 +232,8 @@ function textValue(value: any): string {
 }
 
 function reportTitle(report: AnyRecord, index: number) {
-  return report.role_label || report.analyst_name || report.title || report.role || report.__key || `分析师 ${index + 1}`
+  const value = report.role_label || report.analyst_name || report.title || report.role || report.__key
+  return value ? analystLabel(value) : `分析师 ${index + 1}`
 }
 
 function reportBody(report: AnyRecord) {
@@ -261,15 +254,14 @@ function actionType(action: string) {
 }
 
 function actionText(action: any) {
-  const key = String(action || 'watch').toLowerCase()
-  if (['action', 'no_action', 'blocked', 'data_gap'].includes(key)) return key.toUpperCase()
-  return actionLabels[key] || key
+  return actionLabel(action || 'watch')
 }
 
 function finalDecisionText(value: any) {
   const normalized = String(value || '').toUpperCase()
-  if (['ACTION', 'NO_ACTION', 'BLOCKED', 'DATA_GAP'].includes(normalized)) return normalized
-  return actionText(value)
+  return ['ACTION', 'NO_ACTION', 'BLOCKED', 'DATA_GAP'].includes(normalized)
+    ? `${actionLabel(normalized)} (${normalized})`
+    : ratingLabel(value)
 }
 
 function finalDecisionType(value: any) {
@@ -377,7 +369,7 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
 <template>
   <section class="page-stack">
     <div class="page-heading">
-      <div><p class="eyebrow">DECISION HISTORY</p><h1>分析报告</h1><p>查看完整分析流程、组合决策与可执行候选。<span v-if="selectedPortfolio">当前组合：{{ selectedPortfolio.name }}</span><span v-else>当前未限定组合</span></p></div>
+      <div><p class="eyebrow">历史分析报告</p><h1>分析报告</h1><p>查看完整分析流程、组合决策与可执行候选。<span v-if="selectedPortfolio">当前组合：{{ selectedPortfolio.name }}</span><span v-else>当前未限定组合</span></p></div>
       <div class="heading-actions">
         <n-select :value="portfolioId" clearable placeholder="全部组合" :options="portfolios.map(p => ({ label: p.name, value: p.id }))" class="portfolio-filter" @update:value="setSelectedPortfolio" />
         <n-button secondary :loading="loading" @click="loadRuns"><template #icon><RefreshCw :size="16" /></template>刷新</n-button>
@@ -393,7 +385,7 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
           <template #action><n-button secondary size="small" @click="router.push({ name: 'upload', query: { portfolio: portfolioId || undefined } })">先确认持仓并分析</n-button></template>
         </EmptyState>
         <button v-for="run in runs" :key="run.id" type="button" :class="['run-item', { active: run.id === selectedId }]" @click="selectRun(run.id)">
-          <div><strong>{{ finalDecisionText(run.final_rating) }}</strong><n-tag size="tiny" :bordered="false" type="info">{{ run.data_quality_grade || unavailableText }}</n-tag></div>
+          <div><strong>{{ finalDecisionText(run.final_rating) }}</strong><n-tag size="tiny" :bordered="false" type="info">{{ localizedValue(run.data_quality_grade) }}</n-tag></div>
           <p>{{ run.summary || '暂无摘要' }}</p>
           <span>{{ fmt(run.created_at) }}</span>
         </button>
@@ -406,12 +398,12 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
         <template v-else>
           <section class="panel-card decision-hero">
             <div class="verdict-copy">
-              <p class="eyebrow">PORTFOLIO VERDICT</p>
+              <p class="eyebrow">投资组合最终裁决</p>
               <div class="verdict-line"><h2>{{ finalDecisionText(finalDecision) }}</h2><n-tag :bordered="false" :type="finalDecisionType(finalDecision)">{{ finalDecisionText(finalDecision) }}</n-tag></div>
               <p>{{ detail.summary || '暂无摘要' }}</p>
             </div>
             <div class="hero-stats">
-              <div><span>数据质量</span><strong>{{ detail.data_quality_grade || unavailableText }}</strong></div>
+              <div><span>数据质量</span><strong>{{ localizedValue(detail.data_quality_grade) }}</strong></div>
               <div><span>现金目标</span><strong>{{ detail.cash_target || unavailableText }}</strong></div>
               <div><span>置信度</span><strong>{{ detail.confidence || unavailableText }}</strong></div>
             </div>
@@ -419,7 +411,7 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
           </section>
 
           <section class="panel-card action-table-panel">
-            <div class="section-title"><div><p class="section-kicker">HOLDINGS PLAN</p><h2>今日持仓操作</h2><p>卖出数量严格受确认快照的可用数量约束</p></div><ClipboardCheck :size="21" /></div>
+            <div class="section-title"><div><p class="section-kicker">持仓操作计划</p><h2>今日持仓操作</h2><p>卖出数量严格受确认快照的可用数量约束</p></div><ClipboardCheck :size="21" /></div>
             <div class="table-wrap">
               <table class="action-table">
                 <thead><tr><th>标的</th><th>操作</th><th>触发条件</th><th>数量</th><th>最大可卖</th><th>原因</th><th>风险 / 失效</th></tr></thead>
@@ -438,18 +430,18 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
 
           <section class="panel-card candidate-panel">
             <div class="section-title">
-              <div><p class="section-kicker">NEW OPPORTUNITIES</p><h2>新增机会候选</h2><p>仅展示通过消息催化、资金面、板块位置与组合约束的新非持仓机会</p></div>
+              <div><p class="section-kicker">新增机会候选</p><h2>新增机会候选</h2><p>仅展示通过消息催化、资金面、板块位置与组合约束的新非持仓机会</p></div>
               <TrendingUp :size="21" />
             </div>
             <n-alert type="info" :show-icon="false" class="candidate-disclaimer">
-              Candidate 是候选机会，不是最终组合动作；只有上方的 Portfolio Verdict 才代表本次组合决策。
+              候选机会（Candidate）不代表最终组合动作；只有上方的投资组合裁决才代表最终操作决策。
             </n-alert>
             <div v-if="candidates.length" class="candidate-list">
               <article v-for="(row, index) in candidates" :key="row.code || index" class="candidate-row">
                 <div class="candidate-identity">
                   <span class="candidate-index">{{ String(index + 1).padStart(2, '0') }}</span>
                   <div><strong>{{ row.name || row.code || `候选 ${index + 1}` }}</strong><span>{{ row.code || '代码待确认' }}</span></div>
-                  <n-tag :bordered="false" :type="candidateStage(row) === 'DATA_GAP' || candidateStage(row) === 'BLOCKED' ? 'error' : candidateStage(row) === 'ACTION' ? 'warning' : 'info'">{{ candidateStage(row) }}</n-tag>
+                  <n-tag :bordered="false" :type="candidateStage(row) === 'DATA_GAP' || candidateStage(row) === 'BLOCKED' ? 'error' : candidateStage(row) === 'ACTION' ? 'warning' : 'info'">{{ candidateStageLabel(candidateStage(row)) }}</n-tag>
                   <n-tag v-if="field(row, 'action', 'type', 'candidate_type')" size="small" bordered :type="actionType(field(row, 'action', 'type', 'candidate_type'))">{{ actionText(field(row, 'action', 'type', 'candidate_type')) }}</n-tag>
                 </div>
                 <p class="candidate-reason">{{ field(row, 'reason', 'recommendation_reason', 'thesis') || '—' }}</p>
@@ -459,13 +451,13 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
                   <div><span>板块位置</span><p>{{ field(row, 'sector_position', 'sector_stage', 'rotation_stage') || field(row.reason_detail || {}, 'sector_position') || '—' }}</p></div>
                 </div>
                 <div class="candidate-metrics">
-                  <div><span>Opportunity</span><strong>{{ candidateMetric(row, ['opportunity_score']) }}</strong></div>
-                  <div><span>Entry</span><strong>{{ candidateMetric(row, ['entry_score']) }}</strong></div>
-                  <div><span>R/R</span><strong>{{ candidateMetric(row, ['risk_reward_ratio', 'risk_reward', 'rr', 'rr_ratio']) }}</strong></div>
-                  <div><span>Fit</span><strong>{{ candidateMetric(row, ['portfolio_fit_score', 'portfolio_fit', 'fit']) }}</strong></div>
-                  <div><span>Decision Edge</span><strong>{{ candidateMetric(row, ['decision_edge', 'edge_vs_no_action', 'edge']) }}</strong></div>
-                  <div><span>Coverage</span><strong>{{ candidateMetric(row, ['coverage', 'data_coverage', 'quote_coverage'], 'percent') }}</strong></div>
-                  <div><span>Confidence</span><strong>{{ candidateMetric(row, ['confidence', 'confidence_score'], 'percent') }}</strong></div>
+                  <div><span>机会得分 (Opportunity)</span><strong>{{ candidateMetric(row, ['opportunity_score']) }}</strong></div>
+                  <div><span>入场时机 (Entry)</span><strong>{{ candidateMetric(row, ['entry_score']) }}</strong></div>
+                  <div><span>盈亏比 (R/R)</span><strong>{{ candidateMetric(row, ['risk_reward_ratio', 'risk_reward', 'rr', 'rr_ratio']) }}</strong></div>
+                  <div><span>组合契合度 (Fit)</span><strong>{{ candidateMetric(row, ['portfolio_fit_score', 'portfolio_fit', 'fit']) }}</strong></div>
+                  <div><span>决策优势 (Decision Edge)</span><strong>{{ candidateMetric(row, ['decision_edge', 'edge_vs_no_action', 'edge']) }}</strong></div>
+                  <div><span>数据覆盖率 (Coverage)</span><strong>{{ candidateMetric(row, ['coverage', 'data_coverage', 'quote_coverage'], 'percent') }}</strong></div>
+                  <div><span>置信度 (Confidence)</span><strong>{{ candidateMetric(row, ['confidence', 'confidence_score'], 'percent') }}</strong></div>
                 </div>
                 <div class="candidate-plan">
                   <div><span>入场条件</span><strong>{{ field(row, 'trigger', 'entry_condition', 'entry_trigger') || '—' }}</strong></div>
@@ -477,7 +469,7 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
             </div>
             <n-alert v-else type="info" :show-icon="false">{{ candidateBlockReason }}</n-alert>
             <div v-if="candidateVetoes.length" class="candidate-veto">
-              <div class="candidate-veto-title"><ShieldCheck :size="15" /><strong>Candidate Veto</strong><span>候选未进入组合最终动作</span></div>
+              <div class="candidate-veto-title"><ShieldCheck :size="15" /><strong>候选否决 (Candidate Veto)</strong><span>候选未进入组合最终动作</span></div>
               <ul><li v-for="(item, index) in candidateVetoes" :key="index">{{ candidateVetoText(item) }}</li></ul>
             </div>
           </section>
@@ -486,7 +478,7 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
             <n-tab-pane name="workflow" tab="完整分析流程">
               <section class="panel-card workflow-panel">
                 <div class="workflow-heading">
-                  <div><p class="section-kicker">MULTI-AGENT WORKFLOW</p><h2>分析与辩论记录</h2></div>
+                  <div><p class="section-kicker">多智能体研判流程</p><h2>分析与辩论记录</h2></div>
                   <span>{{ completedStages }} / 8 分析阶段有记录</span>
                 </div>
                 <div class="flow-rail" aria-label="分析流程">
@@ -497,7 +489,7 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
                 </div>
 
                 <section class="workflow-stage">
-                  <div class="stage-number">01</div><div class="stage-content"><div class="stage-title"><h3>证据包与质量门控</h3><n-tag :bordered="false" type="info">{{ detail.data_quality_grade || '—' }}</n-tag></div>
+                  <div class="stage-number">01</div><div class="stage-content"><div class="stage-title"><h3>证据包与质量门控</h3><n-tag :bordered="false" type="info">{{ localizedValue(detail.data_quality_grade) }}</n-tag></div>
                     <div class="split-details">
                       <div><h4>证据包</h4><dl v-if="sectionEntries(evidencePack).length" class="detail-list"><div v-for="([key, value]) in sectionEntries(evidencePack)" :key="key"><dt>{{ labelFor(key) }}</dt><dd>{{ textValue(value) }}</dd></div></dl><p v-else class="empty-copy">未返回结构化证据包</p></div>
                       <div><h4>质量门控</h4><dl v-if="sectionEntries(qualityGate).length" class="detail-list"><div v-for="([key, value]) in sectionEntries(qualityGate)" :key="key"><dt>{{ labelFor(key) }}</dt><dd>{{ textValue(value) }}</dd></div></dl><p v-else class="empty-copy">未返回结构化质量门控</p></div>
@@ -517,10 +509,10 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
                 </section>
 
                 <section class="workflow-stage">
-                  <div class="stage-number">03</div><div class="stage-content"><div class="stage-title"><h3>多空观点辩论</h3><span>{{ investmentClaims.length }} 条 Claim</span></div>
-                    <div v-if="investmentClaims.length" class="debate-wrap"><table class="debate-table"><thead><tr><th>Claim</th><th>轮次</th><th>立场</th><th>论点与证据</th><th>置信度</th><th>状态</th></tr></thead><tbody>
-                      <tr v-for="(claim, index) in investmentClaims" :key="claim.claim_id || index"><td><code>{{ claim.claim_id || `INV-${index + 1}` }}</code></td><td>{{ claim.__round || claim.round || '—' }}</td><td><n-tag size="small" :bordered="false" :type="claimType(claim.speaker)">{{ speakerLabels[claim.speaker] || claim.speaker || '—' }}</n-tag></td><td><strong>{{ claim.claim || claim.argument || claim.content || '—' }}</strong><span v-if="hasContent(claim.evidence)">{{ textValue(claim.evidence) }}</span><small v-if="hasContent(claim.target_claim_ids)">回应 {{ textValue(claim.target_claim_ids) }}</small></td><td>{{ claim.confidence ?? '—' }}</td><td>{{ claim.status || '—' }}</td></tr>
-                    </tbody></table></div><p v-else class="empty-copy">未返回多空 Claim 记录</p>
+                  <div class="stage-number">03</div><div class="stage-content"><div class="stage-title"><h3>多空观点辩论</h3><span>{{ investmentClaims.length }} 条辩论论点</span></div>
+                    <div v-if="investmentClaims.length" class="debate-wrap"><table class="debate-table"><thead><tr><th>论点编号 (Claim)</th><th>轮次</th><th>立场</th><th>论点与证据</th><th>置信度</th><th>状态</th></tr></thead><tbody>
+                      <tr v-for="(claim, index) in investmentClaims" :key="claim.claim_id || index"><td><code>{{ claim.claim_id || `INV-${index + 1}` }}</code></td><td>{{ claim.__round || claim.round || '—' }}</td><td><n-tag size="small" :bordered="false" :type="claimType(claim.speaker)">{{ speakerLabel(claim.speaker || '') }}</n-tag></td><td><strong>{{ claim.claim || claim.argument || claim.content || '—' }}</strong><span v-if="hasContent(claim.evidence)">{{ textValue(claim.evidence) }}</span><small v-if="hasContent(claim.target_claim_ids)">回应 {{ textValue(claim.target_claim_ids) }}</small></td><td>{{ claim.confidence ?? '—' }}</td><td>{{ statusLabel(claim.status) }}</td></tr>
+                    </tbody></table></div><p v-else class="empty-copy">未返回多空辩论论点 记录</p>
                     <dl v-if="sectionEntries(investmentDebate).length" class="stage-summary"><div v-for="([key, value]) in sectionEntries(investmentDebate)" :key="key"><dt>{{ labelFor(key) }}</dt><dd>{{ textValue(value) }}</dd></div></dl>
                   </div>
                 </section>
@@ -541,8 +533,8 @@ watch(portfolioId, () => { if (mounted) void loadRuns() })
                 </section>
 
                 <section class="workflow-stage">
-                  <div class="stage-number">07</div><div class="stage-content"><div class="stage-title"><h3>三方风控辩论</h3><span>{{ riskClaims.length }} 条 Claim</span></div>
-                    <div v-if="riskClaims.length" class="risk-claims"><article v-for="(claim, index) in riskClaims" :key="claim.claim_id || index"><div><code>{{ claim.claim_id || `RISK-${index + 1}` }}</code><n-tag size="small" :bordered="false" :type="claimType(claim.speaker)">{{ speakerLabels[claim.speaker] || claim.speaker || '风控' }}</n-tag><span>{{ claim.status || '—' }}</span></div><strong>{{ claim.claim || claim.argument || claim.content || '—' }}</strong><p v-if="hasContent(claim.evidence)">{{ textValue(claim.evidence) }}</p></article></div><p v-else class="empty-copy">未返回三方风控 Claim 记录</p>
+                  <div class="stage-number">07</div><div class="stage-content"><div class="stage-title"><h3>三方风控辩论</h3><span>{{ riskClaims.length }} 条辩论论点</span></div>
+                    <div v-if="riskClaims.length" class="risk-claims"><article v-for="(claim, index) in riskClaims" :key="claim.claim_id || index"><div><code>{{ claim.claim_id || `RISK-${index + 1}` }}</code><n-tag size="small" :bordered="false" :type="claimType(claim.speaker)">{{ claim.speaker ? speakerLabel(claim.speaker) : '风控' }}</n-tag><span>{{ statusLabel(claim.status) }}</span></div><strong>{{ claim.claim || claim.argument || claim.content || '—' }}</strong><p v-if="hasContent(claim.evidence)">{{ textValue(claim.evidence) }}</p></article></div><p v-else class="empty-copy">未返回三方风控辩论论点 记录</p>
                     <dl v-if="sectionEntries(riskDebate).length" class="stage-summary"><div v-for="([key, value]) in sectionEntries(riskDebate)" :key="key"><dt>{{ labelFor(key) }}</dt><dd>{{ textValue(value) }}</dd></div></dl>
                   </div>
                 </section>
@@ -618,4 +610,14 @@ pre { overflow: auto; border-radius: 7px; background: color-mix(in srgb, var(--a
 @media (max-width: 1100px) { .report-layout { grid-template-columns: 230px minmax(0, 1fr); }.decision-hero { grid-template-columns: 1fr; }.hero-actions { grid-column: auto; }.candidate-evidence, .candidate-metrics, .candidate-plan { grid-template-columns: repeat(2, 1fr); }.flow-rail { grid-template-columns: repeat(4, 1fr); }.analyst-list, .risk-claims { grid-template-columns: 1fr; } }
 @media (max-width: 860px) { .report-layout { grid-template-columns: 1fr; }.report-list { position: static; display: flex; max-height: none; overflow-x: auto; }.list-head { min-width: 90px; align-content: start; flex-direction: column; }.run-item { min-width: 245px; }.split-details { grid-template-columns: 1fr; }.change-card { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .page-heading { align-items: start; flex-direction: column; }.heading-actions { width: 100%; }.portfolio-filter { flex: 1; width: auto; }.hero-stats { grid-template-columns: 1fr; }.hero-stats div { border-top: 1px solid var(--app-border-soft); border-left: 0; padding: 9px 0; }.candidate-evidence, .candidate-plan, .evidence-grid { grid-template-columns: 1fr; }.flow-rail { grid-template-columns: repeat(2, 1fr); }.workflow-stage { grid-template-columns: 1fr; }.stage-number { width: 30px; height: 30px; }.candidate-identity { flex-wrap: wrap; }.candidate-score { margin-left: 0; }.detail-list > div, .stage-summary > div { grid-template-columns: 1fr; gap: 3px; }.panel-card { padding: 15px; } }
+
+.run-item > div, .verdict-line, .stage-title, .candidate-veto-title, .analyst-item > div { flex-wrap: wrap; gap: 8px; }
+.candidate-metrics { grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); }
+.candidate-evidence, .candidate-plan, .split-details, .analyst-list, .evidence-grid { min-width: 0; }
+.candidate-plan strong, .candidate-evidence p, .analyst-item p { overflow-wrap: anywhere; }
+.hero-stats strong, .candidate-metrics strong { white-space: nowrap; }
+pre { color: var(--app-text); background: var(--app-surface-muted); border: 1px solid var(--app-border); }
+.final-stage .stage-number { color: var(--v3-text-inverse); }
+@media (max-width: 650px) { .candidate-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
 </style>

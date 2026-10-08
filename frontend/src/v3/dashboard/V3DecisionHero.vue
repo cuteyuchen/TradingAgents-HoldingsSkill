@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { systemStatusLabel } from '../../utils/systemLocale'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
 import type { V3DecisionVM } from './dashboard-types'
 
@@ -30,15 +31,15 @@ const badgeTone = computed(() => {
 const kindLabel = computed(() => {
   switch (props.decision.kind) {
     case 'NO_ACTION':
-      return 'NO_ACTION'
+      return '无需操作 (NO_ACTION)'
     case 'ACTIONABLE':
-      return 'ACTIONABLE'
+      return '建议调整 (ACTIONABLE)'
     case 'BLOCKED':
-      return 'BLOCKED'
+      return '策略受阻 (BLOCKED)'
     case 'NO_PORTFOLIO':
-      return 'NO_PORTFOLIO'
+      return '未选组合 (NO_PORTFOLIO)'
     default:
-      return props.decision.kind
+      return systemStatusLabel(props.decision.kind)
   }
 })
 </script>

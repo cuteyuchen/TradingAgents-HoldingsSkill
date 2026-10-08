@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { localizedValue } from '../utils/ui'
+import { businessLabel } from '../utils/businessLocale'
 import { computed } from 'vue'
 import { ShieldAlert, Sparkles } from 'lucide-vue-next'
 import { fmtDateTime } from '../utils/ui'
@@ -28,7 +30,7 @@ const validityNote = computed(() => validityReasonText(props.validityReason) || 
     <div class="decision-hero-main">
       <div class="decision-kicker"><Sparkles :size="15" aria-hidden="true" />今日建议</div>
       <h2>{{ label }}</h2>
-      <code>{{ normalized }}</code>
+      <code>{{ label }} ({{ normalized }})</code>
       <p class="decision-summary">{{ summary || decisionSummary(normalized) }}</p>
       <ul v-if="reasons.length" class="decision-reasons">
         <li v-for="reason in reasons.slice(0, 3)" :key="reason">{{ reason }}</li>
@@ -36,10 +38,10 @@ const validityNote = computed(() => validityReasonText(props.validityReason) || 
     </div>
     <div class="decision-hero-side">
       <ShieldAlert :size="24" aria-hidden="true" />
-      <span v-if="checkpoint">检查点 {{ checkpoint }}</span>
+      <span v-if="checkpoint">检查点 {{ businessLabel(checkpoint) }}</span>
       <span v-if="finalizedAt">{{ fmtDateTime(finalizedAt) }}</span>
-      <span v-if="quality">数据质量 {{ quality }}</span>
-      <span v-if="freshness">数据新鲜度 {{ freshness }}</span>
+      <span v-if="quality">数据质量 {{ localizedValue(quality) }}</span>
+      <span v-if="freshness">数据新鲜度 {{ localizedValue(freshness) }}</span>
       <span v-if="validityNote">{{ validityNote }}</span>
       <span v-if="validUntil">有效期至 {{ fmtDateTime(validUntil) }}</span>
     </div>

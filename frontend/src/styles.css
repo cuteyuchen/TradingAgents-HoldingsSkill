@@ -40,12 +40,13 @@
   --app-success: var(--negative);
   --app-warning: var(--warning);
   --app-danger: var(--danger);
+  --app-error: var(--danger);
   --app-row-hover: var(--row-hover);
   --app-shadow: var(--shadow-md);
   --app-shadow-strong: 0 18px 44px rgba(23, 35, 48, .14);
 }
 
-.theme-dark {
+.theme-dark, body.body--dark {
   color-scheme: dark;
   --page-bg: #11161c;
   --surface: #182028;
@@ -80,6 +81,7 @@
   --app-success: var(--negative);
   --app-warning: var(--warning);
   --app-danger: var(--danger);
+  --app-error: var(--danger);
   --app-row-hover: var(--row-hover);
   --app-shadow: var(--shadow-md);
   --app-shadow-strong: 0 18px 48px rgba(0, 0, 0, .38);
@@ -117,7 +119,34 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .risk-critical { color: var(--risk-critical); }
 .clickable { cursor: pointer; touch-action: manipulation; }
 .clickable:hover { background: var(--row-hover); }
-.mono-number { font-variant-numeric: tabular-nums; }
+.mono-number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Keep horizontal scrolling inside the data panel, including embedded legacy views. */
+.table-wrap, .debate-wrap, .identity-table-wrap, .n-data-table {
+  min-width: 0;
+  max-width: 100%;
+}
+.table-wrap, .debate-wrap, .identity-table-wrap, .n-data-table-base-table-body {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+.table-wrap th, .debate-wrap th { white-space: nowrap; }
+.n-tag { flex-shrink: 0; max-width: 100%; }
+.n-tag .n-tag__content { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.n-card-header__main, .n-card__content { min-width: 0; }
+.workbench-page, .page-stack, .report-detail { min-width: 0; }
+.metric-grid > *, .candidate-metrics > *, .candidate-metric-grid > * { min-width: 0; }
+.metric-grid strong, .candidate-metrics strong, .candidate-metric-grid strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 1024px) {
+  .card-heading, .section-title, .stage-title, .verdict-line { flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .n-drawer .n-drawer-content .n-drawer-body-content-wrapper { padding: 16px; }
+  .n-radio-group { max-width: 100%; }
+  .n-radio-group .n-radio-group__splitor { flex-shrink: 0; }
+}
 
 .markdown-body { color: var(--text); font-size: 14px; line-height: 1.78; overflow-wrap: anywhere; }
 .markdown-body h1 { margin: 0 0 1.1em; font-size: 28px; }

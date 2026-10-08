@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { actionLabel, candidateStageLabel } from '../../utils/ui'
 import V3EmptyState from '../components/V3EmptyState.vue'
 import type { V3ActionRowVM } from './dashboard-types'
 
@@ -28,8 +29,8 @@ const emit = defineEmits<{ openInstrument: [code: string] }>()
           </button>
           <span v-else class="actions__code">—</span>
           <span class="actions__name">{{ row.name || '—' }}</span>
-          <span class="actions__action">{{ row.action || '—' }}</span>
-          <span class="actions__reason">{{ row.reason || row.stage || '' }}</span>
+          <span class="actions__action">{{ actionLabel(row.action) }}</span>
+          <span class="actions__reason">{{ row.reason || (row.stage ? candidateStageLabel(row.stage) : '') }}</span>
         </li>
       </ul>
     </div>
@@ -47,8 +48,8 @@ const emit = defineEmits<{ openInstrument: [code: string] }>()
           </button>
           <span v-else class="actions__code">—</span>
           <span class="actions__name">{{ row.name || '—' }}</span>
-          <span class="actions__action">{{ row.action || '—' }}</span>
-          <span class="actions__reason">{{ row.reason || row.stage || '' }}</span>
+          <span class="actions__action">{{ actionLabel(row.action) }}</span>
+          <span class="actions__reason">{{ row.reason || (row.stage ? candidateStageLabel(row.stage) : '') }}</span>
         </li>
       </ul>
     </div>

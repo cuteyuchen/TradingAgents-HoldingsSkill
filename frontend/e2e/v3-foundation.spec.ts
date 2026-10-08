@@ -35,15 +35,15 @@ test.describe('V3 UI Foundation', () => {
     await expect(resolved).toBeVisible()
 
     await page.getByTestId('v3-theme-switcher').scrollIntoViewIfNeeded()
-    await page.getByRole('button', { name: 'Dark' }).click({ force: true })
-    await expect(resolved).toHaveText('dark')
+    await page.getByRole('button', { name: '深色' }).click({ force: true })
+    await expect(resolved).toHaveText('深色')
     const hasDarkClass = await page.evaluate(() =>
       document.documentElement.classList.contains('theme-dark'),
     )
     expect(hasDarkClass).toBe(true)
 
-    await page.getByRole('button', { name: 'Light' }).click({ force: true })
-    await expect(resolved).toHaveText('light')
+    await page.getByRole('button', { name: '浅色' }).click({ force: true })
+    await expect(resolved).toHaveText('浅色')
   })
 
   test('Desktop sidebar is visible on wide viewport', async ({ page }) => {
@@ -101,8 +101,8 @@ test.describe('V3 UI Foundation', () => {
     await gotoFoundation(page)
     await expect(page.getByTestId('v3-empty-state')).toBeVisible()
     await expect(page.getByTestId('v3-error-state')).toBeVisible()
-    await page.getByRole('button', { name: '播放 Loading' }).scrollIntoViewIfNeeded()
-    await page.getByRole('button', { name: '播放 Loading' }).click({ force: true })
+    await page.getByRole('button', { name: '演示加载过程' }).scrollIntoViewIfNeeded()
+    await page.getByRole('button', { name: '演示加载过程' }).click({ force: true })
     await expect(page.getByTestId('v3-loading-state')).toBeVisible()
   })
 

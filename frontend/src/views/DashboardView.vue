@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
+import { statusLabel, actionLabel } from '../utils/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowRight, CircleAlert, Plus, RefreshCw, Sparkles } from 'lucide-vue-next'
@@ -76,7 +78,7 @@ const reasons = computed(() => {
   if (list.length) return list
   return [decisionSummary(finalAction.value)]
 })
-const marketRegime = computed(() => ({ BULL: '偏强', BEAR: '偏弱', NEUTRAL: '震荡', RANGE: '震荡', RISK_OFF: '风险偏高' }[String(market.value.regime || '').toUpperCase()] || market.value.regime || '状态未知'))
+const marketRegime = computed(() => ({ BULL: '偏强', BEAR: '偏弱', NEUTRAL: '震荡', RANGE: '震荡', RISK_OFF: '风险偏高' }[String(market.value.regime || '').toUpperCase()] || businessLabel(market.value.regime)))
 
 function metricValue(value: unknown, digits = 1) {
   return value == null || value === '' ? '不可用' : formatNumber(value, digits)
@@ -233,7 +235,7 @@ onUnmounted(() => {
     <LoadingState v-else-if="loading && !dashboard && hasPortfolio" message="正在读取今天的市场与组合" />
 
     <section v-if="!hasPortfolio && !loading && !error" class="setup-card panel-card">
-      <div class="setup-title"><div><p class="page-eyebrow">FIRST RUN</p><h2>开始使用</h2><p>完成下面三步，就可以每天快速看清市场、组合和建议。</p></div><Sparkles :size="25" /></div>
+      <div class="setup-title"><div><p class="page-eyebrow">首次使用</p><h2>开始使用</h2><p>完成下面三步，就可以每天快速看清市场、组合和建议。</p></div><Sparkles :size="25" /></div>
       <ol class="setup-list"><li v-for="(step, index) in setupSteps" :key="step.key" :class="{ done: step.done }"><div class="step-index">{{ step.done ? '✓' : index + 1 }}</div><div class="step-copy"><strong>{{ step.title }}</strong><span>{{ step.done ? '已完成' : step.description }}</span></div><n-button v-if="!step.done" secondary size="small" @click="step.action">{{ step.actionLabel }}<ArrowRight :size="14" /></n-button><span v-else class="step-done">已完成</span></li></ol>
       <p class="setup-note">技术状态会在需要时显示，现在只关注下一步。</p>
     </section>
@@ -243,7 +245,7 @@ onUnmounted(() => {
 
       <SectionCard title="今日市场" :description="dashboard.market_open ? '市场数据来自最近可用的生产快照。' : 'A 股今日休市，下面展示最近一个交易日的市场状态。'">
         <template #actions><FreshnessLabel :freshness="market.freshness" :at="market.captured_at" /><n-button text type="primary" @click="indicatorsOpen = !indicatorsOpen">{{ indicatorsOpen ? '收起指标' : '查看指标' }}<ArrowRight :size="14" /></n-button></template>
-        <div class="market-head"><div><strong class="market-score mono-number">{{ metricValue(market.score, 1) }}</strong><span>Market Score</span></div><div><strong>{{ marketRegime }}</strong><span>{{ market.regime || 'Regime 不可用' }}</span></div><StatusIndicator :status="marketStatus === 'VALID' || marketStatus === 'FRESH' ? 'ok' : 'degraded'" :label="market.quality_status === 'VALID' ? '质量正常' : '需要关注'" /></div>
+        <div class="market-head"><div><strong class="market-score mono-number">{{ metricValue(market.score, 1) }}</strong><span>市场评分</span></div><div><strong>{{ marketRegime }}</strong><span>市场环境</span></div><StatusIndicator :status="marketStatus === 'VALID' || marketStatus === 'FRESH' ? 'ok' : 'degraded'" :label="market.quality_status === 'VALID' ? '质量正常' : '需要关注'" /></div>
         <div class="market-metrics"><MetricTile label="全 A 中位数" :value="metricValue(market.all_a_median?.index_value, 2)" helper="最近可用交易日" /><MetricTile label="成交集中度" :value="formatPercent(market.components?.top5_turnover_concentration)" /><MetricTile label="市场广度" :value="ratioOrScore(market.advance_ratio ?? market.breadth_ratio ?? market.components?.breadth)" /><MetricTile label="覆盖率" :value="formatPercent(market.coverage ?? market.metrics?.coverage)" /></div>
         <p class="market-summary">{{ market.summary || (market.components?.breadth != null ? `市场广度指标为 ${metricValue(market.components.breadth, 1)}，建议结合组合暴露决定是否增加风险。` : '当前市场数据已加载，可在详情中查看量化指标。') }}</p>
         <div v-if="marketBrief" class="market-context" data-testid="fuyao-market-context">
@@ -251,7 +253,7 @@ onUnmounted(() => {
           <div class="context-block"><span class="context-label">行业强弱</span><div class="context-items"><span><strong>领涨 {{ marketBrief.industry?.leaders?.[0]?.name || '不可用' }}</strong><em class="pos">{{ percentPoint(marketBrief.industry?.leaders?.[0]?.change_pct) }}</em></span><span><strong>领跌 {{ marketBrief.industry?.laggards?.[0]?.name || '不可用' }}</strong><em class="neg">{{ percentPoint(marketBrief.industry?.laggards?.[0]?.change_pct) }}</em></span></div></div>
           <div class="context-block"><span class="context-label">市场情绪</span><div class="context-items"><span><strong>涨停</strong><em>{{ countValue(marketBrief.sentiment?.limit_up_count) }}</em></span><span><strong>跌停</strong><em>{{ countValue(marketBrief.sentiment?.limit_down_count) }}</em></span><span><strong>异动</strong><em>{{ countValue(marketBrief.sentiment?.abnormal_count) }}</em></span></div></div>
         </div>
-        <TechnicalDetails v-if="indicatorsOpen" title="市场指标与数据质量" name="market-details" :default-open="true"><div class="detail-grid"><div><span>Trend</span><strong>{{ metricValue(market.components?.trend) }}</strong></div><div><span>Liquidity</span><strong>{{ metricValue(market.components?.liquidity) }}</strong></div><div><span>Profitability</span><strong>{{ metricValue(market.components?.profitability) }}</strong></div><div><span>Diffusion</span><strong>{{ metricValue(market.components?.diffusion) }}</strong></div><div><span>Crowding</span><strong>{{ metricValue(market.components?.crowding) }}</strong></div><div><span>Tail Risk</span><strong>{{ metricValue(market.components?.tail_risk) }}</strong></div><div><span>Coverage</span><strong>{{ formatPercent(market.coverage ?? market.metrics?.coverage) }}</strong></div><div><span>Source</span><strong>{{ market.market_score_source || '—' }}</strong></div></div><pre>{{ JSON.stringify({ market, data_health: dashboard.data_health }, null, 2) }}</pre></TechnicalDetails>
+        <TechnicalDetails v-if="indicatorsOpen" title="市场指标与数据质量" name="market-details" :default-open="true"><div class="detail-grid"><div><span>趋势</span><strong>{{ metricValue(market.components?.trend) }}</strong></div><div><span>流动性</span><strong>{{ metricValue(market.components?.liquidity) }}</strong></div><div><span>盈利能力</span><strong>{{ metricValue(market.components?.profitability) }}</strong></div><div><span>市场扩散</span><strong>{{ metricValue(market.components?.diffusion) }}</strong></div><div><span>拥挤程度</span><strong>{{ metricValue(market.components?.crowding) }}</strong></div><div><span>尾部风险</span><strong>{{ metricValue(market.components?.tail_risk) }}</strong></div><div><span>数据覆盖率 (Coverage)</span><strong>{{ formatPercent(market.coverage ?? market.metrics?.coverage) }}</strong></div><div><span>参数来源</span><strong>{{ businessLabel(market.market_score_source) }}</strong></div></div><pre>{{ JSON.stringify({ market, data_health: dashboard.data_health }, null, 2) }}</pre></TechnicalDetails>
       </SectionCard>
 
       <div class="decision-grid">

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { localizedValue } from '../../utils/ui'
+import { businessLabel } from '../../utils/businessLocale'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
 import type { V3HoldingsDecisionBarVM } from './holdings-types'
 
@@ -14,7 +16,7 @@ defineProps<{ decision: V3HoldingsDecisionBarVM }>()
     <div class="decision__main">
       <h2 class="decision__title" data-testid="v3-holdings-decision-title">{{ decision.title }}</h2>
       <p class="decision__subtitle" data-testid="v3-holdings-decision-subtitle">{{ decision.subtitle }}</p>
-      <p v-if="decision.quality" class="decision__quality">质量 {{ decision.quality }}</p>
+      <p v-if="decision.quality" class="decision__quality">质量 {{ localizedValue(decision.quality) }}</p>
     </div>
     <div class="decision__metrics">
       <div class="decision__metric">
@@ -34,7 +36,7 @@ defineProps<{ decision: V3HoldingsDecisionBarVM }>()
       <V3StatusBadge
         v-for="flag in decision.riskFlags"
         :key="flag"
-        :label="flag"
+        :label="businessLabel(flag)"
         tone="warning"
       />
     </div>

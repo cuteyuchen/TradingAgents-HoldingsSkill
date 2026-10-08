@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { businessLabel } from '../utils/businessLocale'
+import { statusLabel, actionLabel } from '../utils/ui'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BarChart3, Bot, CalendarClock, Database, Palette, Plus, RefreshCw, Server, ShieldCheck, SlidersHorizontal } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
@@ -52,7 +54,7 @@ const {
 
 const sections: Array<{ key: SettingSection; label: string; description: string; icon: typeof Database }> = [
   { key: 'data', label: '数据与行情', description: '组合与数据入口', icon: Database },
-  { key: 'ai', label: 'AI 模型', description: '供应商与模型用途', icon: Bot },
+  { key: 'ai', label: '人工智能模型', description: '供应商与模型用途', icon: Bot },
   { key: 'automation', label: '自动分析', description: '计划与通知', icon: CalendarClock },
   { key: 'strategy', label: '策略参数', description: '高级治理与审批', icon: SlidersHorizontal },
   { key: 'system', label: '系统状态', description: '高级诊断与就绪度', icon: Server },
@@ -80,10 +82,10 @@ const fuyaoCapabilityLabels: Record<string, string> = {
   financials: '财务',
   valuation: '估值',
   index: '指数',
-  fund: '基金 / ETF',
+  fund: '交易型基金（ETF）',
   special_data: '特色数据',
 }
-const fuyaoCapabilities = computed(() => Object.entries(fuyaoStatus.value?.capabilities || {}).map(([key, value]) => ({ key, label: fuyaoCapabilityLabels[key] || key, value })))
+const fuyaoCapabilities = computed(() => Object.entries(fuyaoStatus.value?.capabilities || {}).map(([key, value]) => ({ key, label: fuyaoCapabilityLabels[key] || businessLabel(key), value })))
 
 function fuyaoStatusType(status: FuyaoCapabilityStatus | string | undefined): 'success' | 'warning' | 'error' | 'info' | 'default' {
   const value = typeof status === 'string' ? status : status?.status
@@ -130,7 +132,7 @@ async function saveFuyaoConfig() {
     fuyaoConfig.value = await api.saveFuyaoConfig(fuyaoApiKey.value.trim())
     fuyaoApiKey.value = ''
     window.dispatchEvent(new Event('advisor-market-config-changed'))
-    message.success('API Key 已保存，后续行情请求将使用新配置。可探测能力确认连接。')
+    message.success('接口密钥已保存，后续行情请求将使用新配置。可探测能力确认连接。')
     fuyaoStatus.value = await api.getFuyaoStatus()
   } catch (reason) {
     fuyaoConfigError.value = (reason as Error).message
@@ -140,7 +142,7 @@ async function saveFuyaoConfig() {
 }
 
 async function resetFuyaoConfig() {
-  if (fuyaoSaveLoading.value || !window.confirm('移除系统保存的 API Key？之后将使用部署环境中的配置；环境未配置时将回退到备用行情源。')) return
+  if (fuyaoSaveLoading.value || !window.confirm('移除系统保存的接口密钥？之后将使用部署环境中的配置；环境未配置时将回退到备用行情源。')) return
   fuyaoSaveLoading.value = true
   fuyaoConfigError.value = ''
   try {
@@ -212,15 +214,15 @@ onBeforeUnmount(() => { fuyaoApiKey.value = '' })
               <MetricTile label="可用模型供应商" :value="providers.filter((item) => item.enabled).length" />
             </div>
           </SectionCard>
-          <SectionCard title="同花顺金融数据" description="通过 Fuyao 接口提供主要金融数据；连接不可用时，核心行情按配置使用备用数据源。">
+          <SectionCard title="同花顺金融数据" description="通过 同花顺金融数据 接口提供主要金融数据；连接不可用时，核心行情按配置使用备用数据源。">
             <template #actions><n-button secondary size="small" :loading="fuyaoProbeLoading" :disabled="!fuyaoStatus?.configured || fuyaoSaveLoading" @click="probeFuyao"><template #icon><RefreshCw :size="14" /></template>探测能力</n-button></template>
             <div class="fuyao-summary"><div><span>连接状态</span><n-tag size="small" :bordered="false" :type="fuyaoStatusType(fuyaoStatus?.connection_status)">{{ fuyaoStatus?.connection_status === 'FIXTURE' ? '验收模拟数据' : fuyaoStatus?.connection_status || '未读取' }}</n-tag></div><div><span>配置状态</span><n-tag size="small" :bordered="false" :type="fuyaoConfig?.configured ? 'success' : 'warning'">{{ fuyaoConfig?.configured ? '已配置' : '未配置' }}</n-tag></div></div>
             <n-form class="fuyao-config-form" label-placement="top" @submit.prevent="saveFuyaoConfig">
-              <n-form-item label="API Key" :validation-status="fuyaoConfigError ? 'error' : undefined" :feedback="fuyaoConfigError">
+              <n-form-item label="接口密钥 (API Key)" :validation-status="fuyaoConfigError ? 'error' : undefined" :feedback="fuyaoConfigError">
                 <n-input v-model:value="fuyaoApiKey" type="password" show-password-on="click" :input-props="{ 'aria-label': '同花顺金融数据 API Key', autocomplete: 'new-password' }" :maxlength="4096" :disabled="!fuyaoConfig?.can_manage || fuyaoSaveLoading" :placeholder="fuyaoConfig?.configured ? '已配置；输入新密钥可替换' : '输入同花顺金融数据 API Key'" />
               </n-form-item>
               <div class="fuyao-config-actions">
-                <n-button type="primary" attr-type="submit" :loading="fuyaoSaveLoading" :disabled="!fuyaoConfig?.can_manage || !fuyaoApiKey.trim() || fuyaoProbeLoading">保存 API Key</n-button>
+                <n-button type="primary" attr-type="submit" :loading="fuyaoSaveLoading" :disabled="!fuyaoConfig?.can_manage || !fuyaoApiKey.trim() || fuyaoProbeLoading">保存 接口密钥 (API Key)</n-button>
                 <n-button v-if="fuyaoConfig?.source === 'system' && fuyaoConfig.can_manage" secondary :disabled="fuyaoSaveLoading || fuyaoProbeLoading" @click="resetFuyaoConfig">恢复环境配置</n-button>
                 <span class="muted">当前来源：{{ fuyaoSourceLabel }}</span>
               </div>
@@ -260,7 +262,7 @@ onBeforeUnmount(() => { fuyaoApiKey.value = '' })
               <button class="theme-choice" :class="{ selected: theme === 'dark' }" role="radio" :aria-checked="theme === 'dark'" @click="setTheme('dark')"><span class="theme-swatch dark-swatch" /><span><strong>暗色</strong><small>低亮度环境使用</small></span><n-tag v-if="theme === 'dark'" size="small" type="success">当前</n-tag></button>
             </div>
           </SectionCard>
-          <SectionCard title="阅读偏好" description="主界面优先展示市场、组合和最终建议；运行时、参数 hash 与 source lineage 默认收进技术详情。">
+          <SectionCard title="阅读偏好" description="主界面优先展示市场、组合和最终建议；运行时、参数哈希与来源链 默认收进技术详情。">
             <div class="preference-note"><BarChart3 :size="18" /><div><strong>决策优先</strong><p>首页先回答“今天该不该动”，高级证据按需展开。</p></div></div>
             <TechnicalDetails title="外观设置技术详情"><pre>{{ JSON.stringify({ theme, storageKey: THEME_KEY }, null, 2) }}</pre></TechnicalDetails>
           </SectionCard>

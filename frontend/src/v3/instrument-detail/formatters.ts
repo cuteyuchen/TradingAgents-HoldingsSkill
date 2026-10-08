@@ -1,4 +1,5 @@
 /** 统一数值/时间/状态格式化：null/NaN/Infinity → —，0 保留真实 0 */
+import { systemStatusLabel } from '../../utils/systemLocale'
 
 export const DASH = '—'
 
@@ -120,7 +121,7 @@ export function formatDataBasis(value: string | null | undefined): string {
 
 export function formatQuality(value: string | null | undefined): string {
   if (!value) return DASH
-  return value.toUpperCase()
+  return systemStatusLabel(value)
 }
 
 export function formatMarketStatus(status: string | null | undefined): string {
@@ -164,7 +165,7 @@ export function formatExchangeLabel(exchange: string | null | undefined): string
     case 'BSE':
       return '北交所'
     default:
-      return exchange || DASH
+      return exchange ? systemStatusLabel(exchange) : DASH
   }
 }
 
@@ -173,11 +174,11 @@ export function formatInstrumentType(type: string | null | undefined): string {
     case 'STOCK':
       return '股票'
     case 'ETF':
-      return 'ETF'
+      return '交易型基金 (ETF)'
     case 'INDEX':
       return '指数'
     default:
-      return type || DASH
+      return type ? systemStatusLabel(type) : DASH
   }
 }
 

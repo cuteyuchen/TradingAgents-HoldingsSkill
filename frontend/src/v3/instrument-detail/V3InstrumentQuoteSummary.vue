@@ -66,7 +66,7 @@ function trendClass(t: 'up' | 'down' | 'flat' | null): string {
             data-testid="quote-change-pct"
           >{{ formatPercentPoint(changePct) }}</span>
         </div>
-        <p class="quote-summary__hint">红涨绿跌 · 单位：价格 CNY / 量 股 · 金额 CNY</p>
+        <p class="quote-summary__hint">红涨绿跌 · 单位：价格：元／数量：股 · 金额：元</p>
       </div>
       <dl class="quote-summary__grid">
         <div v-for="field in fields" :key="field.key" class="quote-summary__cell">

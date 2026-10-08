@@ -55,8 +55,8 @@ const trendSymbol = computed(() => (item: V3IndexCardVM) => {
         </div>
         <div class="index-card__meta">
           <span v-if="item.quoteTs" class="index-card__ts">{{ item.quoteTs }}</span>
-          <span v-if="item.status !== 'available'" class="index-card__badge">unavailable</span>
-          <span v-else-if="item.stale" class="index-card__badge index-card__badge--stale">stale</span>
+          <span v-if="item.status !== 'available'" class="index-card__badge">不可用</span>
+          <span v-else-if="item.stale" class="index-card__badge index-card__badge--stale">已过期</span>
         </div>
       </button>
     </div>
