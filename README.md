@@ -262,9 +262,39 @@ ghcr.io/cuteyuchen/tradingagents-holdings-advisor:1.0.0
 ghcr.io/cuteyuchen/tradingagents-holdings-advisor:v1.0.0
 ```
 
-应用版本从 `1.0.0` 开始，由根目录 `VERSION` 统一维护；登录/注册页、各业务页顶部、API 文档和系统运维页显示相同版本。版本嵌入构建产物，部署 Compose 不再使用环境变量覆盖版本、提交号和构建时间。后续发布时更新 `VERSION` 及 `frontend/package.json`、`frontend/package-lock.json` 的包版本；如推送 Git 标签，标签必须与 `VERSION` 一致，例如版本 `1.0.1` 对应标签 `v1.0.1`。
+### 版本号硬规则
 
-仅打包本地 ARM64 镜像：
+- **根目录 `VERSION` 是应用版本的单一真实可信来源（SSOT）**。应用版本从 `1.0.0` 开始，统一在此维护；同步更新 `frontend/package.json` 的 `version`，以及 `frontend/package-lock.json` 中存在的应用包版本（当前为顶层 `version` 与 `packages[""].version`，不修改依赖包版本）。版本必须内嵌到前后端构建产物；部署 Compose 不得通过环境变量覆盖应用版本、提交号或构建时间（`APP_VERSION`、`APP_GIT_SHA`、`APP_BUILD_TIME`），这些信息必须来自镜像构建。
+- **每次准备发布修改前，必须先递增根 `VERSION`，并严格遵循 SemVer**：向后兼容的修复递增 patch（如 `1.0.0 → 1.0.1`）；向后兼容的新功能递增 minor 并归零 patch（如 `1.0.1 → 1.1.0`）；不兼容的重大变更递增 major 并归零 minor、patch（如 `1.1.0 → 2.0.0`）。
+- **只有本次修改尚未发布时，才可沿用同一待发布版本号**，并在最终提交上重新完成全部发布验收。已发布版本号绝对不得被不同提交覆盖；不得把已有版本标签重新指向另一提交或以同一版本重推不同提交的镜像。Git 版本标签必须与 `VERSION` 一致，例如 `1.0.1` 对应 `v1.0.1`。
+- **应用版本与内部 Skill/Contract 版本独立**。根 `VERSION`（如 `1.0.0`）标识应用发布；`skill/tradingagents-holdings-advisor/runtime.json` 的内部版本（如 `2.4.0`）及 `skill/tradingagents-holdings-advisor/SKILL.md` 中的规则说明负责 Skill/Contract 演进。二者职责独立，不要求数值相同，不得用内部协议版本替代应用版本，也不得为应用升级机械改写内部版本。
+
+### 全链路版本对账与一致性门槛
+
+以发布提交中的根 `VERSION` 和 `git rev-parse HEAD` 得到的**完整 commit SHA（当前为 40 位）**为基准，记录构建镜像 digest，并逐项对账：
+
+| 核验对象 | 实际路径或入口 | 必须满足的一致性要求 |
+| --- | --- | --- |
+| 源码与包元数据 | 根 `VERSION`、`frontend/package.json`、`frontend/package-lock.json` | 所有应用包版本与根 `VERSION` 完全一致，版本变更包含在发布提交中。 |
+| 公开 API 与后端 | `GET /openapi.json` 的 `info.version`；`backend/app/main.py` 的 FastAPI `app.version`；`backend/app/config.py` 的 `settings.APP_VERSION` | 生产公开 API、运行容器中的 `app.version` 和 `settings.APP_VERSION` 均等于发布版本。 |
+| 前端界面 | `frontend/vite.config.js` 从根 `VERSION` 内嵌 `VITE_APP_VERSION`；`frontend/src/components/AppVersion.vue`；`frontend/src/views/LoginView.vue`、`frontend/src/v3/layouts/V3Topbar.vue` 与 `frontend/src/views/SystemView.vue` | 登录/注册页、各业务页顶部和系统运维页的应用版本一致（界面可带 `v` 前缀）。实际访问 `/dashboard`、`/holdings`、`/settings?section=system` 核验，不能只检查源码或构建日志。 |
+| OCI 镜像标签与注解/labels | GHCR 的 `<VERSION>`、`v<VERSION>` 标签；`org.opencontainers.image.version`、`org.opencontainers.image.revision` | 版本标签指向验收通过的镜像 digest；版本元数据等于根 `VERSION`，revision 等于完整发布 SHA。现有 `.github/workflows/docker-images.yml` 写入的是镜像 config labels；若镜像另带同名 OCI annotation，也必须一致，不能假定 manifest 顶层存在该字段。 |
+| 生产实际运行容器 | Compose 的 `advisor` 服务、容器内 `/VERSION`；需登录的 `GET /api/v3/system/release` 返回 `app_version`、`git_sha`、`build_time` | 从实际容器的 image ID 检查镜像元数据，并核对运行时版本和完整 SHA；运行时 `build_time` 等于镜像内嵌的 `APP_BUILD_TIME`。不得仅凭 `latest`、`sha-<commit>` 标签或短 SHA 宣布一致。 |
+
+核验必须使用上述实际存在的路径、组件和接口。系统运维页会缩写提交号，完整 SHA 必须从发布信息接口或运行容器读回；不得编造其他版本 API、组件或核验命令。任何版本或完整 SHA 不一致、缺失或为 `UNKNOWN`，均阻断发布验收。
+
+### 发布验收四步闭环
+
+**`VERSION` 变更及前端应用包元数据同步必须随发布提交进入版本控制；以下四步全部通过，才能宣布发布完成：**
+
+1. **测试前置通过**：在待发布源码上完成本 README 的开发与测试检查，包括隔离数据库上的 Alembic 空库升级与重复升级、后端 `pytest tests -q`、前端 `npm run typecheck`、`npm run build`、`npm run e2e:acceptance`。测试不得使用生产数据目录；有失败不得进入升级。
+2. **同完整 SHA 的 CI 与双架构镜像验证全绿**：核对 `.github/workflows/ci.yml` 的后端、前端、前端验收及 Docker 检查，与 `.github/workflows/docker-images.yml` 的构建及 `Verify both image architectures and release metadata` 步骤，均对应同一完整发布 SHA 且成功。`linux/amd64`、`linux/arm64` 镜像都必须构建成功，manifest 架构齐全，各架构运行验证通过，版本与完整 SHA 符合上表。两套工作流独立触发，必须按 SHA 核验结果；镜像已推送或另一提交的 CI 全绿不能替代此门槛。保留工作流结果与验收镜像 digest。
+3. **升级前取得 SQLite 一致性备份并保留原数据挂载**：在旧容器仍运行时，通过现有系统运维页创建并校验备份，或登录后调用 `POST /api/v3/system/backups`（请求体 `{"reason":"PRE_UPGRADE"}`），再调用 `POST /api/v3/system/backups/{backup_id}/verify`，确认 `verified=true`、校验和匹配且 SQLite 检查通过。现有 `backend/app/system/backup.py` 使用 SQLite 在线 backup API；WAL 模式下不得只复制正在运行的 `advisor.db`。保留备份 `.sqlite` 与 `.json` 清单（默认宿主机 `./backend/data/backups`），完成备份后才可升级。继续使用同一宿主机目录 `./backend/data -> /app/data`，不得改挂空目录、新数据卷或删除原数据；启动时的自动备份保护不能替代升级前的验收备份。
+4. **线上读回并完成对账**：升级后读回实际运行容器的 image ID、digest、OCI 版本与 revision、`/VERSION`、`settings.APP_VERSION`、`app.version`，再检查生产 `/openapi.json`、前端界面及 `/api/v3/system/release` 的版本、完整 `git_sha` 和构建时间，与同一发布提交和验收镜像逐项核对并保留结果。任一项不一致或无法取得证据，都不能宣布发布完成。
+
+### 部署操作与线上读回
+
+本地 ARM64 打包与调试示例（正式发布仍须满足上述双架构及构建元数据门槛）：
 
 ```bash
 docker buildx build --platform linux/arm64 -t tradingagents-holdings-advisor:1.0.0-arm64 --load .
@@ -286,7 +316,7 @@ docker compose -f docker-compose.deploy.yml pull
 docker compose -f docker-compose.deploy.yml up -d --remove-orphans
 ```
 
-后续更新只需拉取并重建一个容器：
+后续更新在四步闭环的测试、CI/镜像验证及升级前备份门槛通过后，拉取并重建容器：
 
 ```bash
 docker compose -f docker-compose.deploy.yml pull advisor
@@ -294,6 +324,36 @@ docker compose -f docker-compose.deploy.yml up -d --no-deps advisor
 ```
 
 部署 Compose 继续把宿主机 `./backend/data` 挂载到 `/app/data`，升级镜像不会覆盖 SQLite 数据库、上传截图和分析产物。使用 `IMAGE_TAG=sha-<commit>` 可以锁定并回滚到指定提交。
+
+升级后，在原部署目录执行以下只读核验，将输出与发布版本、完整 SHA、验收镜像 digest 及原数据挂载对账。镜像检查使用实际运行容器的 image ID：
+
+```bash
+release_container="$(docker compose -f docker-compose.deploy.yml ps -q advisor)"
+docker inspect "$release_container" --format 'image_id={{.Image}} image_ref={{.Config.Image}} mounts={{json .Mounts}}'
+release_image="$(docker inspect "$release_container" --format '{{.Image}}')"
+docker image inspect "$release_image" --format 'digests={{json .RepoDigests}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
+docker image inspect "$release_image" --format '{{json .Config.Env}}' | docker compose -f docker-compose.deploy.yml exec -T advisor python -c 'import json, sys; env = dict(item.split("=", 1) for item in json.load(sys.stdin)); print(json.dumps({key: env.get(key) for key in ("APP_GIT_SHA", "APP_BUILD_TIME")}, indent=2))'
+docker compose -f docker-compose.deploy.yml exec -T advisor python - <<'PY'
+import json
+from pathlib import Path
+from urllib.request import urlopen
+from app.config import settings
+from app.main import app
+
+with urlopen("http://127.0.0.1:8000/openapi.json") as response:
+    openapi = json.load(response)
+print(json.dumps({
+    "VERSION": Path("/VERSION").read_text(encoding="utf-8").strip(),
+    "settings.APP_VERSION": settings.APP_VERSION,
+    "app.version": app.version,
+    "openapi.info.version": openapi["info"]["version"],
+    "git_sha": settings.APP_GIT_SHA,
+    "build_time": settings.APP_BUILD_TIME,
+}, ensure_ascii=False, indent=2))
+PY
+```
+
+该读回还须结合生产访问地址的 `/openapi.json`、实际前端页面，以及登录后 `/api/v3/system/release` 的响应核验；容器内检查通过不能替代线上全链路验收。
 
 ## 本地开发与测试
 
