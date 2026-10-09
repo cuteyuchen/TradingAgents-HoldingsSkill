@@ -6,9 +6,10 @@ import threading
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import JSON, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from ..decision_contract import canonicalize_analysis_mode
 from ..memory.models import DailyReviewRun, DecisionMemory, DecisionOutcome
@@ -120,7 +121,6 @@ def ensure_operational_run(db: Session, *, user_id: int, portfolio_id: int, trad
         DailyOperationalRun.workflow_version == WORKFLOW_VERSION,
     )).scalar_one_or_none()
     if row is not None:
-        row.checkpoint_state_json = dict(row.checkpoint_state_json or {})
         return row
     row = DailyOperationalRun(
         user_id=user_id,
@@ -182,6 +182,67 @@ def _finished_checkpoint_job():
     ).exists()
 
 
+def merge_operational_checkpoint_state(
+    db: Session, op_run: DailyOperationalRun, updates: dict[str, Any],
+) -> bool:
+    """Merge changed keys against current persisted JSON using database CAS.
+
+    Trusted analysis claims override stale scheduler observations. The JSON
+    comparison is executable on SQLite, and serializes writers without relying
+    on FOR UPDATE or on the Session's potentially stale identity map.
+    """
+    db.flush()
+    while True:
+        original = db.execute(select(DailyOperationalRun.checkpoint_state_json).where(
+            DailyOperationalRun.id == op_run.id,
+        )).scalar_one()
+        state = dict(original or {})
+        for key, record in updates.items():
+            state[key] = {**dict(state.get(key) or {}), **record}
+        facts = db.execute(select(
+            DailyOperationalCheckpoint.checkpoint_name, DailyOperationalCheckpoint.status,
+            DailyOperationalCheckpoint.job_id, DailyOperationalCheckpoint.completed_at,
+            AnalysisJob.status, AnalysisJob.finished_at, AnalysisJob.error_message, AnalysisJob.error_code,
+        ).join(AnalysisJob, AnalysisJob.id == DailyOperationalCheckpoint.job_id).where(
+            DailyOperationalCheckpoint.user_id == op_run.user_id,
+            DailyOperationalCheckpoint.portfolio_id == op_run.portfolio_id,
+            DailyOperationalCheckpoint.trade_date == op_run.trade_date,
+            DailyOperationalCheckpoint.workflow_version == op_run.workflow_version,
+            DailyOperationalCheckpoint.checkpoint_name.in_(tuple(cp.key for cp in ANALYSIS_CHECKPOINTS)),
+            AnalysisJob.user_id == DailyOperationalCheckpoint.user_id,
+            AnalysisJob.portfolio_id == DailyOperationalCheckpoint.portfolio_id,
+        )).all()
+        for key, claim_status, job_id, completed_at, job_status, finished_at, error_message, error_code in facts:
+            status = JOB_STATUS_MAP.get(str(job_status).lower())
+            terminal = (status in {"SUCCESS", "FAILED", "SKIPPED"} and claim_status == status
+                        and finished_at is not None and completed_at == finished_at)
+            active = status == "RUNNING" and claim_status in {"CLAIMED", "RUNNING"}
+            if not terminal and not active:
+                continue
+            record = dict(state.get(key) or {})
+            record.update(status=status, job_id=job_id)
+            if terminal:
+                record["updated_at"] = finished_at.isoformat()
+                if status != "SUCCESS":
+                    record["last_error"] = error_message or error_code or f"analysis_job_{job_status}"
+            if status in {"SUCCESS", "RUNNING"}:
+                record.pop("last_error", None)
+            state[key] = record
+        if state == (original or {}):
+            set_committed_value(op_run, "checkpoint_state_json", state)
+            return False
+        result = db.execute(update(DailyOperationalRun).where(
+            DailyOperationalRun.id == op_run.id,
+            (DailyOperationalRun.checkpoint_state_json == original) if original is not None else or_(
+                DailyOperationalRun.checkpoint_state_json.is_(None),
+                DailyOperationalRun.checkpoint_state_json == JSON.NULL,
+            ),
+        ).values(checkpoint_state_json=state).execution_options(synchronize_session=False))
+        if result.rowcount:
+            db.refresh(op_run)
+            return True
+
+
 def _reconcile_operational_checkpoints(
     db: Session,
     *,
@@ -195,7 +256,8 @@ def _reconcile_operational_checkpoints(
     query = select(DailyOperationalCheckpoint, AnalysisJob).join(
         AnalysisJob, AnalysisJob.id == DailyOperationalCheckpoint.job_id,
     ).where(
-        DailyOperationalCheckpoint.status.in_(("CLAIMED", "RUNNING")),
+        DailyOperationalCheckpoint.status.in_(("CLAIMED", "RUNNING", "SUCCESS", "FAILED", "SKIPPED")),
+        DailyOperationalCheckpoint.checkpoint_name.in_(tuple(cp.key for cp in ANALYSIS_CHECKPOINTS)),
         AnalysisJob.user_id == DailyOperationalCheckpoint.user_id,
         AnalysisJob.portfolio_id == DailyOperationalCheckpoint.portfolio_id,
         func.lower(AnalysisJob.status).in_(("succeeded", "failed", "cancelled")),
@@ -211,40 +273,39 @@ def _reconcile_operational_checkpoints(
         status = JOB_STATUS_MAP[str(job.status).lower()]
         completed_at = _naive_utc(job.finished_at)
         error = None if status == "SUCCESS" else (job.error_message or job.error_code or f"analysis_job_{job.status}")
-        result = db.execute(update(DailyOperationalCheckpoint).where(
-            DailyOperationalCheckpoint.id == claim.id,
-            DailyOperationalCheckpoint.job_id == job.id,
-            DailyOperationalCheckpoint.attempt_count == claim.attempt_count,
-            DailyOperationalCheckpoint.status.in_(("CLAIMED", "RUNNING")),
-            _finished_checkpoint_job(),
-        ).values(
-            status=status,
-            completed_at=completed_at,
-            lease_expires_at=None,
-            last_error=error,
-            updated_at=moment,
-        ).execution_options(synchronize_session="fetch"))
-        if not result.rowcount:
+        checkpoint_changed = False
+        if claim.status in {"CLAIMED", "RUNNING"}:
+            result = db.execute(update(DailyOperationalCheckpoint).where(
+                DailyOperationalCheckpoint.id == claim.id,
+                DailyOperationalCheckpoint.job_id == job.id,
+                DailyOperationalCheckpoint.attempt_count == claim.attempt_count,
+                DailyOperationalCheckpoint.status.in_(("CLAIMED", "RUNNING")),
+                select(AnalysisJob.id).where(
+                    AnalysisJob.id == claim.job_id,
+                    AnalysisJob.status == job.status,
+                    AnalysisJob.finished_at == job.finished_at,
+                ).exists(),
+                _finished_checkpoint_job(),
+            ).values(
+                status=status, completed_at=completed_at, lease_expires_at=None,
+                last_error=error, updated_at=moment,
+            ).execution_options(synchronize_session="fetch"))
+            if not result.rowcount:
+                continue
+            checkpoint_changed = True
+        elif claim.status != status or claim.completed_at != completed_at:
             continue
-        # Serialize updates to the shared JSON document when two checkpoint
-        # jobs finish together. Keep the source and other checkpoint metadata.
         op_run = db.execute(select(DailyOperationalRun).where(
             DailyOperationalRun.user_id == claim.user_id,
             DailyOperationalRun.portfolio_id == claim.portfolio_id,
             DailyOperationalRun.trade_date == claim.trade_date,
             DailyOperationalRun.workflow_version == claim.workflow_version,
-        ).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+        )).scalar_one_or_none()
+        projection_changed = False
         if op_run is not None:
-            state = dict(op_run.checkpoint_state_json or {})
-            record = dict(state.get(claim.checkpoint_name) or {})
-            record.update(status=status, job_id=job.id, updated_at=completed_at.isoformat())
-            if error:
-                record["last_error"] = error
-            else:
-                record.pop("last_error", None)
-            state[claim.checkpoint_name] = record
-            op_run.checkpoint_state_json = state
-        changed.append(claim)
+            projection_changed = merge_operational_checkpoint_state(db, op_run, {})
+        if checkpoint_changed or projection_changed:
+            changed.append(claim)
         db.flush()
     return changed
 
@@ -255,7 +316,8 @@ def reconcile_operational_checkpoints(
     """Converge active claims from finished jobs, without committing.
 
     A finished job is authoritative even before the claim lease expires.
-    Live jobs and already-terminal markers (including REUSED) stay untouched.
+    Trusted terminal claims also repair their persisted Run JSON projection.
+    Other terminal markers (including REUSED) stay untouched.
     Conditional updates make repeated/concurrent reconciliation idempotent.
     """
     return _reconcile_operational_checkpoints(db, now=now)
@@ -264,6 +326,44 @@ def reconcile_operational_checkpoints(
 def finish_analysis_job_checkpoints(db: Session, job: AnalysisJob) -> list[DailyOperationalCheckpoint]:
     """Write checkpoint and run state in the job's terminal transaction."""
     return _reconcile_operational_checkpoints(db, now=job.finished_at, job_id=job.id)
+
+
+def retry_analysis_job_checkpoints(db: Session, job: AnalysisJob) -> None:
+    """Advance this job's retryable analysis claims only on explicit Job retry."""
+    db.flush()
+    moment = _claim_moment(None)
+    claims = db.execute(select(DailyOperationalCheckpoint).where(
+        DailyOperationalCheckpoint.job_id == job.id,
+        DailyOperationalCheckpoint.user_id == job.user_id,
+        DailyOperationalCheckpoint.portfolio_id == job.portfolio_id,
+        DailyOperationalCheckpoint.checkpoint_name.in_(tuple(cp.key for cp in ANALYSIS_CHECKPOINTS)),
+        DailyOperationalCheckpoint.status.in_(("FAILED", "SKIPPED", "CLAIMED", "RUNNING")),
+    )).scalars().all()
+    for claim in claims:
+        result = db.execute(update(DailyOperationalCheckpoint).where(
+            DailyOperationalCheckpoint.id == claim.id,
+            DailyOperationalCheckpoint.job_id == job.id,
+            DailyOperationalCheckpoint.attempt_count == claim.attempt_count,
+            DailyOperationalCheckpoint.status == claim.status,
+            select(AnalysisJob.id).where(
+                AnalysisJob.id == job.id, AnalysisJob.status == "retrying",
+                AnalysisJob.finished_at.is_(None),
+            ).exists(),
+        ).values(status="CLAIMED", claimed_at=moment, lease_expires_at=moment + ANALYSIS_CLAIM_LEASE,
+                 completed_at=None, last_error=None, attempt_count=claim.attempt_count + 1,
+                 updated_at=moment).execution_options(synchronize_session="fetch"))
+        if not result.rowcount:
+            continue
+        op_run = db.execute(select(DailyOperationalRun).where(
+            DailyOperationalRun.user_id == claim.user_id,
+            DailyOperationalRun.portfolio_id == claim.portfolio_id,
+            DailyOperationalRun.trade_date == claim.trade_date,
+            DailyOperationalRun.workflow_version == claim.workflow_version,
+        )).scalar_one_or_none()
+        if op_run is not None:
+            merge_operational_checkpoint_state(db, op_run, {
+                claim.checkpoint_name: {"status": "RUNNING", "job_id": job.id, "updated_at": moment.isoformat()},
+            })
 
 
 def _claim_checkpoint(
@@ -721,6 +821,7 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
         return {"status": "NON_TRADING_DAY", "trade_date": trade_date.isoformat(), "checkpoints": {}}
     op_run = ensure_operational_run(db, user_id=portfolio.user_id, portfolio_id=portfolio.id, trade_date=trade_date)
     state = dict(op_run.checkpoint_state_json or {})
+    original_state = dict(state)
     started_jobs: list[int] = []
     maintenance_result = None
 
@@ -933,10 +1034,12 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
                 reason="CHECKPOINT_EXECUTION_FAILED",
                 metadata={"error": str(exc)},
             )
-    op_run.checkpoint_state_json = state
     op_run.last_tick_at = _naive_utc(local)
     op_run.status = "RUNNING"
-    db.flush()
+    merge_operational_checkpoint_state(db, op_run, {
+        key: record for key, record in state.items() if record != original_state.get(key)
+    })
+    state = dict(op_run.checkpoint_state_json or {})
     db.commit()
     for job_id in started_jobs:
         # Keep the existing analysis engine as the sole execution path without

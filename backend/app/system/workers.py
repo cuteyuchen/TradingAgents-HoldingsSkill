@@ -18,9 +18,11 @@ def register_worker(kind: str, work_id: int, stop_event: threading.Event) -> Non
         _WORKERS[(kind, int(work_id))] = stop_event
 
 
-def unregister_worker(kind: str, work_id: int) -> None:
+def unregister_worker(kind: str, work_id: int, stop_event: threading.Event | None = None) -> None:
     with _LOCK:
-        _WORKERS.pop((kind, int(work_id)), None)
+        key = (kind, int(work_id))
+        if stop_event is None or _WORKERS.get(key) is stop_event:
+            _WORKERS.pop(key, None)
 
 
 def signal_worker(kind: str, work_id: int) -> bool:

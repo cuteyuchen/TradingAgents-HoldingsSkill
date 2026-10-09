@@ -36,7 +36,7 @@ from .market_data import normalize_code
 from .instrument_market_evidence import collect_market_snapshot, enrich_candidate_evidence, refresh_snapshot_quotes
 from .unified_evidence import attach_portfolio_exposures
 from .model_client import StructuredModelResult, call_model, call_model_json, model_cancellation, parse_json_result
-from .analysis_lease import AnalysisLeaseHeartbeat
+from .analysis_lease import AnalysisLeaseHeartbeat, AnalysisOwnershipLost, AnalysisWorkerOwnership
 from .skill_runtime import runtime_metadata, runtime_prompt
 from ..analysis_workflow.constants import WORKFLOW_VERSION, LEGACY_WORKFLOW_VERSION, ArtifactType, DebateType, RunStatus
 from ..analysis_workflow.agents import prompt_manifest, prompt_metadata
@@ -153,7 +153,13 @@ FINAL_SCHEMA = {
 }
 
 
+_worker_ownership = contextvars.ContextVar("analysis_worker_ownership", default=None)
+
+
 def _job_stage(db: Session, job: AnalysisJob, stage: str, progress: int) -> None:
+    owner = _worker_ownership.get()
+    if owner is not None:
+        owner.lock(db)
     db.refresh(job)
     if job.status == "cancelled":
         raise RuntimeError("job_cancelled")
@@ -1644,12 +1650,13 @@ def run_analysis_job(job_id: int) -> None:
     job: AnalysisJob | None = None
     heartbeat: AnalysisLeaseHeartbeat | None = None
     audit: WorkflowAuditRecorder | None = None
+    owner: AnalysisWorkerOwnership | None = None
+    owner_context = None
     stop_event = threading.Event()
     from ..operations.workflow import finish_analysis_job_checkpoints
     from ..system.logging import bind_worker_context
     from ..system.workers import register_worker, unregister_worker
 
-    register_worker("analysis", job_id, stop_event)
     bind_worker_context(analysis_job_id=job_id)
     try:
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
@@ -1659,21 +1666,22 @@ def run_analysis_job(job_id: int) -> None:
             # A queued job can be cancelled before its worker starts. A
             # running cancellation is finalized by that worker's exit path.
             if job.finished_at is None and job.started_at is None:
+                owner = AnalysisWorkerOwnership.capture(db, job, started_at=None)
+                owner.lock(db)
                 job.finished_at = utc_now()
             finish_analysis_job_checkpoints(db, job)
             db.commit()
             return
         if job.status not in {"queued", "retrying"}:
             return
-        job.status = "running"
-        job.started_at = utc_now()
-        job.error_code = None
-        job.error_message = None
-        db.commit()
+        owner = AnalysisWorkerOwnership.start(db, job, now=utc_now())
+        owner_context = _worker_ownership.set(owner)
+        register_worker("analysis", job_id, stop_event)
         heartbeat = AnalysisLeaseHeartbeat.for_job(
             db,
             job_id=job.id,
             external_stop=stop_event,
+            attempt_count=owner.checkpoints[-1][1] if owner.checkpoints else None,
         )
         if heartbeat is not None:
             heartbeat.start()
@@ -1722,6 +1730,7 @@ def run_analysis_job(job_id: int) -> None:
         job_context = dict(job.context_json or {})
         force_restart = bool(job_context.get("force_restart"))
         audit = WorkflowAuditRecorder(business_db=db, plan=plan)
+        audit.write_guard = owner.lock
         audit.cancel_check = lambda: stop_event.is_set() or (heartbeat is not None and heartbeat.lost)
         existing_run = audit.db.query(AnalysisRun).filter(AnalysisRun.job_id == job.id).first()
         if existing_run is not None and existing_run.workflow_version not in {None, workflow_version}:
@@ -1740,6 +1749,7 @@ def run_analysis_job(job_id: int) -> None:
             legacy_fallback_used=not true_multi_agent,
         )
         if force_restart:
+            owner.lock(db)
             job_context.pop("force_restart", None)
             job.context_json = job_context
             db.commit()
@@ -2521,24 +2531,29 @@ def run_analysis_job(job_id: int) -> None:
             audit.record_artifact(ArtifactType.FINAL_DECISION, final, artifact_key="final_decision")
             _audit_simple_node(audit, "report_renderer", output={"markdown_bytes": len(markdown.encode("utf-8"))}, artifact_type=ArtifactType.STRUCTURED_OUTPUT)
             audit.finish_stage()
-        run = audit.finish_run(
-            RunStatus.BLOCKED if run_blocked else RunStatus.COMPLETED,
-            summary=final.get("portfolio_conclusion"),
-            final_rating=final.get("final_rating"),
-            cash_target=final.get("cash_target"),
-            confidence=final.get("confidence"),
-            data_quality_grade=final.get("data_quality_grade"),
-            markdown=markdown,
-            structured_payload=structured_payload,
-            model_profile_id=final_profile.id if final_profile else None,
-            blocked=run_blocked,
-        )
-        job.status = "succeeded"
-        job.current_stage = "completed"
-        job.progress_percent = 100
-        job.finished_at = utc_now()
-        finish_analysis_job_checkpoints(db, job)
-        db.commit()
+        with audit.terminal_transaction(db):
+            owner.lock(db)
+            db.refresh(job)
+            if job.status == "cancelled":
+                raise RuntimeError("job_cancelled")
+            run = audit.finish_run(
+                RunStatus.BLOCKED if run_blocked else RunStatus.COMPLETED,
+                summary=final.get("portfolio_conclusion"),
+                final_rating=final.get("final_rating"),
+                cash_target=final.get("cash_target"),
+                confidence=final.get("confidence"),
+                data_quality_grade=final.get("data_quality_grade"),
+                markdown=markdown,
+                structured_payload=structured_payload,
+                model_profile_id=final_profile.id if final_profile else None,
+                blocked=run_blocked,
+            )
+            job.status = "succeeded"
+            job.current_stage = "completed"
+            job.progress_percent = 100
+            job.finished_at = utc_now()
+            finish_analysis_job_checkpoints(db, job)
+            db.commit()
         run = db.query(AnalysisRun).filter(AnalysisRun.id == audit.run_id).one()
 
         # Memory is a derived maintenance fact. Capture it after the successful
@@ -2635,10 +2650,22 @@ def run_analysis_job(job_id: int) -> None:
             # Operating notifications are advisory side effects and must never
             # change the authoritative AnalysisJob/AnalysisRun result.
             logger.exception("Operating notification dispatch failed for analysis run %s", run.id)
+    except AnalysisOwnershipLost:
+        db.rollback()
+        logger.info("Analysis job %s worker generation replaced; exiting", job_id)
     except Exception as exc:
         logger.exception("Analysis job %s failed", job_id)
         if job is not None:
             db.rollback()
+            if audit is not None:
+                audit.db.rollback()
+            if owner is None:
+                return
+            try:
+                owner.lock(db)
+            except AnalysisOwnershipLost:
+                db.rollback()
+                return
             job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
             cancelled = job is not None and job.status == "cancelled"
             interrupted = not cancelled and (stop_event.is_set() or (heartbeat is not None and heartbeat.lost))
@@ -2646,7 +2673,8 @@ def run_analysis_job(job_id: int) -> None:
                 exc = RuntimeError("analysis_worker_interrupted")
             if audit is not None and audit.run_id is not None:
                 try:
-                    audit.fail_run(exc, cancelled=cancelled, interrupted=interrupted)
+                    with audit.terminal_transaction(db):
+                        audit.fail_run(exc, cancelled=cancelled, interrupted=interrupted)
                 except Exception:
                     logger.exception("Workflow audit persistence failed for analysis job %s", job_id)
             if job is not None:
@@ -2664,7 +2692,9 @@ def run_analysis_job(job_id: int) -> None:
     finally:
         if heartbeat is not None:
             heartbeat.stop()
-        unregister_worker("analysis", job_id)
+        unregister_worker("analysis", job_id, stop_event)
+        if owner_context is not None:
+            _worker_ownership.reset(owner_context)
         if audit is not None:
             try:
                 audit.close()

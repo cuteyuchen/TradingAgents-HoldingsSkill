@@ -273,7 +273,7 @@ def _enqueue_memory_reviews(db: Session, *, trade_date: date, now_utc: datetime)
 def _sync_review_checkpoint(db: Session, *, portfolio: Portfolio, trade_date: date, now_utc: datetime) -> None:
     """Reflect the existing DailyReviewRun in the lightweight operation state."""
 
-    from ..operations.workflow import ensure_operational_run
+    from ..operations.workflow import ensure_operational_run, merge_operational_checkpoint_state
 
     op_run = ensure_operational_run(
         db,
@@ -297,9 +297,8 @@ def _sync_review_checkpoint(db: Session, *, portfolio: Portfolio, trade_date: da
         }
     elif now_utc.astimezone(CHINA_TZ).time() >= time(15, 30):
         state.setdefault("daily_review", {"status": "PENDING", "updated_at": now_utc.isoformat()})
-    op_run.checkpoint_state_json = state
     op_run.last_tick_at = now_utc.replace(tzinfo=None)
-    db.flush()
+    merge_operational_checkpoint_state(db, op_run, {"daily_review": state["daily_review"]} if "daily_review" in state else {})
 
 
 def _run_daily_operations(db: Session, *, now_utc: datetime, portfolios: list[Portfolio]) -> None:

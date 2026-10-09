@@ -230,6 +230,9 @@ def retry_job(
     else:
         context.pop("force_restart", None)
     row.context_json = context
+    from ..operations.workflow import retry_analysis_job_checkpoints
+
+    retry_analysis_job_checkpoints(db, row)
     db.commit()
     db.refresh(row)
     background_tasks.add_task(run_analysis_job, row.id)

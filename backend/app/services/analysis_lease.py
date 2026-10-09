@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
@@ -16,6 +17,71 @@ from ..v2_models import AnalysisJob
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_ACTIVE_STATUSES = ("CLAIMED", "RUNNING")
+
+
+class AnalysisOwnershipLost(RuntimeError):
+    """The worker's captured generation has been replaced or finalized."""
+
+
+@dataclass(frozen=True)
+class AnalysisWorkerOwnership:
+    job_id: int
+    retry_count: int
+    started_at: datetime | None
+    checkpoints: tuple[tuple[int, int], ...]
+
+    @classmethod
+    def capture(cls, db: Session, job: AnalysisJob, *, started_at: datetime | None):
+        """Keep the generation read by this worker, never a later heartbeat read."""
+        checkpoints = tuple(db.execute(select(
+            DailyOperationalCheckpoint.id, DailyOperationalCheckpoint.attempt_count,
+        ).where(
+            DailyOperationalCheckpoint.job_id == job.id,
+            DailyOperationalCheckpoint.user_id == job.user_id,
+            DailyOperationalCheckpoint.portfolio_id == job.portfolio_id,
+            DailyOperationalCheckpoint.status.in_(CHECKPOINT_ACTIVE_STATUSES),
+        )).all())
+        return cls(job.id, int(job.retry_count or 0), _naive_utc(started_at), checkpoints)
+
+    @classmethod
+    def start(cls, db: Session, job: AnalysisJob, *, now: datetime):
+        """Capture generations before atomically starting this job."""
+        owner = cls.capture(db, job, started_at=now)
+        result = db.execute(update(AnalysisJob).where(
+            *owner._conditions(), AnalysisJob.status.in_(("queued", "retrying")),
+        ).values(status="running", started_at=owner.started_at, error_code=None, error_message=None)
+            .execution_options(synchronize_session=False))
+        if not result.rowcount:
+            raise AnalysisOwnershipLost("analysis_worker_generation_changed")
+        db.commit()
+        db.refresh(job)
+        return owner
+
+    def _conditions(self):
+        conditions = [AnalysisJob.id == self.job_id, AnalysisJob.retry_count == self.retry_count]
+        for checkpoint_id, attempt in self.checkpoints:
+            conditions.append(select(DailyOperationalCheckpoint.id).where(
+                DailyOperationalCheckpoint.id == checkpoint_id,
+                DailyOperationalCheckpoint.job_id == self.job_id,
+                DailyOperationalCheckpoint.attempt_count == attempt,
+                DailyOperationalCheckpoint.status.in_(CHECKPOINT_ACTIVE_STATUSES),
+            ).exists())
+        return conditions
+
+    def lock(self, db: Session) -> None:
+        """Fence subsequent writes with a real conditional UPDATE until commit.
+
+        This takes a write lock on SQLite too. No terminal Job or Run fields
+        may be flushed before this ownership CAS succeeds.
+        """
+        with db.no_autoflush:
+            result = db.execute(update(AnalysisJob).where(
+                *self._conditions(), AnalysisJob.started_at == self.started_at,
+                AnalysisJob.status.in_(("running", "cancelled")),
+                AnalysisJob.finished_at.is_(None),
+            ).values(started_at=AnalysisJob.started_at).execution_options(synchronize_session=False))
+        if not result.rowcount:
+            raise AnalysisOwnershipLost("analysis_worker_generation_changed")
 
 
 def _naive_utc(value: datetime | None) -> datetime | None:
@@ -151,8 +217,10 @@ class AnalysisLeaseHeartbeat:
         interval_seconds: float | None = None,
         session_factory=SessionLocal,
         external_stop: threading.Event | None = None,
+        attempt_count: int | None = None,
     ) -> "AnalysisLeaseHeartbeat | None":
-        attempt_count = checkpoint_attempt_for_job(db, job_id=job_id)
+        if attempt_count is None:
+            attempt_count = checkpoint_attempt_for_job(db, job_id=job_id)
         if attempt_count is None:
             return None
         return cls(

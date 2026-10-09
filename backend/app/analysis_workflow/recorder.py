@@ -1,6 +1,7 @@
 """Incremental workflow audit persistence for coordinated and independent nodes."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from functools import wraps
 from threading import RLock
 from typing import Any, Iterable
@@ -35,10 +36,13 @@ def _audit_write(fn):
     @wraps(fn)
     def wrapped(self, *args, **kwargs):
         with self.write_lock:
+            if self.write_guard:
+                self._prepare_write()
+                self.write_guard(self.db)
             try:
                 return fn(self, *args, **kwargs)
             finally:
-                if self.node_scoped and not (self.db.new or self.db.dirty or self.db.deleted):
+                if (self.node_scoped or self.write_guard) and not self._defer_commit and not (self.db.new or self.db.dirty or self.db.deleted):
                     self.db.commit()
     return wrapped
 
@@ -123,6 +127,19 @@ class WorkflowAuditRecorder:
         self.evidence_binding: dict[str, Any] = {}
         self.model_profiles: dict[int, dict[str, Any]] = {}
         self.cancel_check = None
+        self.write_guard = None
+        self._defer_commit = False
+
+    @contextmanager
+    def terminal_transaction(self, db: Session):
+        """Finalize audit facts in the same transaction as Job/checkpoint CAS."""
+        self.db.rollback()
+        original = self.db, self.isolated, self._defer_commit
+        self.db, self.isolated, self._defer_commit = db, False, True
+        try:
+            yield
+        finally:
+            self.db, self.isolated, self._defer_commit = original
 
     def get_node_spec(self, key: str):
         return self.plan.node(key) if self.plan is not None else node_spec(key)
@@ -139,6 +156,7 @@ class WorkflowAuditRecorder:
         completed = tuple(self._completed_nodes)
         hashes = dict(self._input_hashes)
         binding = dict(self.evidence_binding)
+        write_guard, cancel_check = self.write_guard, self.cancel_check
         self._prepare_write()
         self.db.commit()
 
@@ -153,6 +171,7 @@ class WorkflowAuditRecorder:
             recorder._completed_nodes = list(completed)
             recorder._input_hashes = dict(hashes)
             recorder.evidence_binding = dict(binding)
+            recorder.write_guard, recorder.cancel_check = write_guard, cancel_check
             return recorder
 
         return open_scope
@@ -189,6 +208,11 @@ class WorkflowAuditRecorder:
 
     def _commit(self) -> None:
         self._prepare_write()
+        if self.write_guard:
+            self.write_guard(self.db)
+        if self._defer_commit:
+            self.db.flush()
+            return
         self.db.commit()
 
     def _run(self) -> AnalysisRun:
