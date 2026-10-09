@@ -4,6 +4,7 @@ import type { Page } from '@playwright/test'
 async function mockHome(page: Page, options: {
   complete?: boolean; today?: boolean; older?: boolean; riskUnknown?: boolean;
   medianHistory?: boolean; pendingMemory?: boolean; portfolioReturns?: boolean;
+  missingCostBasis?: boolean; importedPnlOnly?: boolean;
 } = {}) {
   await page.addInitScript(() => localStorage.setItem('advisor_v2_access_token', 'home-regression'))
   const reportDate = options.older ? '2026-10-06' : options.today ? '2026-10-09' : '2026-10-08'
@@ -31,7 +32,11 @@ async function mockHome(page: Page, options: {
       portfolio: {
         status: 'DEGRADED', snapshot_id: 10, total_assets: 180289.5, market_value: 180289.5,
         spendable_cash: 0, gross_exposure: 1, cash_ratio: 0,
-        day_return: options.portfolioReturns ? 0 : null, floating_pnl: options.portfolioReturns ? 0 : null,
+        day_return: options.portfolioReturns ? 0 : null,
+        floating_pnl: options.missingCostBasis || options.importedPnlOnly ? null : options.portfolioReturns ? 0 : -41493.3,
+        imported_pnl_amount: options.missingCostBasis ? null : -41493.3,
+        imported_cost_basis: options.missingCostBasis ? null : 221798.6,
+        pnl_is_realtime: Boolean(options.portfolioReturns),
       },
       market: {}, candidates: {}, triggers: {}, data_health: {},
       analysis: { status: 'AVAILABLE', latest: options.today ? analysis : null, last_analysis: analysis, analysis_in_progress: false },
@@ -81,7 +86,10 @@ test('首页显示历史成功报告，今日行动保持待分析，指标准�
   await expect(page.getByTestId('v3-portfolio-exposure')).toContainText('100.0%')
   await expect(page.getByTestId('v3-portfolio-snapshot')).toContainText('0.0%')
   await expect(page.getByTestId('v3-portfolio-day-return')).toContainText('待产生相邻交易日收盘快照对比')
-  await expect(page.getByTestId('v3-portfolio-floating-pnl')).toContainText('待记录持仓成本基准')
+  await expect(page.getByTestId('v3-portfolio-day-return')).not.toContainText('成本')
+  await expect(page.getByTestId('v3-portfolio-floating-pnl')).toContainText('-¥41,493.30')
+  await expect(page.getByTestId('v3-portfolio-floating-pnl')).toContainText('导入快照口径 (非实时)')
+  await expect(page.getByTestId('v3-portfolio-floating-pnl')).not.toContainText('待记录持仓成本基准')
   await expect(page.getByTestId('v3-all-a-median')).toHaveText('-1.01%')
   await expect(page.getByTestId('v3-all-a-20d')).toContainText('历史积累中')
   await expect(page.getByTestId('v3-all-a-250d')).toContainText('历史积累中')
@@ -139,12 +147,30 @@ test('盘前风险待评分有明确说明，已有历史趋势按比例显示',
   await expect(page.getByTestId('v3-all-a-250d')).toHaveText('62.5%')
 })
 
-test('账户收益已补齐时，零收益保留并去掉缺失提示', async ({ acceptancePage: page }) => {
+test('持仓无成本与导入盈亏时，明确提示待记录成本基准', async ({ acceptancePage: page }) => {
+  await mockHome(page, { missingCostBasis: true })
+  const floatingPnl = page.getByTestId('v3-portfolio-floating-pnl')
+  await expect(floatingPnl.locator('.v3-metric__value')).toHaveText('—')
+  await expect(floatingPnl).toContainText('待记录持仓成本基准')
+  await expect(floatingPnl).not.toContainText('导入快照口径 (非实时)')
+  await expect(page.getByTestId('v3-portfolio-day-return')).toContainText('待产生相邻交易日收盘快照对比')
+})
+
+test('仅有导入盈亏时，首页仍显示快照金额与非实时说明', async ({ acceptancePage: page }) => {
+  await mockHome(page, { importedPnlOnly: true })
+  const floatingPnl = page.getByTestId('v3-portfolio-floating-pnl')
+  await expect(floatingPnl).toContainText('-¥41,493.30')
+  await expect(floatingPnl).toContainText('导入快照口径 (非实时)')
+  await expect(floatingPnl).not.toContainText('待记录持仓成本基准')
+})
+
+test('账户收益已补齐时，实时零收益保留并去掉缺失与导入快照提示', async ({ acceptancePage: page }) => {
   await mockHome(page, { portfolioReturns: true })
   await expect(page.getByTestId('v3-portfolio-day-return')).toContainText('0.00%')
   await expect(page.getByTestId('v3-portfolio-day-return')).not.toContainText('待产生相邻交易日收盘快照对比')
-  await expect(page.getByTestId('v3-portfolio-floating-pnl')).toContainText('¥0')
+  await expect(page.getByTestId('v3-portfolio-floating-pnl')).toContainText('¥0.00')
   await expect(page.getByTestId('v3-portfolio-floating-pnl')).not.toContainText('待记录持仓成本基准')
+  await expect(page.getByTestId('v3-portfolio-floating-pnl')).not.toContainText('导入快照口径 (非实时)')
 })
 
 test.describe('北京时间与待分析复盘衔接', () => {

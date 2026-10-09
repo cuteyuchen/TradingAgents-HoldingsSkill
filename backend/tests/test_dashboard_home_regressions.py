@@ -16,7 +16,7 @@ from app.operations import workflow
 from app.operations.dashboard import _analysis_section, _decision_section, _portfolio_section
 from app.operations.models import DailyOperationalCheckpoint, DailyOperationalRun
 from app.services import scheduler
-from app.v2_models import AnalysisJob, AnalysisRun, Portfolio
+from app.v2_models import AnalysisJob, AnalysisRun, HoldingItem, Portfolio
 from test_daily_operations import _FakeThread, _db, _local, _portfolio_fixture, _utc_naive
 
 
@@ -277,7 +277,80 @@ def test_portfolio_ratios_without_risk_snapshot_use_known_facts(home_db, assets,
     section = _portfolio_section(db, user_id=user.id, portfolio_id=portfolio.id, cutoff=_utc_naive(_local(date(2026, 8, 20), 10)))
     assert section["gross_exposure"] == exposure
     assert section["cash_ratio"] == cash_ratio
-    assert section.get("day_return") is None and section.get("floating_pnl") is None
+    assert section["holdings"] == []
+    assert section["day_return"] is None
+    assert section["floating_pnl"] is None
+    assert section["imported_pnl_amount"] is None
+    assert section["imported_cost_basis"] is None
+    assert section["pnl_is_realtime"] is False
+
+
+def test_portfolio_section_with_real_snapshot_cost_and_pnl(home_db):
+    db, user, portfolio, snapshot = home_db
+    # Snapshot 1, imported at the 2026-10-08 close. PnL is the broker's
+    # imported amount; rounded unit costs do not reproduce it exactly.
+    rows = [
+        ("159325", 14400, 1.170, 0.982, -2703.44),
+        ("159915", 20500, 3.686, 3.132, -11360.42),
+        ("512400", 14000, 1.990, 1.617, -5216.64),
+        ("512570", 5500, 1.266, 1.037, -1258.80),
+        ("515880", 50000, 0.822, 0.615, -10333.35),
+        ("588080", 15400, 1.969, 1.543, -6563.53),
+        ("588170", 21000, 1.102, 0.909, -4057.12),
+    ]
+    snapshot.snapshot_time = _utc_naive(_local(date(2026, 10, 8), 15))
+    snapshot.total_assets = snapshot.total_market_value = 180289.50
+    snapshot.broker_available_cash = 0
+    for code, qty, cost, price, pnl_amount in rows:
+        db.add(HoldingItem(
+            snapshot_id=snapshot.id, code=code, qty=qty, available_qty=qty,
+            cost=cost, screenshot_price=price, market_value=round(qty * price, 2),
+            pnl_amount=pnl_amount,
+        ))
+    db.flush()
+
+    section = _portfolio_section(
+        db, user_id=user.id, portfolio_id=portfolio.id,
+        cutoff=_utc_naive(_local(date(2026, 10, 9), 9)),
+    )
+
+    assert section["floating_pnl"] == -41493.30
+    assert section["imported_pnl_amount"] == -41493.30
+    assert section["imported_cost_basis"] == 221798.60
+    assert section["pnl_is_realtime"] is False
+    assert section["day_return"] is None
+    assert section["position_count"] == 7
+    holdings = {item["code"]: item for item in section["holdings"]}
+    assert set(holdings) == {row[0] for row in rows}
+    for code, qty, cost, price, pnl_amount in rows:
+        assert holdings[code]["qty"] == qty
+        assert holdings[code]["price"] == price
+        assert holdings[code]["cost"] == cost
+        assert holdings[code]["pnl_amount"] == pnl_amount
+
+
+@pytest.mark.parametrize("cost,pnl_amount,expected_cost,expected_pnl", [
+    (None, None, None, None),
+    (0, 0, 0, 0),
+    (1.23456, -0.12345, 123.46, -0.12),
+])
+def test_portfolio_imported_totals_preserve_missing_zero_and_cents(
+    home_db, cost, pnl_amount, expected_cost, expected_pnl,
+):
+    db, user, portfolio, snapshot = home_db
+    db.add(HoldingItem(snapshot_id=snapshot.id, code="159915", qty=100,
+                       cost=cost, pnl_amount=pnl_amount))
+    db.flush()
+
+    section = _portfolio_section(
+        db, user_id=user.id, portfolio_id=portfolio.id,
+        cutoff=_utc_naive(_local(date(2026, 8, 20), 10)),
+    )
+
+    assert section["floating_pnl"] == expected_pnl
+    assert section["imported_pnl_amount"] == expected_pnl
+    assert section["imported_cost_basis"] == expected_cost
+    assert section["pnl_is_realtime"] is False
 
 
 def _completed_run(home_db, *, finished, status="succeeded", portfolio_id=None):

@@ -70,7 +70,7 @@ export function formatRatioPercent(value: number | null, digits = 1): string {
 
 export function formatMoney(value: number | null): string {
   if (value === null) return '—'
-  return `¥${value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`
+  return `${value < 0 ? '-' : ''}¥${formatNumber(Math.abs(value), 2)}`
 }
 
 export function formatCount(value: number | null): string {
@@ -273,7 +273,10 @@ export function mapPortfolioSummary(
   const section = dashboard.portfolio
   const status = strOrNull(section?.status) || 'MISSING'
   const dayReturn = numOrNull(sectionField(section, 'day_return'))
-  const floatingPnl = numOrNull(sectionField(section, 'floating_pnl'))
+  const importedPnlAmount = numOrNull(sectionField(section, 'imported_pnl_amount'))
+  const importedCostBasis = numOrNull(sectionField(section, 'imported_cost_basis'))
+  const floatingPnl = numOrNull(sectionField(section, 'floating_pnl')) ?? importedPnlAmount
+  const floatingPnlIsRealtime = Boolean(sectionField(section, 'pnl_is_realtime'))
   if (status === 'MISSING' && sectionField(section, 'snapshot_id') == null && sectionField(section, 'total_assets') == null) {
     return {
       portfolioId,
@@ -295,6 +298,9 @@ export function mapPortfolioSummary(
       floatingPnl: null,
       dayReturnAvailable: false,
       floatingPnlAvailable: false,
+      floatingPnlIsRealtime: false,
+      importedPnlAmount: null,
+      importedCostBasis: null,
     }
   }
   return {
@@ -319,6 +325,9 @@ export function mapPortfolioSummary(
     floatingPnl,
     dayReturnAvailable: dayReturn !== null,
     floatingPnlAvailable: floatingPnl !== null,
+    floatingPnlIsRealtime,
+    importedPnlAmount,
+    importedCostBasis,
   }
 }
 

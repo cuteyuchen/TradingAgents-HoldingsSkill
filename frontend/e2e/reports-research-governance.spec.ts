@@ -1,4 +1,4 @@
-import { test, expect, login, openPage } from './fixtures'
+import { test, expect, login, openPage, allowExpectedHttpError } from './fixtures'
 
 test('Reports exposes final decision, checkpoint, mode, quality, market context, and lineage', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)

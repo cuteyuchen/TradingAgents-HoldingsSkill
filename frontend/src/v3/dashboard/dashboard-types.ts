@@ -125,6 +125,9 @@ export interface V3PortfolioSummaryVM {
   floatingPnl: number | null
   dayReturnAvailable: boolean
   floatingPnlAvailable: boolean
+  floatingPnlIsRealtime?: boolean
+  importedPnlAmount?: number | null
+  importedCostBasis?: number | null
 }
 
 export interface V3ActionRowVM {

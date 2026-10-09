@@ -319,6 +319,16 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
     can_compute_ratio = total_assets is not None and total_assets > 0
     reserve_assets = snapshot_reserve_assets(snapshot)
     position_count = len(holdings)
+    imported_pnl_amount = (
+        round(sum(item.pnl_amount for item in holdings), 2)
+        if holdings and all(item.pnl_amount is not None for item in holdings)
+        else None
+    )
+    imported_cost_basis = (
+        round(sum(item.qty * item.cost for item in holdings), 2)
+        if holdings and all(item.qty is not None and item.cost is not None for item in holdings)
+        else None
+    )
     return {
         "status": str(risk.quality_status if risk else "DEGRADED").upper(),
         "quality_status": str(risk.quality_status if risk else "DEGRADED").upper(),
@@ -344,6 +354,11 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         "weighted_correlation": risk.weighted_average_correlation if risk else None,
         "max_pairwise_correlation": risk.max_pairwise_correlation if risk else None,
         "position_count": position_count,
+        "day_return": None,
+        "floating_pnl": imported_pnl_amount,
+        "imported_pnl_amount": imported_pnl_amount,
+        "imported_cost_basis": imported_cost_basis,
+        "pnl_is_realtime": False,
         "hard_cap_breaches": [flag for flag in risk_flags if "CAP" in str(flag).upper()],
         "risk_flags": risk_flags,
         "holdings": [{
@@ -351,10 +366,12 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
             "name": item.name,
             "qty": derived_value(item.code, "qty", item.qty),
             "available_qty": derived_value(item.code, "available_qty", item.available_qty),
+            "cost": item.cost,
             "price": item.screenshot_price,
             "market_value": item.market_value,
             "weight": item.weight,
             "pnl_ratio": item.pnl_ratio,
+            "pnl_amount": item.pnl_amount,
             "quote_quality": (item.extra_json or {}).get("quote_quality") if isinstance(item.extra_json, dict) else None,
             "keep_score": (item.extra_json or {}).get("keep_score") if isinstance(item.extra_json, dict) else None,
             "opportunity_reference": (item.extra_json or {}).get("opportunity_reference") if isinstance(item.extra_json, dict) else None,

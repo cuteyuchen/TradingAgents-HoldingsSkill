@@ -88,7 +88,7 @@ const showInitialError = computed(() => Boolean(props.error && props.hasPortfoli
       <V3Metric
         label="浮动盈亏"
         :value="portfolio.floatingPnlAvailable ? formatMoney(portfolio.floatingPnl) : '—'"
-        :secondary="portfolio.floatingPnlAvailable ? undefined : '待记录持仓成本基准'"
+        :secondary="portfolio.floatingPnlAvailable ? (portfolio.floatingPnlIsRealtime ? undefined : '导入快照口径 (非实时)') : '待记录持仓成本基准'"
         data-testid="v3-portfolio-floating-pnl"
       />
     </div>
