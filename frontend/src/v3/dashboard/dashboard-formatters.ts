@@ -2,12 +2,11 @@
  * Dashboard pure formatters and adapter helpers.
  * Missing/unknown never becomes 0.
  */
-import { riskLevelLabel, localizedValue } from '../../utils/ui'
+import { riskLevelLabel, localizedValue, fmtDate, parseDate } from '../../utils/ui'
 import { businessLabel } from '../../utils/businessLocale'
-import { dashboardDecisionSource, dashboardDecisionState, decisionLabel, decisionSummary } from '../../utils/decision'
+import { dashboardDecisionSource, dashboardDecisionState, decisionLabel, decisionSummary, normalizeDecisionState } from '../../utils/decision'
 import type {
   DailyDashboard,
-  DashboardSection,
   MajorIndexQuote,
   MarketBreadthMetric,
   MarketSessionKind,
@@ -208,7 +207,7 @@ export function mapSystemicRisk(snapshot: SystemicRiskSnapshot | null | undefine
 export function mapTypicalStock(median: AllAMedianMetric | null | undefined): V3TypicalStockVM | null {
   if (!median) return null
   return {
-    medianDaily: numOrNull(median.daily_median_return ?? median.current_value),
+    medianDaily: numOrNull(median.daily_median_return),
     trend20d: numOrNull(median.trend_20d),
     percentile250d: numOrNull(median.percentile_250d),
     status: strOrNull(median.status) || 'unavailable',
@@ -260,7 +259,7 @@ export function mapConcentration(metric: TurnoverConcentrationMetric | null | un
   }
 }
 
-function sectionField(section: DashboardSection | undefined, key: string): unknown {
+function sectionField(section: object | undefined, key: string): unknown {
   if (!section || typeof section !== 'object') return undefined
   return (section as Record<string, unknown>)[key]
 }
@@ -273,6 +272,8 @@ export function mapPortfolioSummary(
   if (!dashboard || portfolioId === null) return null
   const section = dashboard.portfolio
   const status = strOrNull(section?.status) || 'MISSING'
+  const dayReturn = numOrNull(sectionField(section, 'day_return'))
+  const floatingPnl = numOrNull(sectionField(section, 'floating_pnl'))
   if (status === 'MISSING' && sectionField(section, 'snapshot_id') == null && sectionField(section, 'total_assets') == null) {
     return {
       portfolioId,
@@ -314,11 +315,10 @@ export function mapPortfolioSummary(
     riskFlags: Array.isArray(sectionField(section, 'risk_flags'))
       ? (sectionField(section, 'risk_flags') as unknown[]).filter((item): item is string => typeof item === 'string')
       : [],
-    // Dashboard portfolio contract has no authoritative day-return / floating-P&L amounts.
-    dayReturn: null,
-    floatingPnl: null,
-    dayReturnAvailable: false,
-    floatingPnlAvailable: false,
+    dayReturn,
+    floatingPnl,
+    dayReturnAvailable: dayReturn !== null,
+    floatingPnlAvailable: floatingPnl !== null,
   }
 }
 
@@ -395,6 +395,16 @@ export function mapDecision(
   const quality = normalizeConclusion(source.quality) || null
 
   if (!hasValidDecision && !hasValidAnalysis) {
+    const previous = mapLatestAnalysis(dashboard)
+    if (previous.available && previous.reportDate) {
+      return {
+        kind: 'NO_TODAY_PLAN', title: '暂无今日计划',
+        subtitle: `暂无今日计划（最新分析为 ${previous.reportDate} 报告，结论${decisionLabel(normalizeDecisionState(previous.conclusion))}）${analysisInProgress ? '；今日分析进行中。' : '；待新一轮分析。'}`,
+        tone: 'neutral', actionCount: 0, holdingActions: [], candidateActions: [], reasons: [],
+        conclusion: null, quality: previous.quality, decisionAt: previous.finishedAt,
+        analysisRunId: numOrNull((sectionField(analysis, 'last_analysis') as Record<string, unknown> | undefined)?.analysis_run_id),
+      }
+    }
     return {
       kind: 'MISSING',
       title: analysisInProgress ? '暂无有效策略结论' : '暂无有效策略结论',
@@ -569,8 +579,17 @@ export function mapLatestAnalysis(dashboard: DailyDashboard | null): V3LatestAna
       quality: null,
       confidence: null,
       isPrevious: false,
+      reportDate: null,
+      historyLabel: null,
+      validityNote: null,
     }
   }
+  const reportDate = latest.report_date ? String(latest.report_date) : fmtDate(strOrNull(latest.finished_at))
+  const today = dashboard?.trade_date || fmtDate(dashboard?.as_of)
+  const historical = latest.is_historical === true || reportDate !== '—' && today !== '—' && reportDate < today
+  const previousDate = dashboard?.market_session?.previous_trading_date
+    || strOrNull(sectionField(dashboard?.timeline, 'previous_trading_day'))
+  const previousTradingDay = historical && reportDate === previousDate
   return {
     available: true,
     analysisInProgress: inProgress,
@@ -580,22 +599,39 @@ export function mapLatestAnalysis(dashboard: DailyDashboard | null): V3LatestAna
     conclusion: strOrNull(latest.portfolio_action ?? latest.final_rating ?? latest.conclusion),
     quality: strOrNull(latest.quality),
     confidence: numOrNull(latest.confidence),
-    isPrevious: inProgress,
+    isPrevious: inProgress || historical,
+    reportDate: reportDate === '—' ? null : reportDate,
+    historyLabel: historical ? previousTradingDay ? '上一交易日报告' : '历史报告' : null,
+    validityNote: historical
+      ? previousTradingDay ? '建议有效至昨日收盘；今日待新一轮分析。' : `报告日期 ${reportDate}；建议时效已过，今日待新一轮分析。`
+      : null,
   }
 }
 
 export function mapImportantEvents(dashboard: DailyDashboard | null): V3ImportantEventsVM {
   const timeline = dashboard?.timeline
   const items = Array.isArray(timeline?.timeline) ? timeline.timeline : []
-  const events: V3ImportantEventVM[] = items.map((item, index) => ({
+  const reference = parseDate(timeline?.as_of || dashboard?.as_of)?.getTime() ?? Date.now()
+  const today = fmtDate(new Date(reference).toISOString())
+  const terminal = new Set(['SUCCESS', 'COMPLETED', 'REUSED', 'SKIPPED', 'MISSED', 'FAILED', 'BLOCKED', 'NOT_AVAILABLE', 'DEGRADED'])
+  const future = items.filter(item => {
+    const scheduled = parseDate(strOrNull(item.scheduled_at))
+    return scheduled && scheduled.getTime() > reference && fmtDate(scheduled.toISOString()) === today
+      && !terminal.has(normalizeConclusion(item.status)) && item.kind !== 'notification'
+  }).sort((a, b) => (parseDate(strOrNull(a.scheduled_at))?.getTime() ?? 0) - (parseDate(strOrNull(b.scheduled_at))?.getTime() ?? 0))
+  const events: V3ImportantEventVM[] = future.map((item, index) => ({
     key: strOrNull(item.key) || `timeline-${index}`,
     time: strOrNull(item.time || item.scheduled_at),
     label: businessLabel(strOrNull(item.label) || strOrNull(item.key) || '检查点'),
     kind: strOrNull(item.kind) || 'timeline',
-    detail: item.mode || item.status ? businessLabel(strOrNull(item.mode || item.status)) : null,
+    detail: item.status ? businessLabel(strOrNull(item.status)) : null,
     isCurrent: Boolean(item.is_current),
   }))
-  const nextCheckpoint = events.find((item) => item.isCurrent && item.kind !== 'notification') || events.find((item) => item.kind.includes('CHECK') || item.kind.includes('REVIEW') || item.kind.includes('FAST') || item.kind.includes('DEEP')) || events[0] || null
+  const nextCheckpoint = events[0] || null
+  const checkpointStatusText = !nextCheckpoint && items.length
+    ? items.every(item => terminal.has(normalizeConclusion(item.status)))
+      ? '今日常规检查点已全部完成' : '今日暂无待到来的常规检查点'
+    : null
 
   const triggerSection = dashboard?.triggers
   const triggerItems = Array.isArray(sectionField(triggerSection, 'items'))
@@ -640,6 +676,7 @@ export function mapImportantEvents(dashboard: DailyDashboard | null): V3Importan
 
   return {
     nextCheckpoint,
+    checkpointStatusText,
     warnings,
     notifications: operational,
     triggers,
@@ -666,6 +703,7 @@ export function buildViewModel(input: {
   hasPortfolio: boolean
 }): V3DashboardViewModel {
   const session = input.session || input.overview?.session || input.dashboard?.market_session || null
+  const dashboard = input.dashboard && session ? { ...input.dashboard, market_session: session } : input.dashboard
   const indices = input.majorIndices?.length ? input.majorIndices : input.overview?.major_indices || null
   const risk = input.systemicRisk || input.overview?.systemic_risk || null
   const overview = input.overview
@@ -702,8 +740,8 @@ export function buildViewModel(input: {
     turnover: mapTurnover(overview?.total_turnover || risk?.total_turnover),
     concentration: mapConcentration(overview?.turnover_concentration || risk?.turnover_concentration),
     portfolio,
-    decision: mapDecision(input.dashboard, input.hasPortfolio),
-    latestAnalysis: mapLatestAnalysis(input.dashboard),
+    decision: mapDecision(dashboard, input.hasPortfolio),
+    latestAnalysis: mapLatestAnalysis(dashboard),
     importantEvents: mapImportantEvents(input.dashboard),
     marketDegraded,
     portfolioDegraded,

@@ -24,6 +24,7 @@ export type V3DecisionKind =
   | 'BLOCKED'
   | 'MISSING'
   | 'NO_PORTFOLIO'
+  | 'NO_TODAY_PLAN'
   | 'WAITING'
   | 'DATA_GAP'
   | 'INCOMPLETE'
@@ -160,6 +161,9 @@ export interface V3LatestAnalysisVM {
   quality: string | null
   confidence: number | null
   isPrevious: boolean
+  reportDate: string | null
+  historyLabel: string | null
+  validityNote: string | null
 }
 
 export interface V3ImportantEventVM {
@@ -173,6 +177,7 @@ export interface V3ImportantEventVM {
 
 export interface V3ImportantEventsVM {
   nextCheckpoint: V3ImportantEventVM | null
+  checkpointStatusText: string | null
   warnings: V3ImportantEventVM[]
   notifications: V3ImportantEventVM[]
   triggers: V3ImportantEventVM[]

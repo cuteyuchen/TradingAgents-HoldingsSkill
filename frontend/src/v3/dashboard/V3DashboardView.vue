@@ -189,6 +189,7 @@ function goAnalysis(): void {
             :holding-actions="viewModel.decision.holdingActions"
             :candidate-actions="viewModel.decision.candidateActions"
             :kind="viewModel.decision.kind"
+            :subtitle="viewModel.decision.subtitle"
             @open-instrument="openInstrument"
           />
         </V3Section>

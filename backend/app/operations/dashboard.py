@@ -314,6 +314,9 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
 
     risk_flags = list(risk.risk_flags_json or []) if risk else []
     total_assets = snapshot.total_assets
+    market_value = snapshot.total_market_value
+    spendable_cash = account["cash"]["available"] if account["cash"]["available"] is not None else snapshot.broker_available_cash
+    can_compute_ratio = total_assets is not None and total_assets > 0
     reserve_assets = snapshot_reserve_assets(snapshot)
     position_count = len(holdings)
     return {
@@ -323,15 +326,15 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         "snapshot_id": snapshot.id,
         "snapshot_time": snapshot.snapshot_time,
         "total_assets": total_assets,
-        "market_value": snapshot.total_market_value,
-        "spendable_cash": account["cash"]["available"] if account["cash"]["available"] is not None else snapshot.broker_available_cash,
+        "market_value": market_value,
+        "spendable_cash": spendable_cash,
         "pending_sell_proceeds": account["cash"]["pending_sell_proceeds"],
         "account_version": account["account_version"],
         "account_entry_count": account["entry_count"],
         "reserve_assets": reserve_assets,
         "reserve_ratio": reserve_assets / total_assets if reserve_assets is not None and total_assets else None,
-        "cash_ratio": risk.cash_ratio if risk else None,
-        "gross_exposure": risk.gross_exposure if risk else None,
+        "cash_ratio": risk.cash_ratio if risk and risk.cash_ratio is not None else spendable_cash / total_assets if can_compute_ratio and spendable_cash is not None else None,
+        "gross_exposure": risk.gross_exposure if risk and risk.gross_exposure is not None else market_value / total_assets if can_compute_ratio and market_value is not None else None,
         "top1_weight": risk.top1_weight if risk else None,
         "top3_weight": risk.top3_weight if risk else None,
         "top5_weight": risk.top5_weight if risk else None,
@@ -524,7 +527,6 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
         AnalysisJob.status == "succeeded",
         AnalysisJob.finished_at.is_not(None),
         AnalysisJob.finished_at <= cutoff,
-        AnalysisJob.finished_at >= start,
         AnalysisRun.created_at <= cutoff,
     ).order_by(AnalysisJob.finished_at.desc(), AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(20)).scalars().all()
     latest = runs[0] if runs else None
@@ -543,6 +545,8 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
             "started_at": latest.job.started_at if latest.job else None,
             "finished_at": latest.job.finished_at if latest.job else None,
             "status": "SUCCESS",
+            "report_date": _local(_utc_naive(latest.job.finished_at)).date().isoformat(),
+            "is_historical": _utc_naive(latest.job.finished_at) < start,
             "final_rating": latest.final_rating,
             "portfolio_action": result.get("portfolio_action") or decision_gate.get("portfolio_action"),
             "quality": latest.data_quality_grade,
@@ -568,7 +572,8 @@ def _analysis_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: d
             "run_id": job.run.id if job.run and _utc_naive(job.run.created_at) <= cutoff and job.finished_at is not None and _utc_naive(job.finished_at) <= cutoff else None,
             "trigger_linked": job.trigger_type == "realtime_trigger",
         } for job in jobs],
-        "latest": latest_payload,
+        # Only today's successful report can feed today's decision section.
+        "latest": latest_payload if latest_payload and not latest_payload["is_historical"] else None,
         "last_analysis": latest_payload,
         "analysis_in_progress": bool(in_progress),
         "running_jobs": [{
@@ -965,7 +970,7 @@ def build_daily_dashboard(db: Session, *, user_id: int, portfolio_id: int, as_of
         "market_open": market_session.is_market_open,
         "market_session": market_session.to_dict(),
         "quote_as_of": market.get("captured_at"),
-        "strategy_analysis_at": (analysis.get("latest") or {}).get("finished_at"),
+        "strategy_analysis_at": (analysis.get("last_analysis") or analysis.get("latest") or {}).get("finished_at"),
         "workflow_state": state.value,
         "market": market,
         "portfolio": portfolio,

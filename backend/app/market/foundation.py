@@ -155,7 +155,21 @@ def _quote_rows(snapshot: Any) -> list[Any]:
 
 
 def _quote_quality(row: Any) -> str:
-    return str(getattr(_value(row, "quality_status", "quality", default="MISSING"), "value", _value(row, "quality_status", "quality", default="MISSING"))).upper()
+    quality = _value(row, "quality_status") or _value(row, "quality")
+    if quality is not None:
+        return str(getattr(quality, "value", quality)).upper()
+    if _positive_price(row, "last", "last_price", "price", "close") is not None:
+        return "DEGRADED" if _integer(_value(row, "fallback_level")) else "VALID"
+    return "MISSING"
+
+
+def _positive_price(row: Any, *keys: str) -> float | None:
+    """A null or invalid alias must not hide an acquired usable price."""
+    for key in keys:
+        price = _number(_value(row, key))
+        if price is not None and price > 0:
+            return price
+    return None
 
 
 def _quote_as_of(snapshot: Any, rows: list[Any], *, fallback: datetime) -> datetime:
@@ -300,7 +314,9 @@ class MarketFoundationService:
         except Exception as exc:  # noqa: BLE001 - preserve partial market facts.
             return {"rows": [], "error": exc.__class__.__name__}
 
-    def _major_indices(self, rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def _major_indices(
+        self, rows: Iterable[Mapping[str, Any]], *, session: MarketSessionResolution | None = None,
+    ) -> list[dict[str, Any]]:
         by_code: dict[str, Mapping[str, Any]] = {}
         for row in rows:
             code = _index_code(_value(row, "thscode", "code", "symbol", "ticker"))
@@ -325,8 +341,19 @@ class MarketFoundationService:
             raw = by_code.get(definition["code"])
             identity = identity_by_code.get(definition["code"])
             quality = _quote_quality(raw) if raw is not None else "MISSING"
-            last = _number(_value(raw, "last", "last_price", "price", "close"))
-            prev_close = _number(_value(raw, "prev_close", "pre_close", "previous_close"))
+            last = _positive_price(raw, "last", "last_price", "price", "close")
+            prev_close = _positive_price(raw, "prev_close", "prev_price", "pre_close", "previous_close")
+            previous_close_fallback = bool(
+                last is None and prev_close is not None and session is not None
+                and (session.session == MarketSession.PRE_OPEN.value
+                     or session.data_basis == MarketDataBasis.PREVIOUS_SESSION_CLOSE.value)
+            )
+            if previous_close_fallback:
+                last = prev_close
+                # Fuyao has no row-level quality flag. Keep explicit failure
+                # grades intact, and identify a previous-price fallback.
+                if not (_value(raw, "quality_status") or _value(raw, "quality")) or quality == "VALID":
+                    quality = "DEGRADED"
             change = _number(_value(raw, "change", "price_change", "change_value"))
             if change is None and last is not None and prev_close is not None:
                 change = last - prev_close
@@ -337,7 +364,7 @@ class MarketFoundationService:
             item = {
                     "instrument_id": str(identity.id) if identity is not None else None,
                     "code": definition["code"],
-                    "name": str(_value(raw, "name", "index_name", "ticker", default=definition["name"]) or definition["name"]),
+                    "name": definition["name"],
                     "last": last,
                     "change": change,
                     "change_pct": change_pct,
@@ -351,7 +378,7 @@ class MarketFoundationService:
                     "source": str(_value(raw, "source", "provider", default=MAJOR_INDEX_SOURCE) or MAJOR_INDEX_SOURCE) if raw is not None else None,
                     "quality": quality,
                     "status": "available" if last is not None and quality in _USABLE_QUOTE_QUALITIES else "unavailable",
-                    "fallback": bool(_integer(_value(raw, "fallback_level", default=0)) or 0),
+                    "fallback": previous_close_fallback or bool(_integer(_value(raw, "fallback_level", default=0)) or 0),
                 }
             item["missing_fields"] = [
                 name for name in ("last", "change", "change_pct", "open", "high", "low", "prev_close", "volume", "turnover")
@@ -776,7 +803,7 @@ class MarketFoundationService:
             raw_indices, index_error = self._load_major_index_rows(now=moment)
         else:
             raw_indices = [dict(row) for row in major_index_rows]
-        major_indices = self._major_indices(raw_indices)
+        major_indices = self._major_indices(raw_indices, session=resolved)
         if index_error is not None:
             quality_flags.append("MAJOR_INDICES_SOURCE_UNAVAILABLE")
         if any(row["status"] == "unavailable" for row in major_indices):
@@ -1028,6 +1055,8 @@ class MarketFoundationService:
             result = persisted or self._empty_overview(
                 session=self.session_service.resolve_session(moment, data_status="unavailable")
             )
+            if any(item.get("status") != "available" for item in result["major_indices"]):
+                result["major_indices"] = self.major_indices(now=moment)
             logger.info(
                 "market_overview_build_ms=%s session_resolution_ms=%s universe_count=%s eligible_count=%s provider=%s quality=%s cache_hit=%s",
                 round((time.perf_counter() - started) * 1000, 2), session_resolution_ms, 0, 0,
@@ -1068,11 +1097,12 @@ class MarketFoundationService:
             persisted = self._latest_persisted_overview(through=source_date, session=session) if source_date else None
             if persisted is not None:
                 indices = persisted.get("major_indices")
-                if isinstance(indices, list):
+                if isinstance(indices, list) and len(indices) == len(MAJOR_INDEX_DEFINITIONS) and all(
+                    item.get("status") == "available" for item in indices
+                ):
                     return indices
-            return self._major_indices([])
         rows, _error = self._load_major_index_rows(now=moment)
-        return self._major_indices(rows)
+        return self._major_indices(rows, session=session)
 
 
 __all__ = [

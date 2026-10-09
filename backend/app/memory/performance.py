@@ -63,13 +63,14 @@ def account_performance(db: Session, *, user_id: int, portfolio_id: int, trade_d
     anchor = snapshots[0] if snapshots else None
     reasons: list[str] = []
     result: dict[str, Any] = {
+        "as_of": cutoff.replace(tzinfo=UTC).isoformat(),
         "status": "INCOMPLETE", "net_pnl": None, "return_rate": None,
         "opening_equity": _number(opening.total_assets) if opening else None,
         "closing_equity": _number(closing.total_assets) if closing else None,
         "external_flow": None, "realized_pnl": None, "unrealized_pnl": None,
         "total_pnl_since_anchor": None, "fees": 0.0, "taxes": 0.0,
         "dividends": 0.0, "cash_in": 0.0, "cash_out": 0.0,
-        "cost_basis_start": anchor.snapshot_time.isoformat() if anchor else None,
+        "cost_basis_start": to_utc_naive(anchor.snapshot_time).replace(tzinfo=UTC).isoformat() if anchor else None,
         "cost_basis_method": "MOVING_WEIGHTED_AVERAGE",
         "pnl_scope": "COST_PNL_SINCE_ANCHOR; NET_PNL_BETWEEN_CLOSE_SNAPSHOTS",
         "return_method": "MODIFIED_DIETZ", "positions": [],
@@ -316,7 +317,8 @@ def performance_report(db: Session, *, user_id: int, portfolio_id: int, trade_da
         return targets
     current, prior = day_targets(today), day_targets(yesterday)
     changes = []
-    for code in sorted(set(current) | set(prior)):
+    # Without a new decision, yesterday's advice has not changed to a null action.
+    for code in sorted(set(current) | set(prior)) if today else []:
         new, old = current.get(code, {}), prior.get(code, {})
         changes.append({"code": code, "action": new.get("action"), "previous_action": old.get("action"),
                         "quantity": new.get("quantity"), "previous_quantity": old.get("quantity"),
@@ -364,12 +366,14 @@ def performance_report(db: Session, *, user_id: int, portfolio_id: int, trade_da
                     issues[field] += 1
                     unique.add(key)
     from .learning import learning_summary
-    return {"version": PERFORMANCE_VERSION, "as_of": cutoff.isoformat(), "trade_date": day.isoformat(),
+    return {"version": PERFORMANCE_VERSION, "as_of": cutoff.replace(tzinfo=UTC).isoformat(), "trade_date": day.isoformat(),
             "previous_trade_date": previous.isoformat() if previous else None,
             "account_return": account_performance(db, user_id=user_id, portfolio_id=portfolio_id, trade_date=day, as_of=cutoff),
             "recommendation_effect": {"items": effect, "count": len(effect), "basis": "MARKET_EFFECT_NOT_ACCOUNT_PNL"},
             "simulation_comparison": {"items": simulation, "basis": "HYPOTHETICAL_LONG_VS_CASH_BEFORE_COSTS"},
-            "day_comparison": {"today": list(current.values()), "yesterday": list(prior.values()), "changes": changes},
+            "day_comparison": {"today": list(current.values()), "yesterday": list(prior.values()), "changes": changes,
+                               "today_status": "AVAILABLE" if today else "PENDING_ANALYSIS",
+                               "today_status_text": "今日已形成新结论" if today else "今日待新一轮分析"},
             "review_dimensions": dimensions,
             "weekly_review": {"start_date": (day - timedelta(days=6)).isoformat(), "end_date": day.isoformat(),
                               "repeated_issues": [{"dimension": key, "count": count} for key, count in issues.items() if count >= 2],

@@ -6,11 +6,20 @@ export const emptyText = '—'
 export const unavailableText = '不可用'
 export const SHANGHAI_TIME_ZONE = 'Asia/Shanghai'
 
-function parseDate(value?: string | null): Date | null {
+export function parseDate(value?: string | null): Date | null {
   if (!value) return null
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return new Date(`${value}T00:00:00+08:00`)
-  const parsed = new Date(value)
+  // Backend DateTime columns are UTC even when ISO output has no offset.
+  const parsed = new Date(/T/.test(value) && !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? `${value}Z` : value)
   return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+export function fmtDate(value?: string | null): string {
+  const parsed = parseDate(value)
+  if (!parsed) return emptyText
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: SHANGHAI_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(parsed).replaceAll('/', '-')
 }
 
 export function fmtDateTime(value?: string | null): string {

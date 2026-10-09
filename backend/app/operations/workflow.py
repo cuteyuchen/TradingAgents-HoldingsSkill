@@ -437,6 +437,17 @@ def _maintenance_component(fn: Any) -> dict[str, Any]:
         return {"status": "DEGRADED", "reason": type(exc).__name__, "error": str(exc)[:300]}
 
 
+def _json_safe(value: Any) -> Any:
+    """Serialize dates throughout component results before JSON persistence."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def run_data_maintenance(
     db: Session,
     *,
@@ -502,7 +513,7 @@ def run_data_maintenance(
         "memory_outcomes": _maintenance_component(memory_result),
     }
     result["status"] = "OK" if all(item.get("status") == "OK" for key, item in result.items() if key != "factor_data") else "DEGRADED"
-    return result
+    return _json_safe(result)
 
 
 def _run_monitor_lifecycle(local: datetime) -> dict[str, Any]:
@@ -639,81 +650,94 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
         else:
             claim = None
             reclaimed = False
-        if current == "MISSED" and not reclaimed:
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="MISSED", reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
+        try:
+            if current == "MISSED" and not reclaimed:
+                _checkpoint_record(state, key=checkpoint.key, local=local, status="MISSED", reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
+                if claim is not None:
+                    _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
+                continue
+            if checkpoint.key == "maintenance":
+                maintenance_result = run_data_maintenance(
+                    db,
+                    user_id=portfolio.user_id,
+                    portfolio_id=portfolio.id,
+                    trade_date=trade_date,
+                    as_of=local,
+                )
+                _checkpoint_record(
+                    state,
+                    key=checkpoint.key,
+                    local=local,
+                    status="SUCCESS" if maintenance_result.get("status") == "OK" else "DEGRADED",
+                    reason="DETERMINISTIC_DATA_MAINTENANCE",
+                )
+                op_run.maintenance_result_json = maintenance_result
+                _finish_checkpoint_claim(claim, status="SUCCESS" if maintenance_result.get("status") == "OK" else "DEGRADED", local=local, reason="DETERMINISTIC_DATA_MAINTENANCE")
+            elif checkpoint.key == "pre_market":
+                _checkpoint_record(
+                    state,
+                    key=checkpoint.key,
+                    local=local,
+                    status="SUCCESS",
+                    reason="PREVIOUS_CLOSE_ONLY",
+                    metadata={"market_mode": "PRE_MARKET", "market_score_source": "PREVIOUS_CLOSE"},
+                )
+                _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="PREVIOUS_CLOSE_ONLY", metadata={"market_mode": "PRE_MARKET", "market_score_source": "PREVIOUS_CLOSE"})
+            elif checkpoint.key == "auction":
+                _checkpoint_record(state, key=checkpoint.key, local=local, status="NOT_AVAILABLE", reason="AUCTION_OBSERVATION_HOOK_NOT_CONFIGURED")
+                _finish_checkpoint_claim(claim, status="NOT_AVAILABLE", local=local, reason="AUCTION_OBSERVATION_HOOK_NOT_CONFIGURED")
+            elif checkpoint.key == "monitor_start":
+                monitor_state = _run_monitor_lifecycle(local)
+                _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="MONITOR_LIFECYCLE_SCHEDULER_OWNED", metadata={"monitor": monitor_state})
+                _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="MONITOR_LIFECYCLE_SCHEDULER_OWNED", metadata={"monitor": monitor_state})
+            elif checkpoint.key == "morning_snapshot":
+                hook_status, hook_reason, hook_metadata = _snapshot_hook_result(
+                    db,
+                    trade_date=trade_date,
+                    checkpoint=checkpoint,
+                    local=local,
+                )
+                _checkpoint_record(state, key=checkpoint.key, local=local, status=hook_status, reason=hook_reason, metadata=hook_metadata)
+                _finish_checkpoint_claim(claim, status=hook_status, local=local, reason=hook_reason, metadata=hook_metadata)
+            elif checkpoint.key == "late_caution":
+                _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="LATE_SESSION_REVIEW_ONLY")
+                _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="LATE_SESSION_REVIEW_ONLY")
+            elif checkpoint.key == "market_close":
+                monitor_state = _run_monitor_lifecycle(local)
+                hook_status, hook_reason, hook_metadata = _snapshot_hook_result(
+                    db,
+                    trade_date=trade_date,
+                    checkpoint=checkpoint,
+                    local=local,
+                )
+                hook_metadata = {**hook_metadata, "monitor": monitor_state}
+                _checkpoint_record(state, key=checkpoint.key, local=local, status=hook_status, reason=hook_reason, metadata=hook_metadata)
+                _finish_checkpoint_claim(claim, status=hook_status, local=local, reason=hook_reason, metadata=hook_metadata)
+            elif checkpoint.key == "daily_review":
+                review = db.execute(select(DailyReviewRun).where(
+                    DailyReviewRun.user_id == portfolio.user_id,
+                    DailyReviewRun.portfolio_id == portfolio.id,
+                    DailyReviewRun.trade_date == trade_date,
+                ).order_by(DailyReviewRun.id.desc()).limit(1)).scalar_one_or_none()
+                if review is not None and review.status == "COMPLETED":
+                    _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="DAILY_REVIEW_COMPLETED", metadata={"review_id": review.id, "review_stale": bool(review.review_stale)})
+                else:
+                    _checkpoint_record(state, key=checkpoint.key, local=local, status="PENDING", reason="DAILY_REVIEW_PENDING")
+            elif checkpoint.key == "critical_event_hook":
+                _checkpoint_record(state, key=checkpoint.key, local=local, status="SKIPPED", reason="NO_CRITICAL_EVENT_INTEGRATION")
+                _finish_checkpoint_claim(claim, status="SKIPPED", local=local, reason="NO_CRITICAL_EVENT_INTEGRATION")
+        except Exception as exc:
+            logger.exception("daily_workflow checkpoint=%s failed", checkpoint.key)
             if claim is not None:
-                _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
-            continue
-        if checkpoint.key == "maintenance":
-            maintenance_result = run_data_maintenance(
-                db,
-                user_id=portfolio.user_id,
-                portfolio_id=portfolio.id,
-                trade_date=trade_date,
-                as_of=local,
-            )
+                _finish_checkpoint_claim(claim, status="DEGRADED", local=local, error=str(exc))
             _checkpoint_record(
                 state,
                 key=checkpoint.key,
                 local=local,
-                status="SUCCESS" if maintenance_result.get("status") == "OK" else "DEGRADED",
-                reason="DETERMINISTIC_DATA_MAINTENANCE",
+                status="DEGRADED",
+                reason="CHECKPOINT_EXECUTION_FAILED",
+                metadata={"error": str(exc)},
             )
-            op_run.maintenance_result_json = maintenance_result
-            _finish_checkpoint_claim(claim, status="SUCCESS" if maintenance_result.get("status") == "OK" else "DEGRADED", local=local, reason="DETERMINISTIC_DATA_MAINTENANCE")
-        elif checkpoint.key == "pre_market":
-            _checkpoint_record(
-                state,
-                key=checkpoint.key,
-                local=local,
-                status="SUCCESS",
-                reason="PREVIOUS_CLOSE_ONLY",
-                metadata={"market_mode": "PRE_MARKET", "market_score_source": "PREVIOUS_CLOSE"},
-            )
-            _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="PREVIOUS_CLOSE_ONLY", metadata={"market_mode": "PRE_MARKET", "market_score_source": "PREVIOUS_CLOSE"})
-        elif checkpoint.key == "auction":
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="NOT_AVAILABLE", reason="AUCTION_OBSERVATION_HOOK_NOT_CONFIGURED")
-            _finish_checkpoint_claim(claim, status="NOT_AVAILABLE", local=local, reason="AUCTION_OBSERVATION_HOOK_NOT_CONFIGURED")
-        elif checkpoint.key == "monitor_start":
-            monitor_state = _run_monitor_lifecycle(local)
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="MONITOR_LIFECYCLE_SCHEDULER_OWNED", metadata={"monitor": monitor_state})
-            _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="MONITOR_LIFECYCLE_SCHEDULER_OWNED", metadata={"monitor": monitor_state})
-        elif checkpoint.key == "morning_snapshot":
-            hook_status, hook_reason, hook_metadata = _snapshot_hook_result(
-                db,
-                trade_date=trade_date,
-                checkpoint=checkpoint,
-                local=local,
-            )
-            _checkpoint_record(state, key=checkpoint.key, local=local, status=hook_status, reason=hook_reason, metadata=hook_metadata)
-            _finish_checkpoint_claim(claim, status=hook_status, local=local, reason=hook_reason, metadata=hook_metadata)
-        elif checkpoint.key == "late_caution":
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="LATE_SESSION_REVIEW_ONLY")
-            _finish_checkpoint_claim(claim, status="SUCCESS", local=local, reason="LATE_SESSION_REVIEW_ONLY")
-        elif checkpoint.key == "market_close":
-            monitor_state = _run_monitor_lifecycle(local)
-            hook_status, hook_reason, hook_metadata = _snapshot_hook_result(
-                db,
-                trade_date=trade_date,
-                checkpoint=checkpoint,
-                local=local,
-            )
-            hook_metadata = {**hook_metadata, "monitor": monitor_state}
-            _checkpoint_record(state, key=checkpoint.key, local=local, status=hook_status, reason=hook_reason, metadata=hook_metadata)
-            _finish_checkpoint_claim(claim, status=hook_status, local=local, reason=hook_reason, metadata=hook_metadata)
-        elif checkpoint.key == "daily_review":
-            review = db.execute(select(DailyReviewRun).where(
-                DailyReviewRun.user_id == portfolio.user_id,
-                DailyReviewRun.portfolio_id == portfolio.id,
-                DailyReviewRun.trade_date == trade_date,
-            ).order_by(DailyReviewRun.id.desc()).limit(1)).scalar_one_or_none()
-            if review is not None and review.status == "COMPLETED":
-                _checkpoint_record(state, key=checkpoint.key, local=local, status="SUCCESS", reason="DAILY_REVIEW_COMPLETED", metadata={"review_id": review.id, "review_stale": bool(review.review_stale)})
-            else:
-                _checkpoint_record(state, key=checkpoint.key, local=local, status="PENDING", reason="DAILY_REVIEW_PENDING")
-        elif checkpoint.key == "critical_event_hook":
-            _checkpoint_record(state, key=checkpoint.key, local=local, status="SKIPPED", reason="NO_CRITICAL_EVENT_INTEGRATION")
-            _finish_checkpoint_claim(claim, status="SKIPPED", local=local, reason="NO_CRITICAL_EVENT_INTEGRATION")
 
     for checkpoint in ANALYSIS_CHECKPOINTS:
         current, actionable = _checkpoint_status(checkpoint=checkpoint, local=local, state=state)
@@ -740,56 +764,68 @@ def run_due_checkpoints(db: Session, *, portfolio: Portfolio, now: datetime | No
                 "checkpoint_claim_id": claim.id,
             }
             continue
-        if current == "MISSED" and not reclaimed:
-            state[checkpoint.key] = {"status": "MISSED", "scheduled_at": checkpoint.at.strftime("%H:%M"), "updated_at": local.isoformat()}
-            _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
-            continue
         try:
-            admission = _admit_checkpoint_job(
-                db,
-                portfolio=portfolio,
-                trade_date=trade_date,
-                checkpoint=checkpoint.key,
-                mode=checkpoint.mode or "standard",
-                now=local,
-                reclaim=reclaimed,
-            )
-        except RuntimeNotReadyError as exc:
+            if current == "MISSED" and not reclaimed:
+                state[checkpoint.key] = {"status": "MISSED", "scheduled_at": checkpoint.at.strftime("%H:%M"), "updated_at": local.isoformat()}
+                _finish_checkpoint_claim(claim, status="MISSED", local=local, reason="CHECKPOINT_CATCHUP_WINDOW_EXPIRED")
+                continue
+            try:
+                admission = _admit_checkpoint_job(
+                    db,
+                    portfolio=portfolio,
+                    trade_date=trade_date,
+                    checkpoint=checkpoint.key,
+                    mode=checkpoint.mode or "standard",
+                    now=local,
+                    reclaim=reclaimed,
+                )
+            except RuntimeNotReadyError as exc:
+                state[checkpoint.key] = {
+                    "status": "BLOCKED",
+                    "reason": f"RUNTIME_NOT_READY:{exc}",
+                    "updated_at": local.isoformat(),
+                }
+                _finish_checkpoint_claim(
+                    claim,
+                    status="BLOCKED",
+                    local=local,
+                    reason=f"RUNTIME_NOT_READY:{exc}",
+                )
+                continue
+            if admission is None:
+                state[checkpoint.key] = {"status": "BLOCKED", "reason": "confirmed_snapshot_not_found", "updated_at": local.isoformat()}
+                _finish_checkpoint_claim(claim, status="BLOCKED", local=local, reason="confirmed_snapshot_not_found")
+                continue
+            job = admission.job
+            status = "REUSED" if admission.source == "active_portfolio" else (_job_status(job) or "RUNNING")
             state[checkpoint.key] = {
-                "status": "BLOCKED",
-                "reason": f"RUNTIME_NOT_READY:{exc}",
+                "status": status,
+                "job_id": job.id,
+                "source": admission.source,
+                "scheduled_at": checkpoint.at.strftime("%H:%M"),
                 "updated_at": local.isoformat(),
             }
             _finish_checkpoint_claim(
                 claim,
-                status="BLOCKED",
+                status=status,
                 local=local,
-                reason=f"RUNTIME_NOT_READY:{exc}",
+                job_id=job.id,
+                reason=admission.source,
+                metadata={"source": admission.source},
             )
-            continue
-        if admission is None:
-            state[checkpoint.key] = {"status": "BLOCKED", "reason": "confirmed_snapshot_not_found", "updated_at": local.isoformat()}
-            _finish_checkpoint_claim(claim, status="BLOCKED", local=local, reason="confirmed_snapshot_not_found")
-            continue
-        job = admission.job
-        status = "REUSED" if admission.source == "active_portfolio" else (_job_status(job) or "RUNNING")
-        state[checkpoint.key] = {
-            "status": status,
-            "job_id": job.id,
-            "source": admission.source,
-            "scheduled_at": checkpoint.at.strftime("%H:%M"),
-            "updated_at": local.isoformat(),
-        }
-        _finish_checkpoint_claim(
-            claim,
-            status=status,
-            local=local,
-            job_id=job.id,
-            reason=admission.source,
-            metadata={"source": admission.source},
-        )
-        if admission.should_start:
-            started_jobs.append(job.id)
+            if admission.should_start:
+                started_jobs.append(job.id)
+        except Exception as exc:
+            logger.exception("daily_workflow checkpoint=%s failed", checkpoint.key)
+            _finish_checkpoint_claim(claim, status="DEGRADED", local=local, error=str(exc))
+            _checkpoint_record(
+                state,
+                key=checkpoint.key,
+                local=local,
+                status="DEGRADED",
+                reason="CHECKPOINT_EXECUTION_FAILED",
+                metadata={"error": str(exc)},
+            )
     op_run.checkpoint_state_json = state
     op_run.last_tick_at = _naive_utc(local)
     op_run.status = "RUNNING"

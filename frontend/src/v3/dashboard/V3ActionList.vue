@@ -7,6 +7,7 @@ defineProps<{
   holdingActions: V3ActionRowVM[]
   candidateActions: V3ActionRowVM[]
   kind: string
+  subtitle?: string
 }>()
 
 const emit = defineEmits<{ openInstrument: [code: string] }>()
@@ -55,10 +56,11 @@ const emit = defineEmits<{ openInstrument: [code: string] }>()
     </div>
     <V3EmptyState
       v-if="!holdingActions.length && !candidateActions.length"
-      title="暂无结构化行动行"
-      :description="kind === 'ACTIONABLE' ? '结论需要行动，但未暴露具体持仓/候选行。' : '今日没有持仓操作或新机会。'"
+      :title="kind === 'NO_TODAY_PLAN' ? '暂无今日调整计划' : '暂无结构化行动行'"
+      :description="kind === 'NO_TODAY_PLAN' ? '今日尚未生成新分析，暂无今日调整计划' : kind === 'ACTIONABLE' ? '结论需要行动，但未暴露具体持仓/候选行。' : '今日没有持仓操作或新机会。'"
       data-testid="v3-action-empty"
     />
+    <p v-if="kind === 'NO_TODAY_PLAN' && subtitle" class="actions__reason">{{ subtitle }}</p>
   </div>
 </template>
 

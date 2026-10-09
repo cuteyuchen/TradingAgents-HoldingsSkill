@@ -49,14 +49,15 @@ def _serialize(row: LearningHypothesis) -> dict[str, Any]:
             "status": row.status, "statement": row.statement, "scope": row.scope_json,
             "support": row.support_json, "counterexamples": row.counterexamples_json,
             "validation": row.validation_json, "weight": row.weight,
-            "extraction_cutoff": row.extraction_cutoff.isoformat(), "available_at": row.available_at.isoformat(),
+            "extraction_cutoff": to_utc_naive(row.extraction_cutoff).replace(tzinfo=UTC).isoformat(),
+            "available_at": to_utc_naive(row.available_at).replace(tzinfo=UTC).isoformat(),
             "reason": row.reason, "version": row.calculation_version}
 
 
 def learning_summary(db: Session, *, user_id: int, portfolio_id: int, as_of: datetime | None = None) -> dict[str, Any]:
     cutoff = to_utc_naive(as_of) or utc_now()
     rows = _latest(db, user_id=user_id, portfolio_id=portfolio_id, as_of=cutoff)
-    return {"version": LEARNING_VERSION, "as_of": cutoff.isoformat(), "hypotheses": [_serialize(row) for row in rows],
+    return {"version": LEARNING_VERSION, "as_of": cutoff.replace(tzinfo=UTC).isoformat(), "hypotheses": [_serialize(row) for row in rows],
             "status_counts": {status: sum(row.status == status for row in rows)
                               for status in ("pending", "reference", "verified", "disabled")},
             "validation_basis": "PER_HYPOTHESIS_FROZEN_PAIRED_REPLAY_OR_LEGACY_CASH_SIMULATION",

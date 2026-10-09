@@ -23,6 +23,8 @@ const badgeTone = computed(() => {
       return 'blocked'
     case 'NO_PORTFOLIO':
       return 'warning'
+    case 'NO_TODAY_PLAN':
+      return 'neutral'
     default:
       return 'neutral'
   }
@@ -38,6 +40,8 @@ const kindLabel = computed(() => {
       return '策略受阻 (BLOCKED)'
     case 'NO_PORTFOLIO':
       return '未选组合 (NO_PORTFOLIO)'
+    case 'NO_TODAY_PLAN':
+      return '暂无今日计划'
     default:
       return systemStatusLabel(props.decision.kind)
   }

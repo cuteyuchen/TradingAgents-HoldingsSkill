@@ -315,6 +315,7 @@ def _run_daily_operations(db: Session, *, now_utc: datetime, portfolios: list[Po
             run_due_checkpoints(db, portfolio=portfolio, now=local)
             _sync_review_checkpoint(db, portfolio=portfolio, trade_date=local.date(), now_utc=now_utc)
         except Exception:
+            db.rollback()
             logger.exception("daily_workflow portfolio=%s failed", portfolio.id)
 
 
@@ -570,7 +571,11 @@ def tick_schedules() -> None:
                 _run_daily_operations(db, now_utc=now_utc, portfolios=portfolios)
                 db.commit()
         except Exception:
+            db.rollback()
             logger.exception("daily_workflow tick failed")
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

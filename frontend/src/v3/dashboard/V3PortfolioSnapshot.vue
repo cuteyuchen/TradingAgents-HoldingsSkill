@@ -4,7 +4,7 @@ import { computed } from 'vue'
 import V3EmptyState from '../components/V3EmptyState.vue'
 import V3LoadingState from '../components/V3LoadingState.vue'
 import V3Metric from '../components/V3Metric.vue'
-import { formatMoney, formatNumber, formatRatioPercent } from './dashboard-formatters'
+import { formatMoney, formatRatioPercent } from './dashboard-formatters'
 import type { V3PortfolioSummaryVM } from './dashboard-types'
 
 const props = defineProps<{
@@ -72,6 +72,7 @@ const showInitialError = computed(() => Boolean(props.error && props.hasPortfoli
         :value="portfolio.grossExposure === null ? '—' : formatRatioPercent(portfolio.grossExposure, 1)"
         data-testid="v3-portfolio-exposure"
       />
+      <V3Metric label="现金比率" :value="formatRatioPercent(portfolio.cashRatio, 1)" data-testid="v3-portfolio-cash-ratio" />
       <V3Metric label="持仓数" :value="portfolio.positionCount === null ? '—' : String(portfolio.positionCount)" />
       <V3Metric
         label="组合质量"
@@ -80,14 +81,14 @@ const showInitialError = computed(() => Boolean(props.error && props.hasPortfoli
       />
       <V3Metric
         label="当日收益"
-        :value="portfolio.dayReturnAvailable ? formatNumber(portfolio.dayReturn, 2) : '—'"
-        secondary="暂无权威数据接口"
+        :value="portfolio.dayReturnAvailable ? formatRatioPercent(portfolio.dayReturn, 2) : '—'"
+        :secondary="portfolio.dayReturnAvailable ? undefined : '待产生相邻交易日收盘快照对比'"
         data-testid="v3-portfolio-day-return"
       />
       <V3Metric
         label="浮动盈亏"
         :value="portfolio.floatingPnlAvailable ? formatMoney(portfolio.floatingPnl) : '—'"
-        secondary="暂无权威数据接口"
+        :secondary="portfolio.floatingPnlAvailable ? undefined : '待记录持仓成本基准'"
         data-testid="v3-portfolio-floating-pnl"
       />
     </div>

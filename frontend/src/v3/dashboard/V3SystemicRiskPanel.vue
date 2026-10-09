@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { businessLabel } from '../../utils/businessLocale'
 import { riskLevelLabel } from '../../utils/ui'
 import V3LoadingState from '../components/V3LoadingState.vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
-import { formatNumber, formatPercentFromPoints, formatRatioPercent } from './dashboard-formatters'
+import { formatNumber, formatRatioPercent } from './dashboard-formatters'
 import type {
   V3BreadthVM,
   V3ConcentrationVM,
@@ -56,10 +57,11 @@ const trendLabel = computed(() => {
         </span>
       </div>
       <ul v-if="risk.factors.length" class="risk-factors" data-testid="v3-risk-factors">
-        <li v-for="factor in risk.factors.slice(0, 4)" :key="factor">{{ factor }}</li>
+        <li v-for="factor in risk.factors.slice(0, 4)" :key="factor">{{ businessLabel(factor) }}</li>
       </ul>
     </div>
     <p v-else class="systemic__empty">系统性风险暂不可用。</p>
+    <p v-if="risk?.level === 'UNKNOWN'" class="systemic__empty">盘前时段尚未生成当日风险评分（参考上一交易日市场表现）</p>
 
     <div class="systemic__grid">
       <article class="panel" data-testid="v3-typical-stock">
@@ -69,17 +71,17 @@ const trendLabel = computed(() => {
           <div>
             <dt>全A中位日表现</dt>
             <dd class="v3-number" :class="typical && typical.medianDaily !== null ? (typical.medianDaily >= 0 ? 'up' : 'down') : ''" data-testid="v3-all-a-median">
-              {{ formatPercentFromPoints(typical?.medianDaily ?? null, 2) }}
+              {{ formatRatioPercent(typical?.medianDaily ?? null, 2) }}
             </dd>
           </div>
           <div>
             <dt>20日趋势</dt>
-            <dd class="v3-number" data-testid="v3-all-a-20d">{{ formatPercentFromPoints(typical?.trend20d ?? null, 2) }}</dd>
+            <dd class="v3-number" data-testid="v3-all-a-20d">{{ typical?.trend20d == null ? '历史积累中（需20日历史）' : formatRatioPercent(typical.trend20d, 2) }}</dd>
           </div>
           <div>
             <dt>250日分位</dt>
             <dd class="v3-number" data-testid="v3-all-a-250d">
-              {{ typical?.percentile250d === null || typical?.percentile250d === undefined ? '—' : `${formatNumber(typical.percentile250d, 1)}%` }}
+              {{ typical?.percentile250d == null ? '历史积累中（需250日历史）' : `${formatNumber(typical.percentile250d, 1)}%` }}
             </dd>
           </div>
         </dl>

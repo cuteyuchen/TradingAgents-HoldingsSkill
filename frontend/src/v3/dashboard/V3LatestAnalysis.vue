@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { businessLabel } from '../../utils/businessLocale'
-import { ratingLabel, localizedValue } from '../../utils/ui'
+import { ratingLabel, localizedValue, fmtDateTime } from '../../utils/ui'
 import V3EmptyState from '../components/V3EmptyState.vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
 import type { V3LatestAnalysisVM } from './dashboard-types'
@@ -23,8 +23,8 @@ const emit = defineEmits<{ goAnalysis: [] }>()
         data-testid="v3-analysis-running"
       />
       <V3StatusBadge
-        v-else-if="analysis.isPrevious"
-        label="上一版结论"
+        v-else-if="analysis.historyLabel || analysis.isPrevious"
+        :label="analysis.historyLabel || '上一版结论'"
         tone="neutral"
       />
       <V3StatusBadge
@@ -46,13 +46,14 @@ const emit = defineEmits<{ goAnalysis: [] }>()
       </template>
     </V3EmptyState>
     <div v-else class="latest__body">
+      <p v-if="analysis.analysisInProgress && analysis.historyLabel" class="latest__note">{{ analysis.historyLabel }}</p>
       <p v-if="analysis.analysisInProgress && !analysis.available" class="latest__running" data-testid="v3-analysis-in-progress-text">
         分析进行中…
       </p>
       <dl class="latest__metrics">
         <div>
           <dt>分析时间</dt>
-          <dd class="v3-number" data-testid="v3-analysis-finished-at">{{ analysis.finishedAt || '—' }}</dd>
+          <dd class="v3-number" data-testid="v3-analysis-finished-at">{{ fmtDateTime(analysis.finishedAt) }}</dd>
         </div>
         <div>
           <dt>模式 / 运行</dt>
@@ -70,6 +71,7 @@ const emit = defineEmits<{ goAnalysis: [] }>()
           </dd>
         </div>
       </dl>
+      <p v-if="analysis.validityNote" class="latest__note">{{ analysis.validityNote }}</p>
       <button type="button" class="link-btn" @click="emit('goAnalysis')">查看分析</button>
     </div>
   </section>
@@ -84,6 +86,7 @@ const emit = defineEmits<{ goAnalysis: [] }>()
 }
 .latest__title { margin: 0; font-size: var(--v3-font-size-xl); font-weight: 700; }
 .latest__running { color: var(--v3-status-warning); font-weight: 600; }
+.latest__note { color: var(--v3-text-muted); font-size: var(--v3-font-size-sm); }
 .latest__metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

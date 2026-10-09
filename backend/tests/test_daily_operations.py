@@ -583,7 +583,7 @@ def test_dashboard_get_is_read_only_even_when_facts_are_missing(monkeypatch):
         db.close()
 
 
-def test_dashboard_analysis_excludes_runs_from_previous_local_day():
+def test_dashboard_analysis_keeps_previous_report_separate_from_today():
     db = _db()
     try:
         user, portfolio, snapshot = _portfolio_fixture(db, trade_date=date(2026, 8, 20))
@@ -621,7 +621,9 @@ def test_dashboard_analysis_excludes_runs_from_previous_local_day():
         )
 
         assert section["latest"] is None
-        assert section["status"] == "MISSING"
+        assert section["last_analysis"]["analysis_job_id"] == job.id
+        assert section["last_analysis"]["is_historical"] is True
+        assert section["status"] == "AVAILABLE"
     finally:
         db.close()
 

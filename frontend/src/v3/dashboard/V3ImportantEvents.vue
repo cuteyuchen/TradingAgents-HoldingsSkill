@@ -21,6 +21,8 @@ defineProps<{
       <span v-if="events.nextCheckpoint.detail" class="events__detail">{{ events.nextCheckpoint.detail }}</span>
     </div>
 
+    <p v-if="events.checkpointStatusText" class="events__detail" data-testid="v3-checkpoint-status">{{ events.checkpointStatusText }}</p>
+
     <div class="events__columns">
       <div v-if="events.warnings.length" data-testid="v3-event-warnings">
         <h3>警告</h3>
@@ -53,7 +55,7 @@ defineProps<{
     </div>
 
     <V3EmptyState
-      v-if="!events.nextCheckpoint && !events.warnings.length && !events.triggers.length && !events.notifications.length"
+      v-if="!events.nextCheckpoint && !events.checkpointStatusText && !events.warnings.length && !events.triggers.length && !events.notifications.length"
       title="暂无重要事件"
       description="当前没有需要立刻关注的检查点或告警。"
       data-testid="v3-events-empty"

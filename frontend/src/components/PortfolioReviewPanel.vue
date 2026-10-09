@@ -16,10 +16,32 @@ const busy = ref(false)
 let sequence = 0
 let controller: AbortController | null = null
 const account = computed(() => review.value?.account_return || {})
+const accountReasons = computed(() => [...new Set<string>((account.value.reason_codes || []).map((code: string) => businessLabel(code)))].join(' · '))
+const pendingToday = computed(() => {
+  const comparison = review.value?.day_comparison
+  if (!comparison) return false
+  if (comparison.today_status) return comparison.today_status === 'PENDING_ANALYSIS'
+  return Array.isArray(comparison.today) && comparison.today.length === 0
+})
+const comparisonItems = computed<Record<string, any>[]>(() => {
+  const comparison = review.value?.day_comparison
+  if (comparison?.changes?.length) return comparison.changes
+  return pendingToday.value ? (comparison?.yesterday || []).map((item: Record<string, any>) => ({
+    code: item.code, previous_action: item.action, previous_quantity: item.quantity, action: null, quantity: null,
+  })) : []
+})
 const hypotheses = computed<Record<string, any>[]>(() => review.value?.learning?.hypotheses || [])
 const money = (value: unknown) => value == null ? '待补齐' : formatCurrency(Number(value), 2)
 const percent = (value: unknown) => value == null ? '待补齐' : formatPercent(Number(value))
 const action = (value: unknown) => value ? actionLabel(String(value)) : '未形成结论'
+const actionChangeText = (item: Record<string, any>) => pendingToday.value
+  ? `昨日结论：${action(item.previous_action)}（今日待新一轮分析）`
+  : `${action(item.previous_action)} → ${action(item.action)}`
+const quantityChangeText = (item: Record<string, any>) => {
+  if (item.previous_quantity == null && item.quantity == null) return '维持持仓'
+  if (pendingToday.value) return `昨日计划 ${item.previous_quantity ?? '待确认'} 股（今日待新一轮分析）`
+  return `${item.previous_quantity ?? '待确认'} → ${item.quantity ?? '待确认'} 股`
+}
 const learningStatus = (value: unknown) => ({ PENDING: '待验证', REFERENCE: '可参考', VERIFIED: '已验证', DISABLED: '已停用', PROPOSED: '待验证' } as Record<string, string>)[String(value || '').toUpperCase()] || '待验证'
 const hypothesisTitle = (item: Record<string, any>) => item.statement || item.conclusion || item.summary || item.title || item.rule_key || '经验条目'
 const scopeText = (item: Record<string, any>) => {
@@ -62,9 +84,9 @@ onUnmounted(() => { sequence++; controller?.abort() })
     <q-banner v-if="error" role="alert">{{ error }}</q-banner>
     <template v-else-if="review">
       <div class="review-metrics"><MetricTile label="当日账户净收益" :value="money(account.net_pnl)" helper="剔除出入金" /><MetricTile label="当日收益率" :value="percent(account.return_rate)" /><MetricTile label="已实现盈亏" :value="money(account.realized_pnl)" helper="自成本基准起，移动加权成本" /><MetricTile label="未实现盈亏" :value="money(account.unrealized_pnl)" /></div>
-      <p v-if="account.status !== 'COMPLETE' && account.status !== 'READY' && account.status !== 'VALID'" class="review-note">账户资料尚不完整，缺失指标保持待补齐。{{ (account.reason_codes || []).join(' · ') }}</p>
-      <div v-if="review.day_comparison?.changes?.length" class="change-list"><article v-for="item in review.day_comparison.changes" :key="item.code"><strong>{{ item.code }}</strong><span>{{ action(item.previous_action) }} → {{ action(item.action) }}</span><span>{{ item.previous_quantity ?? '—' }} → {{ item.quantity ?? '—' }} 股</span></article></div>
-      <EmptyState v-else title="暂未形成昨日与今日的可比记录" description="持续记录每日建议和实际成交，系统将显示变更及对应依据。" />
+      <p v-if="account.status !== 'COMPLETE' && account.status !== 'READY' && account.status !== 'VALID'" class="review-note">账户资料尚不完整，缺失指标保持待补齐。{{ accountReasons }}</p>
+      <div v-if="comparisonItems.length" class="change-list"><article v-for="item in comparisonItems" :key="item.code"><strong>{{ item.code }}</strong><span>{{ actionChangeText(item) }}</span><span>{{ quantityChangeText(item) }}</span></article></div>
+      <EmptyState v-else title="暂未形成昨日与今日的可比记录" :description="pendingToday ? '今日待新一轮分析，尚无新的结论可供比较。' : '持续记录每日建议和实际成交，系统将显示变更及对应依据。'" />
       <template v-if="!compact">
         <div class="review-metrics secondary-metrics"><MetricTile label="交易费用" :value="money(account.fees)" /><MetricTile label="税费" :value="money(account.taxes)" /><MetricTile label="股息" :value="money(account.dividends)" /><MetricTile label="转入 / 转出" :value="`${money(account.cash_in)} / ${money(account.cash_out)}`" /></div>
         <h3>建议效果</h3><p class="review-note">建议后的市场表现单独评估；未成交不计入真实收益，条件未触发不直接视为预测失败。</p>
