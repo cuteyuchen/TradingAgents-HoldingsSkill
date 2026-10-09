@@ -55,10 +55,15 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"STARTUP_PREFLIGHT_BLOCKED:{blocked}")
     with SessionLocal() as db:
         from .history.sync import reclaim_stale_history_sync_runs
+        from .operations.workflow import reconcile_operational_checkpoints
 
+        reconciled_checkpoints = reconcile_operational_checkpoints(db)
         stale_syncs = reclaim_stale_history_sync_runs(db)
-        if stale_syncs:
+        if stale_syncs or reconciled_checkpoints:
             db.commit()
+        if reconciled_checkpoints:
+            logger.info("Reconciled %s completed operational checkpoints", len(reconciled_checkpoints))
+        if stale_syncs:
             logger.info("Reclaimed %s stale historical sync runs", len(stale_syncs))
     # Prevent a process restart from forgetting an already-open provider
     # circuit while the durable health table still reports it as blocked.

@@ -305,10 +305,9 @@ def _sync_review_checkpoint(db: Session, *, portfolio: Portfolio, trade_date: da
 def _run_daily_operations(db: Session, *, now_utc: datetime, portfolios: list[Portfolio]) -> None:
     """Run Phase H orchestration through the existing scheduler tick."""
 
-    if not portfolios:
-        return
-    from ..operations.workflow import run_due_checkpoints
+    from ..operations.workflow import reconcile_operational_checkpoints, run_due_checkpoints
 
+    reconcile_operational_checkpoints(db, now=now_utc)
     local = now_utc.astimezone(CHINA_TZ)
     for portfolio in portfolios:
         try:
@@ -496,6 +495,11 @@ def tick_schedules() -> None:
         rows = db.query(Schedule).filter(Schedule.enabled.is_(True)).all()
         now_utc = datetime.now(UTC)
         local = now_utc.astimezone(CHINA_TZ)
+        tables = inspect(db.bind).get_table_names() if db.bind is not None else []
+        if {"analysis_jobs", "daily_operational_checkpoints", "daily_operational_runs"}.issubset(tables):
+            from ..operations.workflow import reconcile_operational_checkpoints
+
+            reconcile_operational_checkpoints(db, now=now_utc)
         _dispatch_research_backtests(db)
         calendar = TradingCalendarService(db)
         _sync_monitor_lifecycle(now_utc, calendar=calendar)
@@ -565,7 +569,6 @@ def tick_schedules() -> None:
                 db.commit()
         _enqueue_memory_reviews(db, trade_date=local.date(), now_utc=now_utc)
         try:
-            tables = inspect(db.bind).get_table_names() if db.bind is not None else []
             if "portfolios" in tables and "daily_operational_runs" in tables:
                 portfolios = db.query(Portfolio).order_by(Portfolio.id.asc()).all()
                 _run_daily_operations(db, now_utc=now_utc, portfolios=portfolios)

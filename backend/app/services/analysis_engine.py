@@ -1645,6 +1645,7 @@ def run_analysis_job(job_id: int) -> None:
     heartbeat: AnalysisLeaseHeartbeat | None = None
     audit: WorkflowAuditRecorder | None = None
     stop_event = threading.Event()
+    from ..operations.workflow import finish_analysis_job_checkpoints
     from ..system.logging import bind_worker_context
     from ..system.workers import register_worker, unregister_worker
 
@@ -1652,7 +1653,17 @@ def run_analysis_job(job_id: int) -> None:
     bind_worker_context(analysis_job_id=job_id)
     try:
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
-        if job is None or job.status not in {"queued", "retrying"}:
+        if job is None:
+            return
+        if job.status == "cancelled":
+            # A queued job can be cancelled before its worker starts. A
+            # running cancellation is finalized by that worker's exit path.
+            if job.finished_at is None and job.started_at is None:
+                job.finished_at = utc_now()
+            finish_analysis_job_checkpoints(db, job)
+            db.commit()
+            return
+        if job.status not in {"queued", "retrying"}:
             return
         job.status = "running"
         job.started_at = utc_now()
@@ -2526,6 +2537,7 @@ def run_analysis_job(job_id: int) -> None:
         job.current_stage = "completed"
         job.progress_percent = 100
         job.finished_at = utc_now()
+        finish_analysis_job_checkpoints(db, job)
         db.commit()
         run = db.query(AnalysisRun).filter(AnalysisRun.id == audit.run_id).one()
 
@@ -2647,6 +2659,7 @@ def run_analysis_job(job_id: int) -> None:
                     job.error_code = getattr(exc, "code", None) or type(exc).__name__
                     job.error_message = str(exc)[:3000]
                 job.finished_at = utc_now()
+                finish_analysis_job_checkpoints(db, job)
                 db.commit()
     finally:
         if heartbeat is not None:
