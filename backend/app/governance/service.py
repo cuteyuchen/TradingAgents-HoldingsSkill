@@ -220,12 +220,16 @@ def _next_version_number(db: Session) -> int:
 def _open_proposal(
     db: Session,
     *,
+    user_id: int,
+    source_type: str,
     source_calibration_report_id: int | None,
     target_parameter_key: str,
     base_parameter_set_version_id: int | None,
 ) -> ParameterChangeProposal | None:
     return db.execute(
         select(ParameterChangeProposal).where(
+            ParameterChangeProposal.user_id == user_id,
+            ParameterChangeProposal.source_type == source_type,
             ParameterChangeProposal.source_calibration_report_id == source_calibration_report_id,
             ParameterChangeProposal.target_parameter_key == target_parameter_key,
             ParameterChangeProposal.base_parameter_set_version_id == base_parameter_set_version_id,
@@ -288,11 +292,15 @@ def create_proposal_from_calibration(
         raise GovernanceError("CALIBRATION_BASE_VERSION_CHANGED")
     existing = _open_proposal(
         db,
+        user_id=user_id,
+        source_type="CALIBRATION_REPORT",
         source_calibration_report_id=calibration_report.id,
         target_parameter_key=key,
         base_parameter_set_version_id=active.id,
     )
     if existing is not None:
+        if existing.proposed_value_json != proposed:
+            raise GovernanceError("OPEN_PROPOSAL_CONTENT_CONFLICT")
         return existing
     row = ParameterChangeProposal(
         user_id=user_id,
@@ -343,11 +351,17 @@ def create_manual_proposal(
     proposed = validate_registry_value(target_parameter_key, proposed_value)
     existing = _open_proposal(
         db,
+        user_id=user_id,
+        source_type="MANUAL",
         source_calibration_report_id=None,
         target_parameter_key=target_parameter_key,
         base_parameter_set_version_id=active.id,
     )
     if existing is not None:
+        if (existing.proposed_value_json != proposed
+                or existing.reason != reason
+                or existing.risk_summary_json != {**(risk_summary or {}), "risk_acknowledged": risk_acknowledged}):
+            raise GovernanceError("OPEN_PROPOSAL_CONTENT_CONFLICT")
         return existing
     row = ParameterChangeProposal(
         user_id=user_id,
@@ -396,6 +410,7 @@ def create_rollback_proposal(
         raise GovernanceError("cannot_rollback_to_active_version")
     existing = db.execute(
         select(ParameterChangeProposal).where(
+            ParameterChangeProposal.user_id == user_id,
             ParameterChangeProposal.source_type == "ROLLBACK",
             ParameterChangeProposal.target_parameter_key == "__FULL_ROLLBACK__",
             ParameterChangeProposal.base_parameter_set_version_id == active.id,
@@ -403,6 +418,8 @@ def create_rollback_proposal(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        if (existing.proposed_value_json or {}).get("rollback_target_version_id") != target.id or existing.reason != reason:
+            raise GovernanceError("OPEN_PROPOSAL_CONTENT_CONFLICT")
         return existing
     row = ParameterChangeProposal(
         user_id=user_id,

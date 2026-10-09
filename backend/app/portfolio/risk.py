@@ -198,15 +198,18 @@ def build_portfolio_state(
             "hard_cap": hard_cap,
             "flags": flags,
         })
-    # ``cash`` is spendable broker cash. Corrected unused funds may contain
+    # ``cash`` is spendable broker cash; pending proceeds remain owned equity.
+    # Corrected unused funds may contain
     # reverse-repo assets, so it is reserve-only when broker cash is absent.
     cash = account["cash"]["available"]
     repo_or_standard_bond_value = snapshot.repo_or_standard_bond_value
     reserve_assets = (
-        cash + (repo_or_standard_bond_value or 0.0)
+        cash + account["cash"]["pending_sell_proceeds"] + (repo_or_standard_bond_value or 0.0)
         if cash is not None
         else snapshot_reserve_assets(snapshot)
     )
+    if any(flag.startswith("LEDGER_CURRENCY_UNSUPPORTED:") for flag in account["flags"]):
+        reserve_assets = None
     valued_positions = [float(row["market_value"]) for row in positions if row.get("market_value") is not None]
     complete_valuation = len(valued_positions) == len(positions)
     market_value = sum(valued_positions) if complete_valuation else None
@@ -236,7 +239,7 @@ def build_portfolio_state(
     reserve_ratio = reserve_assets / total_assets if reserve_assets is not None and total_assets and total_assets > 0 else None
     gross_exposure = sum(float(row["weight"] or 0.0) for row in positions if row.get("weight") is not None) if total_assets else None
     missing_quotes = len(codes) - accepted_quotes
-    if codes and accepted_quotes == 0 and not historical_snapshot_valuation:
+    if reserve_assets is None or (codes and accepted_quotes == 0 and not historical_snapshot_valuation):
         quality = "BLOCKED"
     elif missing_quotes or not complete_valuation or "VALUATION_DRIFT" in flags or historical_snapshot_valuation:
         quality = "DEGRADED"

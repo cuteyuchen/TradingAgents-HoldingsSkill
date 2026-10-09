@@ -1,6 +1,7 @@
 """Immutable-by-revision Trade Ledger services."""
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -8,9 +9,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..clock import utc_now
 from ..market.codes import normalize_security_code
 from ..market_models import SecurityMaster
 from ..portfolio_models import TradeLedgerEntry, TradeLedgerRevision
+from ..v2_models import Portfolio
 
 ENTRY_TYPES = frozenset({
     "TRADE", "CASH_IN", "CASH_OUT", "DIVIDEND", "FEE", "TAX",
@@ -89,11 +92,13 @@ def _as_date(value: Any, fallback: datetime) -> date:
 
 
 def _positive(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be numeric")
     try:
         number = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{field} is required") from exc
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{field} must be positive")
     return number
 
@@ -101,10 +106,15 @@ def _positive(value: Any, field: str) -> float:
 def _optional_number(value: Any) -> float | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        raise ValueError("numeric ledger field is invalid")
     try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("numeric ledger field is invalid") from exc
+    if not math.isfinite(number) or number < 0:
+        raise ValueError("numeric ledger field must be finite and nonnegative")
+    return number
 
 
 def _json_safe(value: Any) -> Any:
@@ -138,9 +148,11 @@ def _entry_values(
     if source not in LEDGER_SOURCES:
         raise ValueError("unsupported source")
     executed_at = _as_datetime(payload.get("executed_at"))
+    if executed_at > _as_datetime(ingested_at or utc_now()):
+        raise ValueError("ledger_executed_at_in_future")
     trade_date = _as_date(payload.get("trade_date"), executed_at)
     available_at = payload.get("available_at")
-    available_at = _as_datetime(available_at) if available_at is not None else _as_datetime(ingested_at or datetime.now(UTC))
+    available_at = _as_datetime(available_at) if available_at is not None else _as_datetime(ingested_at or utc_now())
     code = normalize_security_code(payload.get("security_code")) or None
     side = str(payload.get("side") or "").upper() or None
     quantity = _optional_number(payload.get("quantity"))
@@ -153,6 +165,8 @@ def _entry_values(
             raise ValueError("TRADE requires security_code and BUY or SELL side")
         quantity = _positive(quantity, "quantity")
         price = _positive(price, "price")
+        if not quantity.is_integer():
+            raise ValueError("TRADE quantity must be whole shares")
         if not _security_exists(db, code):
             status = "PENDING_REVIEW"
     gross_amount = _optional_number(payload.get("gross_amount"))
@@ -164,6 +178,21 @@ def _entry_values(
     if net_amount is None and gross_amount is not None:
         costs = (fees or 0.0) + (taxes or 0.0)
         net_amount = gross_amount + costs if side == "BUY" else gross_amount - costs
+    # Derived products/sums can overflow even when every input is finite.
+    gross_amount = _optional_number(gross_amount)
+    net_amount = _optional_number(net_amount)
+    if entry_type == "TRADE":
+        expected_gross = _optional_number(quantity * price)
+        expected_net = _optional_number(
+            gross_amount + (fees or 0.0) + (taxes or 0.0) if side == "BUY"
+            else gross_amount - (fees or 0.0) - (taxes or 0.0)
+        )
+        for field, value, expected in (
+            ("gross_amount", gross_amount, expected_gross),
+            ("net_amount", net_amount, expected_net),
+        ):
+            if not math.isclose(value, expected, rel_tol=1e-9, abs_tol=0.01) and not str(payload.get("notes") or "").strip():
+                raise ValueError(f"{field}_mismatch_requires_broker_explanation")
     return {
         "entry_type": entry_type,
         "security_code": code,
@@ -175,7 +204,7 @@ def _entry_values(
         "fees": fees,
         "taxes": taxes,
         "net_amount": net_amount,
-        "currency": str(payload.get("currency") or "CNY").upper(),
+        "currency": str(payload.get("currency") or "CNY").strip().upper(),
         "executed_at": executed_at,
         "trade_date": trade_date,
         "available_at": available_at,
@@ -198,6 +227,12 @@ def create_ledger_entry(
     """Create an actual-action fact, returning an existing idempotent row when present."""
 
     key = str(payload.get("idempotency_key") or "").strip() or None
+    portfolio = db.get(Portfolio, portfolio_id)
+    currency = str(payload.get("currency") or "CNY").strip().upper()
+    if portfolio is None or portfolio.user_id != user_id:
+        raise ValueError("portfolio_not_found")
+    if str(portfolio.currency).upper() != "CNY" or currency != "CNY":
+        raise ValueError("ledger_currency_conversion_unavailable")
     if key:
         existing = db.execute(
             select(TradeLedgerEntry).where(
@@ -207,12 +242,14 @@ def create_ledger_entry(
         ).scalar_one_or_none()
         if existing is not None:
             return existing, False
-    values = _entry_values(db, payload, ingested_at=datetime.now(UTC))
+    ingested_at = utc_now()
+    values = _entry_values(db, payload, ingested_at=ingested_at)
     entry = TradeLedgerEntry(
         user_id=user_id,
         portfolio_id=portfolio_id,
         analysis_run_id=payload.get("analysis_run_id"),
         trigger_event_id=payload.get("trigger_event_id"),
+        created_at=_as_datetime(ingested_at),
         **values,
     )
     db.add(entry)
@@ -246,7 +283,20 @@ def revise_ledger_entry(
         if isinstance(value, datetime) and value.tzinfo is None:
             merged[field] = value.replace(tzinfo=UTC)
     merged.update(changes)
+    merged["status"] = entry.status
+    if str(merged.get("currency") or "CNY").strip().upper() != "CNY":
+        raise ValueError("ledger_currency_conversion_unavailable")
+    if {"entry_type", "quantity", "price"} & changes.keys() and "gross_amount" not in changes:
+        merged["gross_amount"] = None
+    if {"entry_type", "side", "quantity", "price", "gross_amount", "fees", "taxes"} & changes.keys() and "net_amount" not in changes:
+        merged["net_amount"] = None
+    if "executed_at" in changes and "trade_date" not in changes:
+        merged["trade_date"] = None
     values = _entry_values(db, merged)
+    # An audited manual identity confirmation stays effective for amount-only
+    # corrections. A changed security code must pass identity review again.
+    if "security_code" not in changes:
+        values["status"] = entry.status
     values.pop("idempotency_key", None)
     if entry.available_at is not None and values["available_at"] < entry.available_at:
         raise ValueError("available_at_cannot_move_backwards")
@@ -257,13 +307,15 @@ def revise_ledger_entry(
     db.add(TradeLedgerRevision(
         ledger_entry_id=entry.id,
         revision_no=revision_no,
-        changes_json=_json_safe({"before": before, "changes": changes, "after": values}),
+        changes_json=_json_safe({"before": before, "before_status": entry.status, "changes": changes, "after": values}),
         reason=reason.strip(),
         created_by_user_id=user_id,
+        created_at=_as_datetime(utc_now()),
     ))
     for field, value in values.items():
         if field in MATERIALIZED_FIELDS:
             setattr(entry, field, value)
+    entry.status = values["status"]
     db.flush()
     _invalidate_linked_memory_outcomes(db, entry)
     return entry
@@ -283,6 +335,7 @@ def void_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, rea
         changes_json={"before_status": entry.status, "after_status": "VOIDED"},
         reason=reason.strip(),
         created_by_user_id=user_id,
+        created_at=_as_datetime(utc_now()),
     ))
     entry.status = "VOIDED"
     db.flush()
@@ -299,6 +352,13 @@ def confirm_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, 
         raise ValueError("only pending review ledger entries can be confirmed")
     if not reason or not reason.strip():
         raise ValueError("confirmation reason is required")
+    payload = {field: getattr(entry, field) for field in MATERIALIZED_FIELDS}
+    for field in ("executed_at", "available_at"):
+        payload[field] = payload[field].replace(tzinfo=UTC)
+    payload["status"] = "CONFIRMED"
+    if entry.currency != "CNY":
+        raise ValueError("ledger_currency_conversion_unavailable")
+    _entry_values(db, payload)
     revision_no = (db.scalar(
         select(func.max(TradeLedgerRevision.revision_no)).where(TradeLedgerRevision.ledger_entry_id == entry.id)
     ) or 0) + 1
@@ -308,6 +368,7 @@ def confirm_ledger_entry(db: Session, *, entry: TradeLedgerEntry, user_id: int, 
         changes_json={"before_status": "PENDING_REVIEW", "after_status": "CONFIRMED"},
         reason=reason.strip(),
         created_by_user_id=user_id,
+        created_at=_as_datetime(utc_now()),
     ))
     entry.status = "CONFIRMED"
     db.flush()

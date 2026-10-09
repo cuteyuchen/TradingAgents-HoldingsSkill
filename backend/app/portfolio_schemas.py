@@ -23,10 +23,10 @@ class TradeLedgerCreate(BaseModel):
     side: Literal["BUY", "SELL"] | None = None
     quantity: float | None = Field(default=None, gt=0)
     price: float | None = Field(default=None, gt=0)
-    gross_amount: float | None = None
+    gross_amount: float | None = Field(default=None, ge=0)
     fees: float | None = Field(default=None, ge=0)
     taxes: float | None = Field(default=None, ge=0)
-    net_amount: float | None = None
+    net_amount: float | None = Field(default=None, ge=0)
     currency: str = Field(default="CNY", max_length=8)
     executed_at: datetime
     trade_date: date | None = None
@@ -38,6 +38,15 @@ class TradeLedgerCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
     analysis_run_id: int | None = None
     trigger_event_id: int | None = None
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    @field_validator("quantity", "price", "gross_amount", "fees", "taxes", "net_amount", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("ledger numeric fields cannot be booleans")
+        return value
 
     @field_validator("security_code", mode="before")
     @classmethod

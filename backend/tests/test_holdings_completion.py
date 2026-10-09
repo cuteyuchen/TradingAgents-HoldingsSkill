@@ -116,7 +116,7 @@ def test_prefetch_uses_confirmed_snapshot_and_applied_ledger_only(db, monkeypatc
     stamp = now.replace(tzinfo=None)-timedelta(minutes=10)
     db.add(TradeLedgerEntry(user_id=user.id, portfolio_id=portfolio.id, entry_type="TRADE", status="CONFIRMED",
         security_code="159915", side="BUY", quantity=100, price=10, fees=0, taxes=0, currency="CNY",
-        executed_at=stamp, trade_date=stamp.date(), available_at=stamp, source="TEST"))
+        executed_at=stamp, trade_date=stamp.date(), available_at=stamp, created_at=stamp, source="TEST"))
     db.flush()
     @contextmanager
     def session():

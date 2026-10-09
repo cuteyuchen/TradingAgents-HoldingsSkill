@@ -223,6 +223,7 @@ def test_governance_api_scopes_proposals_and_calibrations_to_owner():
         validate_parameter_set_version(db, version=approved, actor_user_id=user_a.id)
         db.commit()
         user_b_id = user_b.id
+        user_a_id = user_a.id
         report_id = report.id
         proposal_id = proposal.id
         approved_id = approved.id
@@ -240,16 +241,18 @@ def test_governance_api_scopes_proposals_and_calibrations_to_owner():
         assert client.post(
             "/api/v3/governance/proposals/from-calibration",
             json={"calibration_report_id": report_id, "proposed_value": 6.0},
-        ).status_code == 404
+        ).status_code == 403
         assert client.get(f"/api/v3/governance/proposals/{proposal_id}").status_code == 404
-        assert client.post(f"/api/v3/governance/proposals/{proposal_id}/submit").status_code == 404
-        assert client.post(f"/api/v3/governance/proposals/{proposal_id}/approve", json={}).status_code == 404
-        assert client.post(f"/api/v3/governance/proposals/{proposal_id}/reject", json={}).status_code == 404
-        assert client.post(f"/api/v3/governance/parameter-sets/{approved_id}/validate").status_code == 404
+        assert client.post(f"/api/v3/governance/proposals/{proposal_id}/submit").status_code == 403
+        assert client.post(f"/api/v3/governance/proposals/{proposal_id}/approve", json={}).status_code == 403
+        assert client.post(f"/api/v3/governance/proposals/{proposal_id}/reject", json={}).status_code == 403
+        assert client.post(f"/api/v3/governance/parameter-sets/{approved_id}/validate").status_code == 403
         assert client.post(
             f"/api/v3/governance/parameter-sets/{approved_id}/activate",
             json={"expected_active_version_id": active_id, "reason": "not owner"},
-        ).status_code == 404
+        ).status_code == 403
+
+        main_module.app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_a_id, status="active")
 
         forged_standard = client.post(
             "/api/v3/governance/proposals/manual",

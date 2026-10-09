@@ -9,6 +9,7 @@ from .database import get_db
 from .security import InvalidAccessToken, decode_access_token
 from .v2_models import User
 from .config import settings
+from .services.market_provider_settings import can_manage_market_settings
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -40,6 +41,16 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+
+
+def require_system_operator(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """Use the existing instance-owner policy for shared production operations."""
+    if not can_manage_market_settings(db, current_user.id):
+        raise HTTPException(status_code=403, detail="system_operator_required")
+    return current_user
 
 
 def require_market_identity_sync(

@@ -20,7 +20,7 @@ from ..history.sync import (
     serialize_history_sync_run,
 )
 from ..history.universe import resolve_security_state, resolve_special_treatment
-from ..v2_dependencies import get_current_user
+from ..v2_dependencies import get_current_user, require_system_operator
 from ..v2_models import User
 
 router = APIRouter(prefix="/api/v3/history", tags=["v3-history"])
@@ -129,7 +129,7 @@ def history_sync_run_detail(
 def create_history_sync(
     payload: SyncRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     if payload.rows is not None and len(payload.rows) > MAX_IMPORT_ROWS:
         raise HTTPException(status_code=422, detail="import_row_limit_exceeded")
@@ -155,7 +155,7 @@ def create_history_sync(
 def cancel_history_sync(
     run_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     row = cancel_history_sync_run(db, run_id)
     if row is None:

@@ -90,7 +90,7 @@ def test_ledger_entry_updates_derived_state_and_import_dedupes(monkeypatch):
     assert position["available_qty"] == 700
     assert payload["cash"] == 20_000
     assert payload["pending_sell_proceeds"] == pytest.approx(2_995)
-    assert payload["account_version"].startswith("portfolio-account-v1:")
+    assert payload["account_version"].startswith("portfolio-account-v2:")
     assert payload["account_derivation"]["applied_entry_ids"] == [sell.json()["id"]]
 
     snapshot = client.get(f"/api/v2/snapshots/{snapshot_id}", headers=headers)

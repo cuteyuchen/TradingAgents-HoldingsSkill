@@ -109,6 +109,8 @@ def _trade(
         },
     )
     db.flush()
+    entry.created_at = available_at.replace(tzinfo=None)
+    db.flush()
     return entry.id
 
 
@@ -222,12 +224,12 @@ def test_revise_and_void_change_derived_state_and_account_version():
             select(TradeLedgerEntry).where(TradeLedgerEntry.id == entry_id)
         ).scalar_one()
         revise_ledger_entry(db, entry=entry, user_id=user.id, changes={"quantity": 200}, reason="修正数量")
-        revised = build_account_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment)
+        revised = build_account_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=datetime.now(UTC))
         assert revised["positions"][0]["qty"] == 800
         assert revised["account_version"] != before["account_version"]
 
         void_ledger_entry(db, entry=entry, user_id=user.id, reason="重复录入")
-        voided = build_account_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=moment)
+        voided = build_account_state(db, portfolio_id=portfolio.id, snapshot=snapshot, as_of=datetime.now(UTC))
         assert voided["positions"][0]["qty"] == 1000
         assert voided["account_version"] != revised["account_version"]
         assert voided["entry_count"] == 0
@@ -281,7 +283,7 @@ def test_portfolio_state_exposes_derived_quantities_and_account_version():
         assert position["qty"] == 700
         assert position["available_qty"] == 700
         assert position["account_source"] == "snapshot+ledger"
-        assert state["account_version"].startswith("portfolio-account-v1:")
+        assert state["account_version"].startswith("portfolio-account-v2:")
         assert state["account_derivation"]["applied_entry_ids"]
         assert state["cash"] == 20_000
         assert state["pending_sell_proceeds"] == pytest.approx(2_995)

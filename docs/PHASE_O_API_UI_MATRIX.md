@@ -31,17 +31,17 @@
 | `api.getBacktest` / `cancelBacktest` | GET/POST | `/api/v3/research/backtests/{id}[/cancel]` | run id | run with status/result | 当前用户 | Research | 404/409 | research tests；浏览器待执行 |
 | `api.listCalibrations` / `createCalibration` | GET/POST | `/api/v3/research/calibrations` | run id/parameter grid | Calibration report | 当前用户 | Research / Governance | 422/409 | research tests；浏览器待执行 |
 | `api.listGovernanceProposals` | GET | `/api/v3/governance/proposals` | 无 | proposal list | 当前用户 | Governance | 401/5xx | `test_governance_api.py`；浏览器待执行 |
-| Governance create/submit/approve/reject | POST | `/api/v3/governance/proposals/*` | proposal/value/reason | proposal/version | 当前用户；人工动作 | Governance | 409/422 | `test_governance_api.py`；浏览器待执行 |
-| `api.validateParameterSet` | POST | `/api/v3/governance/parameter-sets/{id}/validate` | version id | validated version | 当前用户 | Governance | 409/422 | governance tests；浏览器待执行 |
-| `api.activateParameterSet` | POST | `/api/v3/governance/parameter-sets/{id}/activate` | reason/expected active/emergency=false | active version | 当前用户；显式激活 | Governance | 409/422 | governance tests；浏览器待执行 |
+| Governance create/submit/approve/reject | POST | `/api/v3/governance/proposals/*` | proposal/value/reason | proposal/version | 实例管理员（首个注册账户）；保留提案归属校验 | Governance | 403/409/422 | `test_governance_api.py`；浏览器待执行 |
+| `api.validateParameterSet` | POST | `/api/v3/governance/parameter-sets/{id}/validate` | version id | validated version | 实例管理员；保留来源归属校验 | Governance | 403/409/422 | governance tests；浏览器待执行 |
+| `api.activateParameterSet` | POST | `/api/v3/governance/parameter-sets/{id}/activate` | reason/expected active/emergency=false | active version | 实例管理员；显式激活 | Governance | 403/409/422 | governance tests；浏览器待执行 |
 | `api.listShadowAccounts` / `createShadowAccount` | GET/POST | `/api/v3/shadow/accounts` | portfolio/snapshot/name | Shadow account | 当前用户、组合 owner | Shadow | 409/422 | `test_shadow_validation.py`；浏览器待执行 |
 | Shadow account pause/resume/rebase | POST | `/api/v3/shadow/accounts/{id}/*` | snapshot/acknowledge | account | 当前用户 owner | Shadow | 409/404 | `test_shadow_validation.py`；浏览器待执行 |
 | Shadow decisions/orders/fills/daily | GET | `/api/v3/shadow/{decisions,orders,fills,daily}` | account/portfolio/status/limit | fact lists | 当前用户 owner | Shadow | 404/401 | `test_shadow_validation.py`；浏览器待执行 |
 | `api.getShadowPerformance` / validation | GET | `/api/v3/shadow/performance`、`validation` | account/generation/portfolio | performance/cohorts | 当前用户 owner | Shadow | 404/5xx | shadow regression；浏览器待执行 |
 | `api.getLiveValidationReadiness` | GET | `/api/v3/system/live-validation-readiness` | 无 | status/ready/blockers/warnings/checks/evaluated_at | 当前登录用户；组合/证据按 owner，公共 market facts 只读 | System | 401/5xx | `test_system_health.py` 16 项；浏览器待执行 |
-| `api.getSystemHealth` / readiness | GET | `/api/v3/system/health`、`readiness` | 无 | component checks | 登录用户 | System / Dashboard | 401/5xx | system health tests |
-| System backup/diagnostics | POST/GET | `/api/v3/system/backups*`、`diagnostics*` | reason/backup id | backup/bundle/blob | 登录用户；运维动作 | System | 400/404/409/5xx | `test_backup_restore.py`、`test_diagnostics.py` |
-| History coverage/sync | GET/POST | `/api/v3/history/coverage`、`sync` | type/date/provider | coverage/sync run | 登录用户；operator guard 由后端执行 | System | 409/422/503 | `test_history_api.py`、`test_history_pit.py` |
+| `api.getSystemHealth` / readiness | GET | `/api/v3/system/health`、`readiness` | 无 | component checks | health：登录用户；详细 readiness：实例管理员 | System / Dashboard | 401/403/5xx | system health tests |
+| System backup/diagnostics | POST/GET | `/api/v3/system/backups*`、`diagnostics*` | reason/backup id | backup/bundle/blob | 实例管理员；含下载、验证和恢复演练 | System | 400/403/404/409/5xx | `test_backup_restore.py`、`test_diagnostics.py` |
+| History coverage/sync | GET/POST | `/api/v3/history/coverage`、`sync` | type/date/provider | coverage/sync run | coverage：登录用户；sync/取消：实例管理员 | System | 403/409/422/503 | `test_history_api.py`、`test_history_pit.py` |
 | Model provider/profile settings | GET/POST/PATCH/DELETE | `/api/v2/model-settings/*` | provider/profile fields；secret 可选 | masked provider/profile | 当前用户 | Settings | 401/409/422/5xx | `test_v2_auth_models.py`；浏览器待执行 |
 | Schedule settings | GET/POST/PATCH/DELETE | `/api/v2/schedules*` | portfolio/checkpoint/mode | schedule/job | 当前用户、组合 owner | Settings | 409/422 | `test_daily_operations.py`；浏览器待执行 |
 | Notification settings | GET/POST/PATCH/DELETE | `/api/v2/notifications*` | webhook/secret/type | masked channel | 当前用户 | Settings | 409/422/5xx | auth/settings tests；浏览器待执行 |

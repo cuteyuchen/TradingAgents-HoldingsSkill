@@ -26,7 +26,7 @@ from ..system.diagnostics import (
 from ..system.health import live_validation_readiness, operational_health, readiness
 from ..system.release import build_release_metadata
 from ..system.startup import collect_startup_recovery_report
-from ..v2_dependencies import get_current_user
+from ..v2_dependencies import get_current_user, require_system_operator
 from ..v2_models import User
 
 router = APIRouter(prefix="/api/v3/system", tags=["v3-system"])
@@ -66,7 +66,7 @@ def system_health(
 @router.get("/readiness")
 def system_readiness(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     return readiness(db, detailed=True)
 
@@ -84,7 +84,7 @@ def system_live_validation_readiness(
 @router.get("/recovery")
 def system_recovery(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     return collect_startup_recovery_report(db)
 
@@ -92,7 +92,7 @@ def system_recovery(
 @router.get("/backups")
 def backups(
     limit: int = 200,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     return {"backups": list_backups(limit=limit)}
 
@@ -100,7 +100,7 @@ def backups(
 @router.post("/backups", status_code=status.HTTP_201_CREATED)
 def create_system_backup(
     payload: BackupRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     try:
         return create_backup(reason=payload.reason)
@@ -111,7 +111,7 @@ def create_system_backup(
 @router.post("/backups/{backup_id}/verify")
 def verify_system_backup(
     backup_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     try:
         return verify_backup(backup_id)
@@ -122,7 +122,7 @@ def verify_system_backup(
 @router.post("/backups/{backup_id}/restore-drill")
 def restore_drill_endpoint(
     backup_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     try:
         return restore_drill(backup_id)
@@ -132,7 +132,7 @@ def restore_drill_endpoint(
 
 @router.post("/diagnostics", status_code=status.HTTP_201_CREATED)
 def create_diagnostics(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     try:
         return build_diagnostic_bundle()
@@ -143,7 +143,7 @@ def create_diagnostics(
 @router.get("/diagnostics/{bundle_id}/download")
 def download_diagnostics(
     bundle_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> FileResponse:
     try:
         metadata = diagnostic_bundle_metadata(bundle_id)

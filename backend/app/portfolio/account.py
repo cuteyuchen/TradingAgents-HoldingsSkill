@@ -7,19 +7,24 @@ double-counts a trade that the screenshot already reflects.
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..market.codes import normalize_security_code
 from ..portfolio_models import TradeLedgerEntry
 from ..v2_models import PortfolioSnapshot
+from .facts import ledger_facts_at
+from .ledger import MATERIALIZED_FIELDS
 
-ACCOUNT_STATE_VERSION = "portfolio-account-v1"
+ACCOUNT_STATE_VERSION = "portfolio-account-v2"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
+AccountEntry = TradeLedgerEntry | SimpleNamespace
 
 _CASH_IN_TYPES = frozenset({"CASH_IN", "DIVIDEND", "TRANSFER_IN"})
 _CASH_OUT_TYPES = frozenset({"CASH_OUT", "FEE", "TAX", "TRANSFER_OUT"})
@@ -38,19 +43,20 @@ def _shanghai_date(value: datetime) -> date:
 def _number(value: Any) -> float | None:
     try:
         parsed = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return parsed
+    return parsed if math.isfinite(parsed) else None
 
 
-def account_version_for(snapshot_id: int, entries: list[TradeLedgerEntry]) -> str:
+def account_version_for(snapshot_id: int, entries: list[AccountEntry]) -> str:
     """Deterministic version of the derived account: anchor plus applied ledger facts."""
 
     digest = hashlib.sha256()
     digest.update(str(snapshot_id).encode("utf-8"))
     for entry in entries:
-        stamp = entry.updated_at.isoformat() if isinstance(entry.updated_at, datetime) else str(entry.updated_at or "")
-        digest.update(f"|{entry.id}:{entry.status}:{stamp}".encode("utf-8"))
+        # Hash the facts visible at the cutoff, never today's updated_at.
+        values = {field: getattr(entry, field) for field in sorted(MATERIALIZED_FIELDS)}
+        digest.update(json.dumps({"id": entry.id, "status": entry.status, **values}, sort_keys=True, default=str).encode("utf-8"))
     return f"{ACCOUNT_STATE_VERSION}:{snapshot_id}:{digest.hexdigest()[:16]}"
 
 
@@ -60,24 +66,13 @@ def confirmed_ledger_entries_after_snapshot(
     portfolio_id: int,
     snapshot: PortfolioSnapshot,
     as_of: datetime,
-) -> list[TradeLedgerEntry]:
+) -> list[AccountEntry]:
     """Confirmed, already-available events strictly after the snapshot baseline."""
 
     cutoff = _utc_naive(as_of)
-    return list(
-        db.execute(
-            select(TradeLedgerEntry)
-            .where(
-                TradeLedgerEntry.portfolio_id == portfolio_id,
-                TradeLedgerEntry.status == "CONFIRMED",
-                TradeLedgerEntry.executed_at > snapshot.snapshot_time,
-                TradeLedgerEntry.available_at <= cutoff,
-            )
-            .order_by(TradeLedgerEntry.executed_at.asc(), TradeLedgerEntry.id.asc())
-        )
-        .scalars()
-        .all()
-    )
+    return [entry for entry in ledger_facts_at(
+        db, user_id=snapshot.user_id, portfolio_id=portfolio_id, as_of=cutoff
+    ) if entry.executed_at > _utc_naive(snapshot.snapshot_time)]
 
 
 def _base_position(item: Any) -> dict[str, Any]:
@@ -97,7 +92,7 @@ def _base_position(item: Any) -> dict[str, Any]:
     }
 
 
-def _cash_effect(entry: TradeLedgerEntry) -> tuple[float | None, list[str]]:
+def _cash_effect(entry: AccountEntry) -> tuple[float | None, list[str]]:
     flags: list[str] = []
     amount = _number(entry.net_amount)
     if amount is None:
@@ -113,7 +108,7 @@ def _cash_effect(entry: TradeLedgerEntry) -> tuple[float | None, list[str]]:
 
 def derive_account_state(
     snapshot: PortfolioSnapshot,
-    entries: list[TradeLedgerEntry],
+    entries: list[AccountEntry],
     *,
     as_of: datetime,
 ) -> dict[str, Any]:
@@ -135,6 +130,11 @@ def derive_account_state(
     pending_sell_proceeds = 0.0
 
     for entry in entries:
+        if str(entry.currency or "CNY").upper() != "CNY":
+            flags.append(f"LEDGER_CURRENCY_UNSUPPORTED:{entry.id}")
+            unapplied.append({"entry_id": entry.id, "entry_type": entry.entry_type, "reason": "currency_conversion_unavailable"})
+            cash_known = False
+            continue
         applied.append(entry.id)
         entry_type = str(entry.entry_type or "").upper()
         code = normalize_security_code(entry.security_code) or None

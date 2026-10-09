@@ -35,7 +35,7 @@ from ..governance.service import (
     validate_parameter_set_version,
 )
 from ..research.models import CalibrationReport
-from ..v2_dependencies import get_current_user
+from ..v2_dependencies import get_current_user, require_system_operator
 from ..v2_models import User
 
 router = APIRouter(prefix="/api/v3/governance", tags=["v3-governance"])
@@ -85,6 +85,7 @@ def _error(exc: ValueError) -> HTTPException:
         "validation_warning_requires_acknowledgement",
         "emergency_reason_required",
         "MULTIPLE_ACTIVE_PARAMETER_SETS",
+        "OPEN_PROPOSAL_CONTENT_CONFLICT",
         "NO_ACTIVE_PARAMETER_SET_WITH_HISTORY",
     }
     if isinstance(exc, GovernanceBlockedError) or any(code in message for code in conflict_codes):
@@ -214,7 +215,7 @@ def proposal_detail(
 def proposal_from_calibration(
     payload: FromCalibrationRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     report = db.get(CalibrationReport, payload.calibration_report_id)
     if report is None or report.user_id != current_user.id:
@@ -238,7 +239,7 @@ def proposal_from_calibration(
 def manual_proposal(
     payload: ManualProposalRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     try:
         row = create_manual_proposal(
@@ -261,7 +262,7 @@ def manual_proposal(
 def submit(
     proposal_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     row = _owned_proposal(db, proposal_id, current_user.id)
     try:
@@ -278,7 +279,7 @@ def approve(
     proposal_id: int,
     payload: ReviewRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     row = _owned_proposal(db, proposal_id, current_user.id)
     try:
@@ -300,7 +301,7 @@ def reject(
     proposal_id: int,
     payload: ReviewRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     row = _owned_proposal(db, proposal_id, current_user.id)
     try:
@@ -321,7 +322,7 @@ def reject(
 def validate_version(
     version_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     row = _version(db, version_id)
     _assert_source_proposal_owner(db, row, current_user.id)
@@ -339,7 +340,7 @@ def activate(
     version_id: int,
     payload: ActivateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     row = _version(db, version_id)
     _assert_source_proposal_owner(db, row, current_user.id)
@@ -364,7 +365,7 @@ def rollback_proposal(
     version_id: int,
     payload: RollbackRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_system_operator),
 ) -> dict[str, Any]:
     _version(db, version_id)
     try:
