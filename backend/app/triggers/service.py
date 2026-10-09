@@ -1,14 +1,25 @@
 """Database lifecycle operations for deterministic trigger detections."""
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import Iterable
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..trigger_models import TriggerEvent
 from .engine import TriggerDetection
+
+
+def _normalize_evidence(value: Any) -> Any:
+    """Convert nested dates to ISO strings without mutating detection evidence."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _normalize_evidence(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_evidence(item) for item in value]
+    return value
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -44,6 +55,7 @@ def apply_detection(db: Session, detection: TriggerDetection, *, now: datetime |
         event.resolution = "EXPIRED"
         event.resolved_at = moment
         event = None
+    evidence = _normalize_evidence(detection.evidence)
     if event is None:
         event = TriggerEvent(
             trigger_plan_id=detection.trigger_plan_id,
@@ -62,7 +74,7 @@ def apply_detection(db: Session, detection: TriggerDetection, *, now: datetime |
             previous_value=detection.previous_value,
             current_value=detection.current_value,
             threshold=detection.threshold,
-            evidence_json=detection.evidence,
+            evidence_json=evidence,
             market_snapshot_id=detection.market_snapshot_id,
             market_score_snapshot_id=detection.market_score_snapshot_id,
             portfolio_snapshot_id=detection.portfolio_snapshot_id,
@@ -78,7 +90,7 @@ def apply_detection(db: Session, detection: TriggerDetection, *, now: datetime |
         event.previous_value = detection.previous_value
         event.current_value = detection.current_value
         event.threshold = detection.threshold
-        event.evidence_json = detection.evidence
+        event.evidence_json = evidence
         event.market_snapshot_id = detection.market_snapshot_id
         event.market_score_snapshot_id = detection.market_score_snapshot_id
         event.portfolio_snapshot_id = detection.portfolio_snapshot_id

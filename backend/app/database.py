@@ -1,4 +1,5 @@
 """SQLite database engine, session factory, and initialization."""
+import json
 import os
 
 from sqlalchemy import create_engine, event, inspect, text
@@ -11,6 +12,7 @@ os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
 engine = create_engine(
     f"sqlite:///{settings.DB_PATH}",
     connect_args={"check_same_thread": False},
+    json_serializer=lambda obj: json.dumps(obj, default=str),
     echo=False,
 )
 

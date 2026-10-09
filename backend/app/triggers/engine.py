@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
 from math import isfinite
 from typing import Any
 
@@ -109,6 +110,9 @@ def evaluate_holding_plan(
         return None
     trigger_type = str(plan.trigger_type or "CONDITION_MET").upper()
     reason_code = f"HOLDING_{trigger_type}"
+    source_timestamp = getattr(quote, "source_timestamp", None)
+    if isinstance(source_timestamp, (datetime, date)):
+        source_timestamp = source_timestamp.isoformat()
     return TriggerDetection(
         trigger_type="HOLDING",
         target_type="HOLDING",
@@ -125,7 +129,7 @@ def evaluate_holding_plan(
             "reason_code": reason_code,
             "operator": plan.operator,
             "provider": getattr(quote, "provider", None),
-            "source_timestamp": getattr(quote, "source_timestamp", None),
+            "source_timestamp": source_timestamp,
             "analysis_required": True,
             "trade_decision": False,
         },
