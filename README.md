@@ -289,7 +289,7 @@ ghcr.io/cuteyuchen/tradingagents-holdings-advisor:v1.0.0
 
 1. **测试前置通过**：在待发布源码上完成本 README 的开发与测试检查，包括隔离数据库上的 Alembic 空库升级与重复升级、后端 `pytest tests -q`、前端 `npm run typecheck`、`npm run build`、`npm run e2e:acceptance`。测试不得使用生产数据目录；有失败不得进入升级。
 2. **同完整 SHA 的 CI 与双架构镜像验证全绿**：核对 `.github/workflows/ci.yml` 的后端、前端、前端验收及 Docker 检查，与 `.github/workflows/docker-images.yml` 的构建及 `Verify both image architectures and release metadata` 步骤，均对应同一完整发布 SHA 且成功。`linux/amd64`、`linux/arm64` 镜像都必须构建成功，manifest 架构齐全，各架构运行验证通过，版本与完整 SHA 符合上表。两套工作流独立触发，必须按 SHA 核验结果；镜像已推送或另一提交的 CI 全绿不能替代此门槛。保留工作流结果与验收镜像 digest。
-3. **升级前取得 SQLite 一致性备份并保留原数据挂载**：在旧容器仍运行时，通过现有系统运维页创建并校验备份，或登录后调用 `POST /api/v3/system/backups`（请求体 `{"reason":"PRE_UPGRADE"}`），再调用 `POST /api/v3/system/backups/{backup_id}/verify`，确认 `verified=true`、校验和匹配且 SQLite 检查通过。现有 `backend/app/system/backup.py` 使用 SQLite 在线 backup API；WAL 模式下不得只复制正在运行的 `advisor.db`。保留备份 `.sqlite` 与 `.json` 清单（默认宿主机 `./backend/data/backups`），完成备份后才可升级。继续使用同一宿主机目录 `./backend/data -> /app/data`，不得改挂空目录、新数据卷或删除原数据；启动时的自动备份保护不能替代升级前的验收备份。
+3. **升级前取得 SQLite 一致性备份并保留原数据挂载**：在旧容器仍运行时，通过现有系统运维页创建并校验备份，或登录后调用 `POST /api/v3/system/backups`（请求体 `{"reason":"PRE_UPGRADE"}`），再调用 `POST /api/v3/system/backups/{backup_id}/verify`，确认 `verified=true`、校验和匹配且 SQLite 检查通过。现有 `backend/app/system/backup.py` 使用 SQLite 在线 backup API；WAL 模式下不得只复制正在运行的 `advisor.db`。保留备份 `.sqlite` 与 `.json` 清单，完成备份后才可升级。保留现场原 Compose/env 与实际数据挂载，升级前通过 `docker inspect` 核对源目录及权限。`./backend/data -> /app/data` 及默认 `./backend/data/backups` 仅为仓库模板示例，不代表所有生产环境；现部署 `oracle-prod` 的真实路径为 `/srv/apps/tradingagents-holdings/data -> /app/data`，备份位于该目录下的 `backups`。升级必须继续沿用现场既有数据挂载，严禁用仓库模板覆盖现有生产配置、换挂空卷或新数据卷，亦不得删除原数据；启动时的自动备份保护不能替代升级前的验收备份。
 4. **线上读回并完成对账**：升级后读回实际运行容器的 image ID、digest、OCI 版本与 revision、`/VERSION`、`settings.APP_VERSION`、`app.version`，再检查生产 `/openapi.json`、前端界面及 `/api/v3/system/release` 的版本、完整 `git_sha` 和构建时间，与同一发布提交和验收镜像逐项核对并保留结果。任一项不一致或无法取得证据，都不能宣布发布完成。
 
 ### 部署操作与线上读回
@@ -323,7 +323,7 @@ docker compose -f docker-compose.deploy.yml pull advisor
 docker compose -f docker-compose.deploy.yml up -d --no-deps advisor
 ```
 
-部署 Compose 继续把宿主机 `./backend/data` 挂载到 `/app/data`，升级镜像不会覆盖 SQLite 数据库、上传截图和分析产物。使用 `IMAGE_TAG=sha-<commit>` 可以锁定并回滚到指定提交。
+部署 Compose 应维持生产实际环境中的数据卷挂载（仓库模板示例为 `./backend/data -> /app/data`，生产如 `oracle-prod` 实际为 `/srv/apps/tradingagents-holdings/data -> /app/data`），升级前须通过 `docker inspect` 核对源目录及权限；升级镜像不会覆盖既有 SQLite 数据库、上传截图和分析产物。严禁用仓库模板覆盖现有生产配置或换挂空卷。使用 `IMAGE_TAG=sha-<commit>` 可以锁定并回滚到指定提交。
 
 升级后，在原部署目录执行以下只读核验，将输出与发布版本、完整 SHA、验收镜像 digest 及原数据挂载对账。镜像检查使用实际运行容器的 image ID：
 
