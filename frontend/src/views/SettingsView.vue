@@ -222,7 +222,7 @@ onBeforeUnmount(() => { fuyaoApiKey.value = '' })
                 <n-input v-model:value="fuyaoApiKey" type="password" show-password-on="click" :input-props="{ 'aria-label': '同花顺金融数据 API Key', autocomplete: 'new-password' }" :maxlength="4096" :disabled="!fuyaoConfig?.can_manage || fuyaoSaveLoading" :placeholder="fuyaoConfig?.configured ? '已配置；输入新密钥可替换' : '输入同花顺金融数据 API Key'" />
               </n-form-item>
               <div class="fuyao-config-actions">
-                <n-button type="primary" attr-type="submit" :loading="fuyaoSaveLoading" :disabled="!fuyaoConfig?.can_manage || !fuyaoApiKey.trim() || fuyaoProbeLoading">保存 接口密钥 (API Key)</n-button>
+                <n-button type="primary" attr-type="submit" :loading="fuyaoSaveLoading" :disabled="!fuyaoConfig?.can_manage || !fuyaoApiKey.trim() || fuyaoProbeLoading">保存 API Key</n-button>
                 <n-button v-if="fuyaoConfig?.source === 'system' && fuyaoConfig.can_manage" secondary :disabled="fuyaoSaveLoading || fuyaoProbeLoading" @click="resetFuyaoConfig">恢复环境配置</n-button>
                 <span class="muted">当前来源：{{ fuyaoSourceLabel }}</span>
               </div>

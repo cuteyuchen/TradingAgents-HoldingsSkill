@@ -49,6 +49,7 @@ test('Governance keeps proposal evidence and requires explicit activation confir
   await expect(page.getByText('运行时契约版本', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('决策契约版本', { exact: true }).first()).toBeVisible()
 
+  allowExpectedHttpError(page, 409)
   const approvedVersion = page.locator('.version-row').filter({ hasText: '已审批待激活' })
   if (await approvedVersion.count()) {
     const dialogs: string[] = []

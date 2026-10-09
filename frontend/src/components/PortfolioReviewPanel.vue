@@ -49,7 +49,7 @@ const scopeText = (item: Record<string, any>) => {
   const scope = item.scope
   if (scope && typeof scope === 'object') {
     const parts = [
-      scope.market_regime && scope.market_regime !== 'UNKNOWN' ? `市场 ${businessLabel(scope.market_regime)}` : '',
+      scope.market_regime && scope.market_regime !== 'UNKNOWN' ? `市场 ${scope.market_regime}` : '',
       scope.security_type ? `标的 ${businessLabel(scope.security_type)}` : '',
       scope.action ? `动作 ${actionLabel(scope.action)}` : '',
       scope.horizon ? `${scope.horizon} 个交易日` : '',
