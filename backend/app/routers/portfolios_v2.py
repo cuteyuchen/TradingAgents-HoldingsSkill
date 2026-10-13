@@ -21,6 +21,7 @@ from ..services.holding_identity import (
 from ..services.holdings_service import normalize_payload, parse_payload_dict, parse_upload
 from ..services.storage import resolve_storage_path, save_holding_image
 from ..portfolio.snapshot_diff import upsert_snapshot_diff
+from ..portfolio.snapshot_time import observation_time_status
 from ..v2_dependencies import get_current_user
 from ..v2_models import HoldingItem, HoldingUpload, Portfolio, PortfolioSnapshot, User
 from ..v2_schemas import (
@@ -112,6 +113,8 @@ def _holding_schema(db: Session, row: HoldingItem) -> HoldingInput:
     audit = audit_holding_item(db, row)
     master = audit.get("master")
     extra = dict(row.extra_json or {})
+    if row.weight is not None and not 0 <= row.weight <= 1:
+        extra.update(invalid_snapshot_weight=row.weight, weight_status="UNVERIFIED_UNIT")
     if audit["status"] == RESOLVED:
         identity = {
             "canonical_code": audit.get("canonical_code"),
@@ -161,19 +164,25 @@ def _holding_schema(db: Session, row: HoldingItem) -> HoldingInput:
         market_value=market_value,
         pnl=row.pnl_ratio,
         pnl_amount=row.pnl_amount,
-        weight=row.weight,
+        weight=row.weight if row.weight is None or 0 <= row.weight <= 1 else None,
         extra=extra,
     )
 
 
 def _snapshot_response(db: Session, row: PortfolioSnapshot) -> SnapshotResponse:
     issues = snapshot_identity_issues(db, row)
+    raw = row.raw_json or {}
+    time_status = observation_time_status(row)
     return SnapshotResponse(
         id=row.id,
         portfolio_id=row.portfolio_id,
         upload_id=row.upload_id,
         source=row.source,
         snapshot_time=row.snapshot_time,
+        observed_at=row.snapshot_time if time_status != "UNVERIFIED" else None,
+        confirmed_at=raw.get("confirmed_at"),
+        ingested_at=row.created_at,
+        observation_time_status=time_status,
         status=row.status,
         total_assets=row.total_assets,
         total_market_value=row.total_market_value,
@@ -422,7 +431,10 @@ def confirm_upload(
         return _snapshot_response(db, existing)
     if not row.parsed_json:
         raise HTTPException(status_code=409, detail="Upload has no parsed holdings.")
-    parsed, errors = parse_payload_dict(row.parsed_json)
+    try:
+        parsed, errors = parse_payload_dict(row.parsed_json)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "holdings_validation_failed", "message": str(exc)}) from exc
     parsed, identity_issues = resolve_payload_identities(
         db,
         parsed,
@@ -446,19 +458,30 @@ def confirm_upload(
         db.rollback()
         raise HTTPException(status_code=422, detail={"message": "Please correct holdings before confirmation.", "errors": errors})
 
+    confirmed_at = utc_now()
+    if parsed.observed_at is None or parsed.observed_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail={"code": "screenshot_observed_at_required",
+            "message": "请核对截图事实时间并提供带时区的时间，不能用确认时间替代。"})
+    observed_at = parsed.observed_at.astimezone(UTC)
+    if observed_at > confirmed_at:
+        raise HTTPException(status_code=422, detail={"code": "screenshot_observed_at_in_future",
+            "message": "截图事实时间不能晚于当前确认时间。"})
+    raw = parsed.model_dump(mode="json")
+    raw.update(observation_time_status="USER_CONFIRMED", confirmed_at=confirmed_at.isoformat())
     snapshot = PortfolioSnapshot(
         user_id=current_user.id,
         portfolio_id=row.portfolio_id,
         upload_id=row.id,
         source="screenshot",
-        snapshot_time=utc_now(),
+        snapshot_time=observed_at,
+        created_at=confirmed_at,
         total_assets=parsed.total_assets,
         total_market_value=parsed.total_market_value,
         broker_available_cash=parsed.broker_available_cash,
         corrected_unused_funds=parsed.corrected_unused_funds,
         repo_or_standard_bond_value=parsed.repo_or_standard_bond_value,
         status="confirmed",
-        raw_json=parsed.model_dump(mode="json"),
+        raw_json=raw,
     )
     db.add(snapshot)
     db.flush()
@@ -491,13 +514,14 @@ def confirm_upload(
             PortfolioSnapshot.portfolio_id == snapshot.portfolio_id,
             PortfolioSnapshot.status == "confirmed",
             PortfolioSnapshot.id != snapshot.id,
+            PortfolioSnapshot.snapshot_time <= snapshot.snapshot_time,
         )
         .order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())
         .first()
     )
     if previous is not None:
         upsert_snapshot_diff(db, before=previous, after=snapshot)
-    row.confirmed_at = utc_now()
+    row.confirmed_at = confirmed_at
     row.parsing_status = "confirmed"
     db.commit()
     db.refresh(snapshot)

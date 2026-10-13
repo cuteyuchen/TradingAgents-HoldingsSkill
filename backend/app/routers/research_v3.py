@@ -124,7 +124,11 @@ def _portfolio(db: Session, *, user_id: int, portfolio_id: int | None) -> None:
 
 def _error(exc: ValueError) -> HTTPException:
     message = str(exc)
-    code = status.HTTP_409_CONFLICT if "insufficient" in message.lower() or "unsupported" in message.lower() else status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = status.HTTP_409_CONFLICT if (
+        message.startswith("CALIBRATION_SPEC_")
+        or "insufficient" in message.lower()
+        or "unsupported" in message.lower()
+    ) else status.HTTP_422_UNPROCESSABLE_ENTITY
     return HTTPException(status_code=code, detail=message)
 
 

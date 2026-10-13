@@ -298,6 +298,8 @@ def test_live_standard_scan_uses_one_bulk_quote_snapshot(monkeypatch):
             user_id=user.id,
             portfolio_id=portfolio.id,
             snapshot_time=now,
+            created_at=now,
+            source="manual",
             status="confirmed",
             total_assets=100_000,
             total_market_value=100_000,

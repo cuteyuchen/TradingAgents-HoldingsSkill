@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { businessLabel } from '../utils/businessLocale'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Camera, CheckCircle2, ClipboardPaste, FileImage, Play, Plus, RefreshCw, Save, X } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
@@ -8,9 +8,11 @@ import { useMessage } from 'naive-ui'
 import { api } from '../api'
 import { usePortfolioContext } from '../composables/portfolio'
 import { fmtDateTime } from '../utils/ui'
+import { observationTimeToIso } from '../utils/observation-time'
 import type { AnalysisJob, AnalysisMode, HoldingUpload, ParsedHoldings, PortfolioSnapshot } from '../api/types'
 import HoldingsIdentityTable from './HoldingsIdentityTable.vue'
 
+/***********************抽屉输入与上下文*********************/
 const props = defineProps<{ show: boolean; portfolioId: number | null }>()
 const emit = defineEmits<{
   'update:show': [value: boolean]
@@ -24,6 +26,7 @@ const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const upload = ref<HoldingUpload | null>(null)
 const parsed = ref<ParsedHoldings | null>(null)
+const observedAtInput = ref('')
 const snapshot = ref<PortfolioSnapshot | null>(null)
 const job = ref<AnalysisJob | null>(null)
 const loading = ref(false)
@@ -37,16 +40,18 @@ const pollingError = ref('')
 const analysisMode = ref<AnalysisMode>('deep')
 const checkpoint = ref('10:30')
 const notify = ref(true)
-const analysisPanel = ref<HTMLElement | null>(null)
+const analysisPanel = useTemplateRef<HTMLElement>('analysisPanel')
 let contextOpening = false
 let pollTimer: number | null = null
 let pollBusy = false
 
 const { portfolios, selectedPortfolioId, setSelectedPortfolio } = usePortfolioContext()
 const activePortfolioId = computed(() => props.portfolioId || selectedPortfolioId.value)
+/***********************核对与确认条件*********************/
 const canUpload = computed(() => Boolean(selectedFile.value))
+const observedAt = computed(() => observationTimeToIso(observedAtInput.value))
 const identityIssueCount = computed(() => parsed.value?.holdings.filter((holding) => holding.resolution_status !== 'RESOLVED' || !holding.canonical_code || !holding.security_id).length || 0)
-const canConfirm = computed(() => Boolean(upload.value && parsed.value?.holdings.length && !upload.value.validation_errors.length && identityIssueCount.value === 0))
+const canConfirm = computed(() => Boolean(upload.value && parsed.value?.holdings.length && observedAt.value && !upload.value.validation_errors.length && identityIssueCount.value === 0))
 const snapshotIdentityBlocked = computed(() => Boolean(snapshot.value && snapshot.value.identity_status && snapshot.value.identity_status !== 'RESOLVED'))
 const terminalJob = computed(() => ['succeeded', 'failed', 'cancelled'].includes(job.value?.status || ''))
 const jobProgressStatus = computed<'error' | 'success' | 'default'>(() => {
@@ -68,8 +73,9 @@ function uploadStatusText(status?: string | null) {
   return ({ uploaded: '已上传', vision_parsing: '识别中', identity_resolving: '正在匹配证券身份...', waiting_confirmation: '待人工确认', confirmed: '已确认', failed: '识别失败', needs_model: '缺少识图模型' }[String(status || '').toLowerCase()] || businessLabel(status || 'UNKNOWN'))
 }
 
+/***********************截图草稿与上传轮询*********************/
 function emptyParsed(): ParsedHoldings {
-  return { holdings: [], excluded_items: [], notes: [] }
+  return { holdings: [], excluded_items: [], notes: [], observed_at: null }
 }
 
 function stopPolling() {
@@ -85,6 +91,7 @@ function clearDraft() {
   previewUrl.value = ''
   upload.value = null
   parsed.value = null
+  observedAtInput.value = ''
   job.value = null
 }
 
@@ -94,6 +101,7 @@ function setSelectedFile(file: File | null) {
   previewUrl.value = file ? URL.createObjectURL(file) : ''
   upload.value = null
   parsed.value = null
+  observedAtInput.value = ''
   snapshot.value = null
   job.value = null
 }
@@ -208,6 +216,7 @@ async function saveParsed(): Promise<boolean> {
   if (!upload.value || !parsed.value) return false
   saving.value = true
   try {
+    parsed.value.observed_at = observedAt.value
     upload.value = await api.updateParsedHoldings(upload.value.id, parsed.value)
     parsed.value = upload.value.parsed || parsed.value
     message.success('持仓修正已保存')
@@ -236,6 +245,10 @@ async function retryVision() {
 
 async function confirmHoldings(startAnalysis = false) {
   if (!upload.value || confirming.value) return
+  if (!observedAt.value) {
+    message.error('请填写有效的截图事实时间（北京时间）')
+    return
+  }
   confirming.value = true
   try {
     if (!await saveParsed()) return
@@ -256,6 +269,7 @@ async function confirmHoldings(startAnalysis = false) {
   }
 }
 
+/***********************分析任务与轮询*********************/
 async function runAnalysis() {
   if (!snapshot.value || snapshotIdentityBlocked.value || analysisStarting.value) return
   analysisStarting.value = true
@@ -348,6 +362,7 @@ async function openWithContext() {
   }
 }
 
+/***********************抽屉与事件生命周期*********************/
 watch(() => props.show, (show) => {
   if (show) void openWithContext()
 })
@@ -412,7 +427,10 @@ onUnmounted(() => {
 
         <section v-if="parsed" class="drawer-section">
           <div class="section-title"><div><h3>2. 核对并修正</h3><p>请核对后确认，数量和现金均来自你提交的快照。</p></div><div class="section-actions"><n-button secondary size="small" @click="addHolding"><template #icon><Plus :size="14" /></template>新增一行</n-button><n-button secondary size="small" :loading="saving" @click="saveParsed"><template #icon><Save :size="14" /></template>保存修正</n-button></div></div>
-          <div class="fund-grid"><n-form-item label="总资产"><n-input-number v-model:value="parsed.total_assets" :show-button="false" /></n-form-item><n-form-item label="持仓总市值"><n-input-number v-model:value="parsed.total_market_value" :show-button="false" /></n-form-item><n-form-item label="券商可用资金"><n-input-number v-model:value="parsed.broker_available_cash" :show-button="false" /></n-form-item><n-form-item label="修正后未使用资金"><n-input-number v-model:value="parsed.corrected_unused_funds" :show-button="false" /></n-form-item></div>
+          <div class="fund-grid">
+            <n-form-item label="截图事实时间（北京时间）" required><input v-model="observedAtInput" type="datetime-local" step="1" required data-testid="holdings-update-observed-at" /></n-form-item>
+            <n-form-item label="总资产"><n-input-number v-model:value="parsed.total_assets" :show-button="false" /></n-form-item><n-form-item label="持仓总市值"><n-input-number v-model:value="parsed.total_market_value" :show-button="false" /></n-form-item><n-form-item label="券商可用资金"><n-input-number v-model:value="parsed.broker_available_cash" :show-button="false" /></n-form-item><n-form-item label="修正后未使用资金"><n-input-number v-model:value="parsed.corrected_unused_funds" :show-button="false" /></n-form-item>
+          </div>
           <HoldingsIdentityTable :holdings="parsed.holdings" :portfolio-id="activePortfolioId" @remove="removeHolding" />
           <n-alert v-if="upload?.parsing_status === 'identity_resolving'" type="info" :show-icon="false">正在匹配证券身份...</n-alert>
           <n-alert v-else-if="identityIssueCount" type="warning" :show-icon="false">还有 {{ identityIssueCount }} 个持仓未确认证券身份。请先补全或确认代码，再保存为正式持仓快照。</n-alert>

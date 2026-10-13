@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
@@ -116,7 +117,7 @@ def _phase_payload(phase_name: str) -> dict:
     }
 
 
-def _register_and_seed(client: TestClient) -> tuple[dict[str, str], int]:
+def _register_and_seed(client: TestClient, *, observed_at: datetime | None = None) -> tuple[dict[str, str], int]:
     init_db()
     with SessionLocal() as db:
         upsert_security(db, {"code": "600519", "exchange": "SSE", "name": "贵州茅台", "security_type": STOCK})
@@ -149,6 +150,7 @@ def _register_and_seed(client: TestClient) -> tuple[dict[str, str], int]:
     )
     assert profile.status_code == 201, profile.text
     holdings = {
+        "observed_at": (observed_at or datetime.now(UTC)).isoformat(),
         "holdings": [{"code": "600519", "name": "贵州茅台", "qty": 100, "available_qty": 80, "cost": 1500, "price": 1600, "market_value": 160000}],
         "total_assets": 200000,
         "total_market_value": 160000,

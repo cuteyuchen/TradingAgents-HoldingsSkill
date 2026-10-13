@@ -32,12 +32,16 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
     frozen = bool(market_state.get("is_frozen"))
     market_quality = str(market_state.get("quality_status") or "MISSING").upper()
     market_available = bool(market_state.get("available", market_quality in {"VALID", "DEGRADED"}))
-    market_unavailable = not market_available or market_quality in {"MISSING", "INVALID"}
+    market_unavailable = (not market_available or market_quality not in {"VALID", "DEGRADED"}
+                          or market_state.get("freshness") == "STALE")
     cash_ratio = state.get("cash_ratio")
     spendable_cash = state.get("spendable_cash", state.get("cash"))
     cash_known = cash_ratio is not None and spendable_cash is not None
     base_quality = str(state.get("quality_status") or "DEGRADED").upper()
     data_quality_blocked = base_quality in {"BLOCKED", "FROZEN"}
+    allow_reconciliation_reductions = (
+        base_quality == "BLOCKED" and state.get("reconciliation_reduction_allowed") is True
+    )
     positions: list[dict[str, Any]] = []
     risk_flags: list[str] = list(state.get("risk_flags") or [])
 
@@ -53,10 +57,13 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
             risk_flags.append(f"HARD_CAP_BREACH:{row.get('code')}")
         quote_quality = str(row.get("quote_quality") or "MISSING").upper()
         blocking_reasons: list[str] = []
+        if data_quality_blocked:
+            blocking_reasons.append("PORTFOLIO_DATA_QUALITY")
         if frozen:
             blocking_reasons.append("MARKET_STATE_FROZEN")
         if market_unavailable:
             blocking_reasons.append("MARKET_STATE_UNAVAILABLE")
+            blocking_reasons.extend(market_state.get("reason_codes") or [])
         if quote_quality not in {"VALID", "DEGRADED"}:
             blocking_reasons.append(f"QUOTE_{quote_quality}")
         if "ETF_CATEGORY_UNKNOWN" in flags or "SECURITY_CLASSIFICATION_UNKNOWN" in flags:
@@ -75,7 +82,28 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
         elif headroom is not None:
             max_additional_weight = headroom
         available_qty = row.get("available_qty")
-        can_reduce = available_qty is not None and float(available_qty) > 0 and quote_quality in {"VALID", "DEGRADED"}
+        qty = row.get("qty")
+        position_unreconciled = any(flag in flags for flag in (
+            "NEGATIVE_POSITION", "SELL_EXCEEDS_AVAILABLE", "NEGATIVE_AVAILABLE",
+            "AVAILABLE_EXCEEDS_QTY", "AVAILABLE_CLAMPED_TO_QTY", "TRADE_DATE_MISMATCH",
+        ))
+        can_reduce = (
+            (not data_quality_blocked or allow_reconciliation_reductions)
+            and not position_unreconciled and qty is not None and float(qty) > 0
+            and available_qty is not None and 0 < float(available_qty) <= float(qty)
+            and quote_quality in {"VALID", "DEGRADED"}
+        )
+        # A blocked account grants only position-specific, backend-owned
+        # reductions with complete identity and no contradiction on that row.
+        reconciliation_reduce_allowed = (
+            allow_reconciliation_reductions and can_reduce and bool(row.get("code"))
+            and row.get("security_type") in {"STOCK", "ETF"}
+            and not any(flag in flags for flag in ("ETF_CATEGORY_UNKNOWN", "SECURITY_CLASSIFICATION_UNKNOWN"))
+            and row.get("current_price") is not None and float(row["current_price"]) > 0
+            and not row.get("is_suspended")
+        )
+        if data_quality_blocked:
+            can_reduce = reconciliation_reduce_allowed
         if available_qty is None:
             flags.append("AVAILABLE_QTY_UNKNOWN")
         row.update({
@@ -85,6 +113,7 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
             "max_sellable_qty": available_qty,
             "add_allowed": not blocking_reasons,
             "reduce_allowed": can_reduce,
+            "reconciliation_reduce_allowed": reconciliation_reduce_allowed,
             "blocking_reasons": list(dict.fromkeys(blocking_reasons)),
             "flags": list(dict.fromkeys(flags)),
         })
@@ -92,7 +121,7 @@ def build_portfolio_constraints(state: dict[str, Any], market_state: dict[str, A
 
     return {
         "can_increase_risk": not frozen and not market_unavailable and cash_known and not data_quality_blocked,
-        "can_reduce_risk": not data_quality_blocked,
+        "can_reduce_risk": not data_quality_blocked or any(row["reconciliation_reduce_allowed"] for row in positions),
         "data_quality_blocked": data_quality_blocked,
         "market_state_frozen": frozen,
         "market_state_available": market_available,

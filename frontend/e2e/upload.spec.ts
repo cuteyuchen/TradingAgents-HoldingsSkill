@@ -1,4 +1,4 @@
-import { test, expect, login, validPngBytes } from './fixtures'
+import { test, expect, fillScreenshotObservedAt, login, validPngBytes } from './fixtures'
 
 test('Upload, deterministic recognition, confirm, and invalid parse stay in review', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
@@ -26,6 +26,8 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
   const holdingRows = page.locator('[data-testid^="v3-identity-row-"]')
   await expect(holdingRows.nth(0).locator('input[placeholder="名称"]')).toHaveValue('贵州茅台')
   await expect(holdingRows.nth(1).locator('input[placeholder="名称"]')).toHaveValue('沪深300ETF')
+  await expect(drawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeDisabled()
+  await fillScreenshotObservedAt(page, facts.now_utc)
   await drawer.getByRole('button', { name: '仅确认快照', exact: true }).click()
   await expect(drawer).toContainText('当前使用快照', { timeout: 15_000 })
 
@@ -57,5 +59,6 @@ test('Upload, deterministic recognition, confirm, and invalid parse stay in revi
   })
   await invalidDrawer.getByRole('button', { name: '上传并识别', exact: true }).click()
   await expect(page.getByText('没有识别到有效的股票或 ETF 持仓', { exact: true })).toBeVisible({ timeout: 15_000 })
+  await fillScreenshotObservedAt(page, facts.now_utc)
   await expect(invalidDrawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeDisabled()
 })

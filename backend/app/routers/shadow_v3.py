@@ -106,6 +106,8 @@ def _snapshot_payload(row: ShadowDailySnapshot) -> dict[str, Any]:
 
 
 def _position_payload(row: ShadowPosition) -> dict[str, Any]:
+    metadata = row.metadata_json or {}
+    sellable_known = metadata.get("sellable_quantity_known") is not False
     return {
         "id": row.id,
         "code": row.code,
@@ -113,14 +115,17 @@ def _position_payload(row: ShadowPosition) -> dict[str, Any]:
         "security_type": row.security_type,
         "etf_category": row.etf_category,
         "quantity": row.quantity,
-        "sellable_quantity": row.sellable_quantity,
+        # The non-null storage column can carry a proven lower bound.
+        "sellable_quantity": row.sellable_quantity if sellable_known else None,
+        "sellable_quantity_minimum": row.sellable_quantity,
+        "sellable_quantity_known": sellable_known,
         "average_cost": row.average_cost,
         "current_mark": row.current_mark,
         "market_value": row.market_value,
         "unrealized_pnl": row.unrealized_pnl,
         "last_mark_at": _datetime(row.last_mark_at),
         "acquired_decision_ids": row.acquired_decision_ids_json or [],
-        "metadata": row.metadata_json or {},
+        "metadata": metadata,
     }
 
 
@@ -227,6 +232,7 @@ def _observation_payload(row: LiveDecisionObservation, *, detail: bool = False) 
 
 
 def _intent_payload(row: ShadowOrderIntent) -> dict[str, Any]:
+    calendar_pending = row.status == "PENDING" and "SHADOW_CALENDAR_DATA_GAP" in (row.reason_codes_json or [])
     return {
         "id": row.id,
         "shadow_account_id": row.shadow_account_id,
@@ -242,11 +248,12 @@ def _intent_payload(row: ShadowOrderIntent) -> dict[str, Any]:
         "decision_reference_price": row.decision_reference_price,
         "decision_reference_basis": row.decision_reference_basis,
         "decision_finalized_at": _datetime(row.decision_finalized_at),
-        "earliest_executable_at": _datetime(row.earliest_executable_at),
+        # Closed storage placeholders are not known execution timestamps.
+        "earliest_executable_at": None if calendar_pending else _datetime(row.earliest_executable_at),
         "status": row.status,
         "reason_codes": row.reason_codes_json or [],
         "created_at": _datetime(row.created_at),
-        "expires_at": _datetime(row.expires_at),
+        "expires_at": None if calendar_pending else _datetime(row.expires_at),
         "idempotency_key": row.idempotency_key,
     }
 

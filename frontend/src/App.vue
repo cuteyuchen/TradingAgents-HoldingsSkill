@@ -4,15 +4,17 @@ import { useRoute, useRouter } from 'vue-router'
 import { ChevronDown } from 'lucide-vue-next'
 import { darkTheme, dateZhCN, lightTheme, zhCN, type GlobalTheme, type GlobalThemeOverrides } from 'naive-ui'
 
-import { api, hasSession } from './api'
+import { api, getSessionGeneration, hasSession } from './api'
 import type { FuyaoStatus, LiveValidationReadiness, SystemHealth } from './api/types'
-import { clearPortfolioContext, usePortfolioContext } from './composables/portfolio'
+import { usePortfolioContext } from './composables/portfolio'
 // V3 主题唯一权威（light/dark/system），Legacy 只消费 resolved 结果
 import { resolvedTheme } from './v3/composables/useV3Theme'
 import V3AppShell from './v3/layouts/V3AppShell.vue'
 
+/***********************全局会话与组合上下文*********************/
 const route = useRoute()
 const router = useRouter()
+const sessionRevision = ref(getSessionGeneration())
 
 /** Legacy 壳层展示用：始终是 light 或 dark */
 const themePref = resolvedTheme
@@ -33,6 +35,7 @@ const {
   setSelectedPortfolio,
 } = usePortfolioContext()
 
+/***********************主题与系统状态展示*********************/
 const theme = computed<GlobalTheme>(() => (themePref.value === 'dark' ? darkTheme : lightTheme))
 const themeOverrides = computed<GlobalThemeOverrides>(() => ({
   common: {
@@ -71,19 +74,23 @@ const systemStatusHint = computed(() => {
   return '系统健康，仍需完成真实持仓与分析验证'
 })
 
+/***********************会话隔离的状态请求*********************/
 async function loadSystemStatus(): Promise<void> {
   if (systemStatusRequest) return systemStatusRequest
   if (systemHealth.value && liveReadiness.value) return
 
   loadingSystemStatus.value = true
   systemStatusError.value = false
+  const generation = getSessionGeneration()
   const request = Promise.all([api.getSystemHealth(), api.getLiveValidationReadiness(), api.getFuyaoStatus()])
     .then(([health, readiness, fuyao]) => {
+      if (generation !== getSessionGeneration()) return
       systemHealth.value = health
       liveReadiness.value = readiness
       fuyaoStatus.value = fuyao
     })
     .catch(() => {
+      if (generation !== getSessionGeneration()) return
       systemHealth.value = null
       liveReadiness.value = null
       fuyaoStatus.value = null
@@ -94,12 +101,16 @@ async function loadSystemStatus(): Promise<void> {
   try {
     await request
   } finally {
-    loadingSystemStatus.value = false
-    if (systemStatusRequest === request) systemStatusRequest = null
+    if (systemStatusRequest === request) {
+      loadingSystemStatus.value = false
+      systemStatusRequest = null
+    }
   }
 }
 
 function resetSystemStatus() {
+  systemStatusRequest = null
+  loadingSystemStatus.value = false
   systemHealth.value = null
   liveReadiness.value = null
   fuyaoStatus.value = null
@@ -109,12 +120,13 @@ function resetSystemStatus() {
 async function loadUser() {
   if (!hasSession() || isLogin.value || loadingUser.value) return
   loadingUser.value = true
+  const generation = getSessionGeneration()
   try {
     await Promise.all([api.me(), loadPortfolios(), loadSystemStatus()])
   } catch {
     // The request layer owns session expiry; the shell stays quiet here.
   } finally {
-    loadingUser.value = false
+    if (generation === getSessionGeneration()) loadingUser.value = false
   }
 }
 
@@ -123,12 +135,14 @@ function openSystemStatus() {
 }
 
 const onSessionChanged = () => {
-  clearPortfolioContext()
+  sessionRevision.value = getSessionGeneration()
+  loadingUser.value = false
   resetSystemStatus()
-  void loadUser()
+  if (hasSession()) void loadUser()
+  else void router.replace({ name: 'login' })
 }
 const onSessionExpired = () => {
-  void router.replace({ name: 'login', query: { expired: '1' } }).finally(() => clearPortfolioContext())
+  void router.replace({ name: 'login', query: { expired: '1' } })
 }
 const onMarketConfigChanged = async () => {
   if (systemStatusRequest) await systemStatusRequest
@@ -136,6 +150,7 @@ const onMarketConfigChanged = async () => {
   await loadSystemStatus()
 }
 
+/***********************全局事件生命周期*********************/
 onMounted(() => {
   void loadUser()
   window.addEventListener('advisor-session-changed', onSessionChanged)
@@ -156,7 +171,7 @@ watch(() => route.name, () => void loadUser())
       <n-dialog-provider>
         <n-global-style />
         <div class="app-root" :class="`theme-${themePref}`">
-          <router-view v-if="isLogin" />
+          <router-view v-if="isLogin" :key="sessionRevision" />
           <V3AppShell v-else>
             <template #topbar-center>
               <q-select
@@ -188,7 +203,7 @@ watch(() => route.name, () => void loadUser())
                 <span class="system-status-label">{{ systemStatusLabel }}</span>
               </button>
             </template>
-            <router-view />
+            <router-view :key="sessionRevision" />
           </V3AppShell>
         </div>
       </n-dialog-provider>

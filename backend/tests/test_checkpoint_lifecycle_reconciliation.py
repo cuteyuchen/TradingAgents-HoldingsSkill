@@ -50,6 +50,7 @@ def _seed(db, *, status="succeeded", checkpoint="09:35", job_id=None, claim_id=N
         db.add(PortfolioSnapshot(
             user_id=user.id, portfolio_id=portfolio.id, status="confirmed",
             snapshot_time=NOW - timedelta(hours=2),
+            created_at=NOW - timedelta(hours=2), source="manual",
         ))
         db.add(TradingCalendar(market="CN", trade_date=DAY, is_open=True))
         db.flush()
@@ -419,8 +420,10 @@ def _runner_fixture(monkeypatch):
                         lambda _profile, _system, _payload, _instruction, phase_name: _phase_payload(phase_name))
     monkeypatch.setattr(analysis_engine.AnalysisLeaseHeartbeat, "for_job", lambda *args, **kwargs: None)
     monkeypatch.setattr(analysis_engine, "utc_now", lambda: NOW.replace(tzinfo=UTC))
+    # The historical worker can only use screenshots confirmed by its cutoff.
+    monkeypatch.setattr("app.routers.portfolios_v2.utc_now", lambda: NOW.replace(tzinfo=UTC))
     client = TestClient(main.app)
-    headers, snapshot_id = _register_and_seed(client)
+    headers, snapshot_id = _register_and_seed(client, observed_at=(NOW - timedelta(hours=2)).replace(tzinfo=UTC))
     with SessionLocal() as session:
         snapshot = session.get(PortfolioSnapshot, snapshot_id)
         job = AnalysisJob(user_id=snapshot.user_id, portfolio_id=snapshot.portfolio_id,

@@ -69,6 +69,14 @@ jobs:
           node-version: "20"
       - name: Install dependencies
         run: npm install --silent --no-audit --no-fund
+      - name: Frontend code regressions
+        shell: bash
+        run: |
+          set +e
+          npm test > "$RUNNER_TEMP/frontend-tests.log" 2>&1
+          status=$?
+          cat "$RUNNER_TEMP/frontend-tests.log"
+          exit $status
       - name: Typecheck
         shell: bash
         run: |
@@ -91,6 +99,7 @@ jobs:
         with:
           name: frontend-diagnostics
           path: |
+            ${{ runner.temp }}/frontend-tests.log
             ${{ runner.temp }}/frontend-typecheck.log
             ${{ runner.temp }}/frontend-build.log
           if-no-files-found: ignore

@@ -659,7 +659,7 @@ def test_market_engine_reads_daily_bar_cache_without_provider_fanout() -> None:
         db.close()
 
 
-def test_daily_bar_cache_sync_is_incremental() -> None:
+def test_daily_bar_cache_sync_repairs_incomplete_window() -> None:
     db = _session()
     try:
         day = date(2026, 8, 23)
@@ -699,7 +699,7 @@ def test_daily_bar_cache_sync_is_incremental() -> None:
                         "close": 103 - offset,
                         "quality_status": "VALID",
                     }
-                    for offset in range(3, -1, -1)
+                    for offset in range(2, -1, -1)
                 ]
 
         provider = Provider()
@@ -709,9 +709,10 @@ def test_daily_bar_cache_sync_is_incremental() -> None:
             ["600519"],
             as_of=day,
             available_at=datetime(2026, 8, 23, 23, tzinfo=UTC),
+            bootstrap_limit=3,
         )
-        assert provider.calls == [("600519", 4)]
-        assert result["persisted_rows"] == 2
+        assert provider.calls == [("600519", 3)]
+        assert result["persisted_rows"] == 3
         assert db.scalar(select(func.count()).select_from(DailyBarCache)) == 3
     finally:
         db.close()

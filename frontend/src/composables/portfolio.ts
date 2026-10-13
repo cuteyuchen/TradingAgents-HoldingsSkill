@@ -39,17 +39,22 @@ export function clearPortfolioContext(): void {
   persistSelection(null)
 }
 
+if (typeof window !== 'undefined') {
+  window.addEventListener('advisor-session-changed', clearPortfolioContext)
+}
+
 export async function loadPortfolios(force = false): Promise<Portfolio[]> {
+  const generation = cacheGeneration
   if (!force && portfolios.value.length) return portfolios.value
   if (inFlight) {
     if (!force) return inFlight
     // A forced reload must observe facts written after the older request began.
     const pending = inFlight
     await pending.catch(() => undefined)
+    if (generation !== cacheGeneration) return []
   }
   loading.value = true
   error.value = null
-  const generation = cacheGeneration
   const request = api.listPortfolios()
     .then((rows) => {
       if (generation !== cacheGeneration) return []
@@ -63,6 +68,7 @@ export async function loadPortfolios(force = false): Promise<Portfolio[]> {
       return rows
     })
     .catch((reason: unknown) => {
+      if (generation !== cacheGeneration) return []
       error.value = reason as ApiError
       throw reason
     })

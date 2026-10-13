@@ -37,7 +37,7 @@ def _account_seed(db):
     anchor.total_assets = 60000
     close = PortfolioSnapshot(user_id=user.id, portfolio_id=portfolio.id,
         snapshot_time=datetime(2026, 8, 21, 7), created_at=datetime(2026, 8, 21, 7),
-        status="confirmed", total_assets=66000, broker_available_cash=48000)
+        source="manual", status="confirmed", total_assets=66000, broker_available_cash=48000)
     db.add(close)
     db.flush()
     db.add(HoldingItem(snapshot_id=close.id, code="600519", qty=150, cost=105.01,

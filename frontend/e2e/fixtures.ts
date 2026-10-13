@@ -89,6 +89,13 @@ export async function login(page: Page, user: AcceptanceFacts['users']['a']): Pr
   await expect(page.locator('.shared-loading')).toHaveCount(0, { timeout: 20_000 })
 }
 
+/** 使用验收时钟的真实事实时间，不用浏览器当前时间替代截图时间。 */
+export async function fillScreenshotObservedAt(page: Page, value: string): Promise<void> {
+  const utc = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`
+  const chinaTime = new Date(Date.parse(utc) + 8 * 60 * 60 * 1000).toISOString().slice(0, 19)
+  await page.getByTestId('v3-update-observed-at').fill(chinaTime)
+}
+
 export function allowExpectedHttpError(page: Page, status: number): void {
   expectedHttpErrors.get(page)?.add(status)
 }

@@ -4,9 +4,9 @@ from __future__ import annotations
 from ..decision_contract import SECTOR_THEME_ETF_HARD_CAP_RATIO, STOCK_HARD_CAP_RATIO
 
 PORTFOLIO_ENGINE_VERSION = "portfolio-engine-v1"
-PORTFOLIO_RISK_VERSION = "portfolio-risk-v1"
+PORTFOLIO_RISK_VERSION = "portfolio-risk-v3"
 PORTFOLIO_DIFF_VERSION = "portfolio-diff-v1"
-PORTFOLIO_GATE_VERSION = "portfolio-decision-gate-v1"
+PORTFOLIO_GATE_VERSION = "portfolio-decision-gate-v3"
 
 # Keep Score is diagnostic only. It never overrides a deterministic constraint.
 KEEP_SCORE_WEIGHTS = {

@@ -17,6 +17,7 @@ def _headers(client, email: str) -> dict[str, str]:
 
 
 def _confirmed_snapshot(client, headers: dict[str, str], portfolio_id: int, holdings: dict) -> int:
+    holdings = {**holdings, "observed_at": datetime.now(UTC).isoformat()}
     upload = client.post(
         f"/api/v2/portfolios/{portfolio_id}/uploads",
         headers=headers,
@@ -90,7 +91,7 @@ def test_ledger_entry_updates_derived_state_and_import_dedupes(monkeypatch):
     assert position["available_qty"] == 700
     assert payload["cash"] == 20_000
     assert payload["pending_sell_proceeds"] == pytest.approx(2_995)
-    assert payload["account_version"].startswith("portfolio-account-v2:")
+    assert payload["account_version"].startswith("portfolio-account-v4:")
     assert payload["account_derivation"]["applied_entry_ids"] == [sell.json()["id"]]
 
     snapshot = client.get(f"/api/v2/snapshots/{snapshot_id}", headers=headers)

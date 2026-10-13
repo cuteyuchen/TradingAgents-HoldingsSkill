@@ -1,12 +1,15 @@
 """Portfolio Engine orchestration without network work inside write transactions."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
+from ..market.session import MarketDataBasis, MarketSessionService
+from ..services.trading_calendar import CHINA_TZ
 from ..market_engine_models import MarketScoreSnapshot
 from ..portfolio_models import PortfolioRiskSnapshot
 from ..v2_models import PortfolioSnapshot
@@ -25,14 +28,43 @@ def _as_of(value: datetime | None) -> datetime:
 
 
 def latest_market_state(db: Session, *, as_of: datetime) -> dict[str, Any]:
+    moment = as_of.astimezone(UTC).replace(tzinfo=None) if as_of.tzinfo else as_of
     row = db.execute(select(MarketScoreSnapshot).where(
         MarketScoreSnapshot.market == "CN",
-        MarketScoreSnapshot.captured_at <= as_of,
+        MarketScoreSnapshot.captured_at <= moment,
     ).order_by(MarketScoreSnapshot.captured_at.desc(), MarketScoreSnapshot.id.desc()).limit(1)).scalar_one_or_none()
     if row is None:
         return {"available": False, "is_frozen": False, "quality_status": "MISSING", "regime": None}
+    local = moment.replace(tzinfo=UTC).astimezone(CHINA_TZ)
+    session = MarketSessionService(db).resolve_session(local)
+    expected_day = (session.previous_trading_date
+                    if session.data_basis == MarketDataBasis.PREVIOUS_SESSION_CLOSE.value
+                    else session.trading_date)
+    max_age = max(settings.MARKET_SNAPSHOT_FRESHNESS_SECONDS, settings.MARKET_SCORE_INTERVAL_MINUTES * 120)
+    reasons = []
+    age = (moment - row.captured_at).total_seconds()
+    if session.is_trading_day is None:
+        reasons.append("MARKET_CALENDAR_UNAVAILABLE")
+    if expected_day is None or row.trade_date != expected_day:
+        reasons.append("MARKET_SCORE_TRADE_DATE_MISMATCH")
+    if session.data_basis == MarketDataBasis.LIVE.value:
+        captured = row.captured_at.replace(tzinfo=UTC).astimezone(CHINA_TZ)
+        # Scheduled lunch contributes no live trading age, but never exempts
+        # a stale morning score or a score from another trading date.
+        lunch_start = datetime.combine(local.date(), time(11, 30), tzinfo=CHINA_TZ)
+        lunch_end = datetime.combine(local.date(), time(13), tzinfo=CHINA_TZ)
+        paused = max(0.0, (min(local, lunch_end) - max(captured, lunch_start)).total_seconds())
+        age -= paused
+        if age > max_age:
+            reasons.append("MARKET_SCORE_STALE")
+    elif expected_day is not None:
+        close = datetime.combine(expected_day, time(15), tzinfo=CHINA_TZ).astimezone(UTC).replace(tzinfo=None)
+        if row.captured_at < close:
+            reasons.append("MARKET_SCORE_CLOSE_NOT_CONFIRMED")
+    quality = str(row.quality_status or "MISSING").upper()
+    available = not reasons and quality in {"VALID", "DEGRADED"} and not row.is_frozen
     return {
-        "available": True,
+        "available": available,
         "snapshot_id": row.snapshot_id,
         "captured_at": row.captured_at.isoformat(),
         "trade_date": row.trade_date.isoformat(),
@@ -42,6 +74,12 @@ def latest_market_state(db: Session, *, as_of: datetime) -> dict[str, Any]:
         "quality_status": row.quality_status,
         "is_frozen": row.is_frozen,
         "freeze_reason": row.freeze_reason,
+        "freshness": "FRESH" if not reasons else "STALE",
+        "age_seconds": max(0.0, age),
+        "max_age_seconds": max_age if session.data_basis == MarketDataBasis.LIVE.value else None,
+        "data_basis": session.data_basis,
+        "expected_trade_date": expected_day.isoformat() if expected_day else None,
+        "reason_codes": reasons,
     }
 
 
@@ -237,6 +275,10 @@ def portfolio_context_for_analysis(
         "market_state_available": market_state.get("available"),
         "market_quality_status": market_state.get("quality_status"),
         "market_state_frozen": market_state.get("is_frozen"),
+        "market_state_freshness": market_state.get("freshness"),
+        "market_state_reason_codes": market_state.get("reason_codes") or [],
+        "market_state_captured_at": market_state.get("captured_at"),
+        "market_state_trade_date": market_state.get("trade_date"),
         "portfolio_quality": risk.get("quality_status"),
         "portfolio_confidence": risk.get("confidence"),
         "account_version": state.get("account_version"),

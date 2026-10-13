@@ -531,6 +531,8 @@ export interface Holding {
 
 export interface ParsedHoldings {
   holdings: Holding[]
+  /** 人工核对的截图事实时间，使用带时区的 ISO 时间。 */
+  observed_at?: string | null
   total_assets?: number | null
   total_market_value?: number | null
   broker_available_cash?: number | null
@@ -571,6 +573,9 @@ export interface PortfolioSnapshot extends ParsedHoldings {
   upload_id?: number | null
   source: string
   snapshot_time: string
+  confirmed_at?: string | null
+  ingested_at?: string | null
+  observation_time_status?: 'USER_CONFIRMED' | 'UNVERIFIED'
   status: string
   identity_status?: 'RESOLVED' | 'INCOMPLETE' | 'UNKNOWN' | string
   identity_issues?: HoldingIdentityIssue[]
@@ -1071,7 +1076,11 @@ export interface ShadowPosition {
   security_type?: string | null
   etf_category?: string | null
   quantity: number
-  sellable_quantity: number
+  /** Unknown totals stay null; the minimum is a proven lower bound, not the total. */
+  sellable_quantity: number | null
+  /** Certainty fields are absent in legacy responses. */
+  sellable_quantity_minimum?: number
+  sellable_quantity_known?: boolean
   average_cost: number
   current_mark?: number | null
   market_value?: number | null
@@ -1358,6 +1367,11 @@ export interface PortfolioAccountPosition {
   qty_delta?: number | null
   available_delta?: number | null
   open_buy_qty?: number | null
+  current_cost?: number | null
+  cost_status?: 'KNOWN' | 'UNKNOWN'
+  position_version?: string | null
+  position_changed?: boolean
+  position_entry_ids?: number[]
   source?: string | null
   flags?: string[]
 }

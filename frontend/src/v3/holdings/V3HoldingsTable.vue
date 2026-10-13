@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, useTemplateRef, watch } from 'vue'
 import V3StatusBadge from '../components/V3StatusBadge.vue'
 import V3HoldingSparkline from './V3HoldingSparkline.vue'
 import {
@@ -14,6 +14,7 @@ import {
 import type { V3HoldingFilter, V3HoldingRowVM, V3HoldingSort } from './holdings-types'
 import type { SparklinePoint } from './useV3Holdings'
 
+/***********************持仓表格输入与事件*********************/
 const props = defineProps<{
   rows: V3HoldingRowVM[]
   sparklines: Map<string, SparklinePoint[] | null>
@@ -29,7 +30,8 @@ const emit = defineEmits<{
   visibleSparklines: [codes: string[]]
 }>()
 
-const tableRef = ref<HTMLElement | null>(null)
+/***********************筛选排序与可见行情*********************/
+const tableRef = useTemplateRef<HTMLElement>('tableRef')
 
 const filterOptions: { value: V3HoldingFilter; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -58,6 +60,7 @@ onMounted(() => {
   emit('visibleSparklines', visibleCodes.value)
 })
 
+/***********************判断与行情状态展示*********************/
 function judgmentTone(row: V3HoldingRowVM): 'info' | 'warning' | 'danger' | 'blocked' | 'neutral' {
   const status = row.judgment.status
   if (status === 'ADD' || status === 'REDUCE' || status === 'EXIT') return 'danger'
@@ -147,17 +150,23 @@ function onRowClick(row: V3HoldingRowVM): void {
               <V3HoldingSparkline :points="row.sparklineCode ? sparklines.get(row.sparklineCode) : null" />
             </td>
             <td class="v3-number" data-testid="v3-holding-price">
-              {{ row.quote?.last == null ? '—' : formatPrice(row.quote.last) }}
+              {{ !row.quoteDisplayable || row.quote?.last == null ? '—' : formatPrice(row.quote.last) }}
+              <small v-if="row.quoteDisplayable && !row.quoteValuationEligible" class="source">
+                {{ row.quote?.tradingDate || '日期待核对' }} · 参考行情
+              </small>
             </td>
             <td
               class="v3-number"
-              :class="directionClass(row.quote?.direction || 'unknown')"
+              :class="directionClass(row.quoteValuationEligible ? row.quote?.direction || 'unknown' : 'unknown')"
               data-testid="v3-holding-change"
-              :data-direction="row.quote?.direction || 'unknown'"
+              :data-direction="row.quoteValuationEligible ? row.quote?.direction || 'unknown' : 'unknown'"
             >
-              {{ row.quote?.changePct == null ? '—' : formatPercentFromPoints(row.quote.changePct) }}
+              {{ !row.quoteValuationEligible || row.quote?.changePct == null ? '—' : formatPercentFromPoints(row.quote.changePct) }}
             </td>
-            <td class="v3-number" data-testid="v3-holding-cost">{{ formatPrice(row.cost) }}</td>
+            <td class="v3-number" data-testid="v3-holding-cost">
+              {{ formatPrice(row.cost) }}
+              <small v-if="row.costSource !== 'none'" class="source">{{ row.costSource === 'account' ? '账户成本' : '快照成本' }}</small>
+            </td>
             <td class="v3-number" data-testid="v3-holding-qty">{{ formatQty(row.qty) }}</td>
             <td class="v3-number" data-testid="v3-holding-available">
               {{ formatQty(row.availableQty) }}

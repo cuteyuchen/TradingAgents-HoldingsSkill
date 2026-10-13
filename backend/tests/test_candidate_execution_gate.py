@@ -23,6 +23,8 @@ def context(monkeypatch):
     from app.portfolio import decision_gate
 
     monkeypatch.setattr(decision_gate, "utc_now", lambda: NOW)
+    monkeypatch.setattr(decision_gate.settings, "PORTFOLIO_BROKER_COMMISSION_BPS", 0.0)
+    monkeypatch.setattr(decision_gate.settings, "PORTFOLIO_MINIMUM_COMMISSION", 0.0)
     return {
         "cash_ratio": 0.2,
         "current_estimated_total_assets": 100_000,

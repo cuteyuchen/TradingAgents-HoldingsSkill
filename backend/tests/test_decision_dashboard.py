@@ -95,6 +95,8 @@ def test_new_portfolio_snapshot_expires_previous_decision(decision_db):
     db.add(PortfolioSnapshot(
         user_id=user.id, portfolio_id=portfolio.id, status="confirmed",
         snapshot_time=_utc_naive(_local(date(2026, 8, 20), 9, 50)),
+        # This replacement snapshot was already ingested at the replay cutoff.
+        created_at=_utc_naive(_local(date(2026, 8, 20), 9, 50)),
     ))
     db.commit()
     section = _read_decision(decision_db)

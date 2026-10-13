@@ -35,7 +35,9 @@ def _portfolio_fixture(db: Session) -> tuple[User, Portfolio, PortfolioSnapshot]
     portfolio = Portfolio(user_id=user.id, name="D1")
     db.add(portfolio)
     db.flush()
-    snapshot = PortfolioSnapshot(user_id=user.id, portfolio_id=portfolio.id, status="confirmed")
+    snapshot_time = datetime.now(UTC).replace(tzinfo=None)
+    snapshot = PortfolioSnapshot(user_id=user.id, portfolio_id=portfolio.id, source="manual",
+                                 snapshot_time=snapshot_time, created_at=snapshot_time, status="confirmed")
     db.add(snapshot)
     db.flush()
     return user, portfolio, snapshot

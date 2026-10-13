@@ -375,6 +375,7 @@ def test_calibration_rejects_changed_frozen_source_set():
                 bootstrap_iterations=1,
             )
         assert db.query(CalibrationReport).count() == 0
+        assert db.query(CalibrationReport).count() == 0
     finally:
         db.close()
 
@@ -528,7 +529,22 @@ def test_research_api_enforces_owner_input_and_run_controls():
         app.dependency_overrides.pop(get_current_user, None)
 
 
-def test_calibration_api_requires_completed_run_and_never_starts_a_backtest():
+@pytest.mark.parametrize(
+    ("target_parameter", "canonical_parameter", "first_grid", "grid", "aliases"),
+    [
+        (
+            " entry ", "candidate.action_entry_min", ["60", 60, 65, "65", 70.0],
+            [60.0, 65.0, 70.0], ("entry", " entry_threshold ", " candidate.action_entry_min "),
+        ),
+        (
+            "candidate.factor_ablation.trend", "factor_ablation.trend", ["-0", 0, 1, "1"],
+            [0.0, 1.0], ("factor_ablation.trend", " candidate.factor_ablation.trend "),
+        ),
+    ],
+)
+def test_calibration_api_requires_completed_run_and_never_starts_a_backtest(
+    monkeypatch, target_parameter, canonical_parameter, first_grid, grid, aliases,
+):
     from types import SimpleNamespace
 
     from fastapi.testclient import TestClient
@@ -536,6 +552,7 @@ def test_calibration_api_requires_completed_run_and_never_starts_a_backtest():
 
     from app.database import Base, get_db
     from app.main import app
+    from app.research import service as research_service
     from app.v2_dependencies import get_current_user
 
     engine = create_engine(
@@ -602,15 +619,122 @@ def test_calibration_api_requires_completed_run_and_never_starts_a_backtest():
 
         completed_payload = {
             "backtest_run_id": completed_id,
-            "target_parameter": "candidate.action_entry_min",
-            "parameter_grid": [60, 65, 70],
+            "target_parameter": target_parameter,
+            "parameter_grid": first_grid,
             "bootstrap_iterations": 1,
         }
+        load_rows = research_service.load_backtest_rows_with_sources
+
+        def load_only_after_spec_claim(db, *, run):
+            reserved = db.query(CalibrationReport).filter_by(backtest_run_id=run.id).one()
+            assert reserved.status == "RUNNING"
+            assert reserved.report_json["experiment_spec_hash"] == content_hash(reserved.report_json["experiment_spec"])
+            # Reentrant requests exercise the in-progress frozen-key gate,
+            # without reloading any final-test observations.
+            with pytest.raises(ValueError, match="CALIBRATION_SPEC_CONFLICT"):
+                research_service.create_calibration_report(
+                    db, backtest_run=run, target_parameter=completed_payload["target_parameter"],
+                    parameter_grid=grid, bootstrap_iterations=2,
+                )
+            with pytest.raises(ValueError, match="CALIBRATION_SPEC_PENDING"):
+                research_service.create_calibration_report(
+                    db, backtest_run=run, target_parameter=aliases[0],
+                    parameter_grid=grid, bootstrap_iterations=1,
+                )
+            return load_rows(db, run=run)
+
+        monkeypatch.setattr(research_service, "load_backtest_rows_with_sources", load_only_after_spec_claim)
         response = client.post("/api/v3/research/calibrations", json=completed_payload)
         assert response.status_code == 200
-        assert response.json()["backtest_run_id"] == completed_id
+        report = response.json()
+        assert report["backtest_run_id"] == completed_id
+        assert report["target_parameter"] == canonical_parameter
+        assert report["experiment_spec"]["parameter_grid"] == grid
+        assert report["experiment_spec"]["random_seed"] == 0
+        assert report["experiment_spec"]["bootstrap_iterations"] == 1
+        assert report["experiment_spec"]["data_hash"] == "c" * 64
+        assert report["experiment_spec_hash"] == content_hash(report["experiment_spec"])
+        assert report["no_auto_apply"] is True
+        assert report["proposal"]["apply_supported"] is False
+
+        def no_repeat_holdout(*args, **kwargs):
+            pytest.fail("An existing frozen calibration must not reload outcomes or evaluate its holdout.")
+
+        monkeypatch.setattr("app.research.service.load_backtest_rows_with_sources", no_repeat_holdout)
+        monkeypatch.setattr("app.research.service.build_calibration_evidence", no_repeat_holdout)
+        repeated = client.post("/api/v3/research/calibrations", json={
+            **completed_payload, "parameter_grid": list(reversed(grid)) + [str(grid[0]), grid[0]],
+        })
+        assert repeated.status_code == 200
+        assert repeated.json()["id"] == report["id"]
+        assert repeated.json()["experiment_spec_hash"] == report["experiment_spec_hash"]
+        for alias in aliases:
+            alias_payload = {**completed_payload, "target_parameter": alias}
+            repeated = client.post("/api/v3/research/calibrations", json=alias_payload)
+            assert repeated.status_code == 200
+            assert repeated.json()["id"] == report["id"]
+            for changes in ({"parameter_grid": grid[:-1]}, {"random_seed": 1}, {"bootstrap_iterations": 2}):
+                conflict = client.post("/api/v3/research/calibrations", json={**alias_payload, **changes})
+                assert conflict.status_code == 409
+                assert conflict.json()["detail"].startswith("CALIBRATION_SPEC_CONFLICT")
         with Session(engine) as db:
             assert db.query(BacktestRun).count() == run_count
+            assert db.query(CalibrationReport).count() == 1
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.parametrize(
+    ("score", "expected"),
+    [
+        (-0.01, "<0"), (0, "0-20"), (19.99, "0-20"), (20, "20-40"),
+        (20.01, "20-40"), (20.5, "20-40"), (39.99, "20-40"),
+        (40, "40-60"), (40.01, "40-60"), (40.5, "40-60"),
+        (59.99, "40-60"), (60, "60-80"), (60.01, "60-80"),
+        (60.5, "60-80"), (79.99, "60-80"), (80, "80-100"),
+        (80.01, "80-100"), (80.5, "80-100"), (99.99, "80-100"),
+        (100, "80-100"), (100.01, ">100"), (float("nan"), None),
+        (float("inf"), None), (float("-inf"), None), (None, None),
+    ],
+)
+def test_score_bucket_has_continuous_decimal_boundaries(score, expected):
+    from app.research.metrics import score_bucket
+
+    assert score_bucket(score) == expected
+
+
+def test_score_bucket_ten_point_bins_preserve_out_of_range_and_all_in_range_scores():
+    from app.research.metrics import score_bucket
+
+    assert score_bucket(-1, width=10) == "<0"
+    assert score_bucket(101, width=10) == ">100"
+    assert score_bucket(100, width=10) == "90-100"
+    for width in (10, 20):
+        for integer in range(10_001):
+            score = integer / 100
+            lower, upper = map(int, score_bucket(score, width=width).split("-"))
+            assert lower <= score < upper or score == upper == 100
+
+
+def test_calibration_legacy_report_without_spec_is_not_silently_reused():
+    from app.research.service import create_calibration_report
+
+    db = _db()
+    try:
+        run = BacktestRun(
+            scope="MARKET", replay_mode="PRODUCTION_REPLAY",
+            start_date=date(2026, 8, 26), end_date=date(2026, 8, 26),
+            status="COMPLETED", data_hash="a" * 64, calculation_key="legacy-calibration",
+        )
+        db.add(run)
+        db.flush()
+        db.add(CalibrationReport(
+            backtest_run_id=run.id, target_parameter="candidate.action_entry_min",
+            status="COMPLETED", recommendation="INSUFFICIENT_EVIDENCE", report_json={"no_auto_apply": True},
+        ))
+        db.flush()
+        with pytest.raises(ValueError, match="CALIBRATION_SPEC_UNAVAILABLE"):
+            create_calibration_report(db, backtest_run=run, target_parameter="candidate.action_entry_min", parameter_grid=[65])
+    finally:
+        db.close()

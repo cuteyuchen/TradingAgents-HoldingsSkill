@@ -1355,6 +1355,8 @@ test.describe('V3 Holdings Workstation', () => {
     await page.getByTestId('v3-update-submit').click()
     await expect(page.getByTestId('v3-update-status')).toContainText('待人工确认', { timeout: 15_000 })
     await expect(page.locator('[data-testid^="v3-identity-row-"]').first()).toBeVisible()
+    await expect(page.getByTestId('v3-update-confirm')).toBeDisabled()
+    await page.getByTestId('v3-update-observed-at').fill(`${TRADE_DATE}T15:10:00`)
     await expect(page.getByTestId('v3-update-confirm')).toBeEnabled()
     await page.getByTestId('v3-update-confirm').click()
     await expect(page.getByTestId('v3-holdings-stale-strategy')).toBeVisible({ timeout: 15_000 })

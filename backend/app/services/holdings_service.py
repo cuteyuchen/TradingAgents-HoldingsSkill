@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -59,9 +60,11 @@ def _number(value: Any) -> float | None:
         if isinstance(value, str):
             text = value.replace(",", "").replace("%", "").strip()
             parsed = float(text)
-            return parsed / 100 if "%" in value else parsed
-        return float(value)
-    except (TypeError, ValueError):
+            parsed = parsed / 100 if "%" in value else parsed
+        else:
+            parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -92,6 +95,16 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
             errors.append(f"{code} 可用数量大于总持仓")
         unavailable = max((qty or 0) - (available or 0), 0) if qty is not None and available is not None else None
         extra = dict(holding.extra)
+        weight = _number(holding.weight)
+        if weight is not None:
+            extra.setdefault("submitted_weight", weight)
+            extra["weight_unit"] = "ratio"
+            if not 0 <= weight <= 1:
+                errors.append(f"{code} 仓位必须是 0 到 1 的比例，请核对百分数单位")
+            elif payload.total_assets and holding.market_value is not None:
+                expected = holding.market_value / payload.total_assets
+                if abs(weight - expected) > 0.01:
+                    errors.append(f"{code} 仓位与市值/总资产不一致，请核对同一时点口径")
         if unavailable is not None:
             extra["unavailable_qty"] = unavailable
             if unavailable > 0:
@@ -116,7 +129,7 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
                 market_value=_number(holding.market_value),
                 pnl=_number(holding.pnl),
                 pnl_amount=_number(holding.pnl_amount),
-                weight=_number(holding.weight),
+                weight=weight,
                 extra=extra,
             )
         )
@@ -127,6 +140,7 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
 
     result = ParsedHoldingsPayload(
         holdings=normalized,
+        observed_at=payload.observed_at,
         total_assets=_number(payload.total_assets),
         total_market_value=_number(payload.total_market_value),
         broker_available_cash=_number(payload.broker_available_cash),
@@ -137,6 +151,8 @@ def normalize_payload(payload: ParsedHoldingsPayload) -> tuple[ParsedHoldingsPay
     )
     if not result.holdings:
         errors.append("没有识别到有效的股票或 ETF 持仓")
+    if sum(item.weight or 0 for item in result.holdings) > 1.0001:
+        errors.append("持仓仓位比例之和不能超过 1，请核对单位与总资产口径")
     return result, errors
 
 
@@ -186,6 +202,9 @@ def parse_upload(upload_id: int) -> None:
             json_mode=True,
         )
         parsed, errors = parse_payload_dict(parse_json_result(result))
+        # OCR may read a timestamp, but only the user's confirmation establishes
+        # its timezone and that it really describes the holdings facts.
+        parsed.observed_at = None
         upload.parsing_status = "identity_resolving"
         db.commit()
         parsed, _identity_issues = resolve_payload_identities(

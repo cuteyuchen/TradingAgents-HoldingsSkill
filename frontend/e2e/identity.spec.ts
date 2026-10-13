@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import { test, expect, login, validPngBytes } from './fixtures'
+import { test, expect, fillScreenshotObservedAt, login, validPngBytes } from './fixtures'
 
 async function createPortfolio(page: Page, name: string): Promise<number> {
   const id = await page.evaluate(async (portfolioName) => {
@@ -20,7 +20,7 @@ async function createPortfolio(page: Page, name: string): Promise<number> {
   return id
 }
 
-async function uploadIdentityFixture(page: Page, marker: string, portfolioId: number): Promise<void> {
+async function uploadIdentityFixture(page: Page, marker: string, portfolioId: number, observedAt: string): Promise<void> {
   await page.goto(`/upload?portfolio=${portfolioId}`)
   const drawer = page.getByTestId('v3-holdings-update-drawer')
   await expect(drawer).toBeVisible({ timeout: 20_000 })
@@ -31,6 +31,7 @@ async function uploadIdentityFixture(page: Page, marker: string, portfolioId: nu
   })
   await drawer.getByRole('button', { name: '上传并识别', exact: true }).click()
   await expect(page.getByTestId('v3-update-status')).toContainText('待人工确认', { timeout: 20_000 })
+  await fillScreenshotObservedAt(page, observedAt)
 }
 
 function identityRows(page: Page) {
@@ -40,7 +41,7 @@ function identityRows(page: Page) {
 test('Case A/D: seven no-code holdings resolve to canonical codes and keep Chinese names', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   const id = await createPortfolio(page, `Identity Seven ${Date.now()}`)
-  await uploadIdentityFixture(page, 'identity-7cn', id)
+  await uploadIdentityFixture(page, 'identity-7cn', id, facts.now_utc)
 
   const rows = identityRows(page)
   await expect(rows).toHaveCount(7)
@@ -61,7 +62,7 @@ test('Case A/D: seven no-code holdings resolve to canonical codes and keep Chine
 test('Case B: ambiguous identity blocks confirm until the user selects one security', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   const id = await createPortfolio(page, `Identity Ambiguous ${Date.now()}`)
-  await uploadIdentityFixture(page, 'identity-ambiguous', id)
+  await uploadIdentityFixture(page, 'identity-ambiguous', id, facts.now_utc)
 
   const drawer = page.getByTestId('v3-holdings-update-drawer')
   const confirm = drawer.getByRole('button', { name: '仅确认快照', exact: true })
@@ -81,7 +82,7 @@ test('Case B: ambiguous identity blocks confirm until the user selects one secur
 test('Case C: unresolved identity fails closed and keeps confirm disabled', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   const id = await createPortfolio(page, `Identity Unresolved ${Date.now()}`)
-  await uploadIdentityFixture(page, 'identity-unresolved', id)
+  await uploadIdentityFixture(page, 'identity-unresolved', id, facts.now_utc)
 
   const drawer = page.getByTestId('v3-holdings-update-drawer')
   await expect(page.getByText('未找到', { exact: true })).toBeVisible()
@@ -94,13 +95,13 @@ test('Historical auto reuse: same-portfolio confirmed alias fills a blank code',
   await login(page, facts.users.a)
   const id = await createPortfolio(page, `Identity History Reuse ${Date.now()}`)
 
-  await uploadIdentityFixture(page, 'identity-history-source', id)
+  await uploadIdentityFixture(page, 'identity-history-source', id, facts.now_utc)
   const firstDrawer = page.getByTestId('v3-holdings-update-drawer')
   await expect(firstDrawer.getByRole('button', { name: '仅确认快照', exact: true })).toBeEnabled()
   await firstDrawer.getByRole('button', { name: '仅确认快照', exact: true }).click()
   await expect(firstDrawer).toContainText('当前使用快照', { timeout: 15_000 })
 
-  await uploadIdentityFixture(page, 'identity-history-reuse', id)
+  await uploadIdentityFixture(page, 'identity-history-reuse', id, facts.now_utc)
   const row = identityRows(page).first()
   await expect(row.locator('input[placeholder="证券代码"]')).toHaveValue('159915')
   await expect(row.locator('input[placeholder="名称"]')).toHaveValue('创业板ETF')
@@ -113,7 +114,7 @@ test('Historical auto reuse: same-portfolio confirmed alias fills a blank code',
 test('Mostly automatic: six rows auto-resolve and one ambiguous row blocks confirm', async ({ acceptancePage: page, facts }) => {
   await login(page, facts.users.a)
   const id = await createPortfolio(page, `Identity Mostly ${Date.now()}`)
-  await uploadIdentityFixture(page, 'identity-mostly', id)
+  await uploadIdentityFixture(page, 'identity-mostly', id, facts.now_utc)
 
   const rows = identityRows(page)
   await expect(rows).toHaveCount(7)

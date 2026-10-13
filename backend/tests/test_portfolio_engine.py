@@ -30,6 +30,13 @@ from app.trigger_models import TriggerEvent  # noqa: F401 - register FK target m
 from app.v2_models import HoldingItem, Portfolio, PortfolioSnapshot, User
 
 
+@pytest.fixture(autouse=True)
+def configured_zero_fee_broker(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "PORTFOLIO_BROKER_COMMISSION_BPS", 0.0)
+    monkeypatch.setattr(settings, "PORTFOLIO_MINIMUM_COMMISSION", 0.0)
+
+
 def _db() -> Session:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -61,7 +68,9 @@ def _snapshot(
     row = PortfolioSnapshot(
         user_id=user.id,
         portfolio_id=portfolio.id,
+        source="manual",
         snapshot_time=snapshot_time.replace(tzinfo=None),
+        created_at=snapshot_time.replace(tzinfo=None),
         status=status,
         total_assets=total_assets,
         total_market_value=total_assets - (cash or 0),

@@ -28,7 +28,11 @@ NOW = datetime(2026, 10, 2, 2, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def setup():
+def setup(monkeypatch):
+    # Existing quantity tests use a declared zero-cost broker; fee regressions
+    # below and in the audit suite exercise nonzero/unknown broker costs.
+    monkeypatch.setattr(daily.settings, "PORTFOLIO_BROKER_COMMISSION_BPS", 0.0)
+    monkeypatch.setattr(daily.settings, "PORTFOLIO_MINIMUM_COMMISSION", 0.0)
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -38,8 +42,10 @@ def setup():
         portfolio = Portfolio(user_id=user.id, name="daily")
         db.add(portfolio)
         db.flush()
-        snapshot = PortfolioSnapshot(user_id=user.id, portfolio_id=portfolio.id, status="confirmed",
-            snapshot_time=(NOW - timedelta(hours=1)).replace(tzinfo=None), total_assets=10000,
+        # This baseline was recorded before the analysis, not at fixture runtime.
+        snapshot = PortfolioSnapshot(user_id=user.id, portfolio_id=portfolio.id, status="confirmed", source="manual",
+            snapshot_time=(NOW - timedelta(hours=1)).replace(tzinfo=None),
+            created_at=(NOW - timedelta(hours=1)).replace(tzinfo=None), total_assets=10000,
             total_market_value=6000, broker_available_cash=4000)
         db.add(snapshot)
         db.flush()

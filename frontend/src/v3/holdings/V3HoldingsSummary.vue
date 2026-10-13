@@ -5,6 +5,7 @@ import V3Metric from '../components/V3Metric.vue'
 import { formatMoney, formatRatioPercent } from './holdings-formatters'
 import type { V3HoldingsSummaryVM } from './holdings-types'
 
+/***********************组合摘要输入与事件*********************/
 const props = defineProps<{
   summary: V3HoldingsSummaryVM | null
   loading?: boolean
@@ -15,9 +16,17 @@ const props = defineProps<{
 
 const emit = defineEmits<{ retry: []; openUpdate: [] }>()
 
-const coverageText = computed(() => props.summary?.quoteCoverage == null
-  ? ''
-  : `行情覆盖 ${(props.summary.quoteCoverage * 100).toFixed(0)}%`)
+/***********************完整账户持仓覆盖口径*********************/
+const coverageText = computed(() => {
+  const summary = props.summary
+  if (!summary) return ''
+  return [
+    ['身份覆盖', summary.identityCoverage],
+    ['行情覆盖', summary.quoteCoverage],
+    ['估值覆盖', summary.valuationCoverage],
+  ].filter(([, value]) => value != null)
+    .map(([label, value]) => `${label} ${(Number(value) * 100).toFixed(0)}%`).join(' · ')
+})
 </script>
 
 <template>
@@ -43,7 +52,7 @@ const coverageText = computed(() => props.summary?.quoteCoverage == null
       <V3Metric
         label="持仓市值"
         :value="formatMoney(summary.marketValue)"
-        :secondary="summary.marketValueSource === 'quote_estimate' ? '行情估算' : summary.marketValueSource === 'snapshot' ? '快照' : ''"
+        :secondary="summary.marketValueSource === 'quote_estimate' ? '全持仓行情估算' : summary.marketValueSource === 'snapshot' ? '历史快照' : ''"
         data-testid="v3-holdings-market-value"
       />
       <V3Metric
@@ -60,7 +69,7 @@ const coverageText = computed(() => props.summary?.quoteCoverage == null
       <V3Metric
         label="当日盈亏"
         :value="summary.dayPnlAvailable && summary.dayPnlEstimate !== null ? formatMoney(summary.dayPnlEstimate) : '—'"
-        :secondary="summary.dayPnlAvailable ? '按行情估算' : `行情覆盖不足${coverageText ? ` ${coverageText}` : ''}`"
+        :secondary="summary.dayPnlAvailable ? '按当日行情估算' : '当日行情或账户事实不足'"
         :trend="summary.dayPnlEstimate === null ? null : summary.dayPnlEstimate > 0 ? 'up' : summary.dayPnlEstimate < 0 ? 'down' : 'flat'"
         data-testid="v3-holdings-day-pnl"
       />

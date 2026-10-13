@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +38,7 @@ from app.shadow.service import (
     maintain_shadow,
     persist_live_quote_observation,
     process_pending_shadow_intents,
+    refresh_shadow_materialized_state,
     rebase_shadow_account,
     rebuild_shadow_state,
     shadow_account_performance,
@@ -54,6 +55,8 @@ from app.shadow_models import (
     ShadowDailySnapshot,
     ShadowLedgerEntry,
     ShadowOrderIntent,
+    ShadowAccount,
+    ShadowPosition,
 )
 from app.v2_dependencies import get_current_user
 from app.v2_models import AnalysisJob, AnalysisRun, HoldingItem, Portfolio, PortfolioSnapshot, User
@@ -116,8 +119,9 @@ def _portfolio(
     snapshot = PortfolioSnapshot(
         user_id=user.id,
         portfolio_id=portfolio.id,
-        source="TEST",
-        snapshot_time=datetime(2026, 8, 20, 6, 0),
+        source="manual",
+        snapshot_time=datetime(2026, 8, 20, 1, 0),
+        created_at=datetime(2026, 8, 20, 1, 1),
         total_assets=cash + market_value,
         total_market_value=market_value,
         broker_available_cash=cash,
@@ -158,8 +162,9 @@ def _snapshot(
     row = PortfolioSnapshot(
         user_id=user.id,
         portfolio_id=portfolio.id,
-        source="TEST",
+        source="manual",
         snapshot_time=snapshot_time,
+        created_at=snapshot_time,
         total_assets=cash + market_value,
         total_market_value=market_value,
         broker_available_cash=cash,
@@ -701,7 +706,7 @@ def test_shadow_reference_equity_prefers_as_of_quote_over_unknown_same_day_bar(d
         user_id=user.id,
         portfolio_id=portfolio.id,
         snapshot_id=snapshot.id,
-        now=datetime(2026, 8, 20, 1, 0),
+        now=datetime(2026, 8, 20, 1, 1),
     )
     db.add(DailyBarCache(
         market="CN",
@@ -740,7 +745,7 @@ def test_shadow_reference_equity_without_visible_mark_keeps_portfolio_outcome_pe
         user_id=user.id,
         portfolio_id=portfolio.id,
         snapshot_id=snapshot.id,
-        now=datetime(2026, 8, 20, 1, 0),
+        now=datetime(2026, 8, 20, 1, 1),
     )
     db.add_all([
         DailyBarCache(
@@ -1077,3 +1082,774 @@ def test_shadow_api_is_owner_scoped_and_has_no_manual_order_write(db: Session) -
     finally:
         main_module.app.dependency_overrides.pop(get_db, None)
         main_module.app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.parametrize(
+    ("with_holdings", "sizing_mode", "expected_quantity"),
+    [(False, "weight", 500), (True, "weight", 500), (True, "quantity", 100), (True, "notional", 100)],
+)
+def test_shadow_sizing_and_cap_share_complete_execution_time_equity(
+    db: Session, with_holdings: bool, sizing_mode: str, expected_quantity: int,
+) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(
+        db,
+        cash=1_000.0 if with_holdings else 10_000.0,
+        holdings=[{"code": "600001", "qty": 100, "price": 90.0}] if with_holdings else [],
+    )
+    account = create_shadow_account(db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=datetime(2026, 8, 20, 5))
+    action = _action("600002", price=1.0)
+    if sizing_mode != "quantity":
+        action.pop("target_qty")
+        action["target_weight" if sizing_mode == "weight" else "target_notional"] = 0.05 if sizing_mode == "weight" else 100.0
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 20, 6), actions=[action])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    if with_holdings:
+        _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6), price=90.0)
+        # A later materialized mark cannot replace the execution-time mark.
+        _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6, 5), price=0.01)
+        refresh_shadow_materialized_state(db, account, as_of=datetime(2026, 8, 20, 6, 5))
+    executable = _quote(db, code="600002", captured_at=datetime(2026, 8, 20, 6, 1), price=1.0)
+
+    result = process_pending_shadow_intents(db, now=datetime(2026, 8, 20, 6, 2), account_id=account.id)
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    assert result["filled"] == 1
+    assert fill.quantity == expected_quantity
+    assert fill.quote_observation_id == executable.id
+
+
+@pytest.mark.parametrize("recovery_mode", ["historical_backfill", "later_quote"])
+def test_shadow_weight_sizing_waits_for_missing_holding_mark(db: Session, recovery_mode: str) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db, cash=1_000.0, holdings=[{"code": "600001", "qty": 100, "price": 90.0}])
+    account = create_shadow_account(db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=datetime(2026, 8, 20, 5))
+    action = _action("600002", price=1.0)
+    action.pop("target_qty")
+    action["target_weight"] = 0.05
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 20, 6), actions=[action])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6, 5), price=90.0)
+    executable = _quote(db, code="600002", captured_at=datetime(2026, 8, 20, 6, 1), price=1.0)
+
+    missing = process_pending_shadow_intents(db, now=datetime(2026, 8, 20, 6, 2), account_id=account.id)
+    assert missing["fills"] == []
+    assert intent.status == "PENDING"
+    assert "SHADOW_MARK_DATA_GAP" in intent.reason_codes_json
+    if recovery_mode == "historical_backfill":
+        _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6), price=90.0)
+        recovered_at = datetime(2026, 8, 20, 6, 2)
+        expected_quantity = 500
+    else:
+        # A later complete quote may recover the intent, but its marks cannot
+        # make the earlier execution time appear complete.
+        _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6, 2), price=90.0)
+        executable = _quote(db, code="600002", captured_at=datetime(2026, 8, 20, 6, 3), price=1.25)
+        recovered_at = datetime(2026, 8, 20, 6, 4)
+        expected_quantity = 400
+    recovered = process_pending_shadow_intents(db, now=recovered_at, account_id=account.id)
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    assert recovered["filled"] == 1
+    assert fill.quantity == expected_quantity
+    assert fill.quote_observation_id == executable.id
+    assert fill.fill_at == executable.captured_at
+
+
+@pytest.mark.parametrize(("side", "target_weight"), [("BUY", 0.05), ("SELL", 0.03)])
+def test_shadow_weight_sizing_adjusts_existing_position(db: Session, side: str, target_weight: float) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db, cash=9_600.0, holdings=[{"code": "600001", "qty": 400, "price": 1.0}])
+    account = create_shadow_account(db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=datetime(2026, 8, 20, 5))
+    action = _action(price=1.0, side=side)
+    action.pop("target_qty")
+    action["target_weight"] = target_weight
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 20, 6), actions=[action])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 6, 1), price=1.0)
+
+    assert process_pending_shadow_intents(db, now=datetime(2026, 8, 20, 6, 2), account_id=account.id)["filled"] == 1
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    assert fill.quantity == 100
+
+
+@pytest.mark.parametrize(
+    ("day", "next_day"),
+    [
+        (date(2026, 8, 21), date(2026, 8, 24)),
+        (date(2026, 9, 30), date(2026, 10, 8)),
+        (date(2026, 12, 31), date(2027, 1, 4)),
+    ],
+)
+def test_shadow_next_session_requires_calendar_across_gaps(db: Session, day: date, next_day: date) -> None:
+    from app.shadow.service import _next_trading_close, _next_trading_open
+
+    _calendar(db, [day])
+    assert _next_trading_open(db, day) is None
+    assert _next_trading_close(db, day) is None
+    _calendar(db, [next_day])
+    assert _next_trading_open(db, day) == datetime.combine(next_day, datetime.min.time()).replace(hour=1, minute=30)
+    assert _next_trading_close(db, day) == datetime.combine(next_day, datetime.min.time()).replace(hour=7)
+
+
+@pytest.mark.parametrize("recover_after_expiry", [False, True])
+def test_shadow_missing_calendar_recovers_only_original_valid_window(
+    db: Session, recover_after_expiry: bool,
+) -> None:
+    from app.routers.shadow_v3 import _intent_payload
+
+    friday, monday, tuesday = date(2026, 8, 21), date(2026, 8, 24), date(2026, 8, 25)
+    _calendar(db, [friday])
+    user, portfolio, snapshot = _portfolio(db)
+    account = create_shadow_account(db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=datetime(2026, 8, 21, 5))
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 21, 7, 10), actions=[_action()])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 22, 1, 31))
+    missing = process_pending_shadow_intents(db, now=datetime(2026, 8, 22, 2), account_id=account.id)
+    assert missing["fills"] == []
+    assert intent.status == "PENDING"
+    assert "SHADOW_CALENDAR_DATA_GAP" in intent.reason_codes_json
+    assert _intent_payload(intent)["earliest_executable_at"] is None
+    assert _intent_payload(intent)["expires_at"] is None
+
+    _calendar(db, [monday])
+    quote = _quote(db, code="600001", captured_at=datetime(2026, 8, 24, 1, 31))
+    recovery_time = datetime(2026, 8, 25 if recover_after_expiry else 24, 2)
+    recovered = process_pending_shadow_intents(db, now=recovery_time, account_id=account.id)
+    assert intent.earliest_executable_at == datetime(2026, 8, 24, 1, 30)
+    assert intent.expires_at == datetime(2026, 8, 24, 7)
+    assert _intent_payload(intent)["earliest_executable_at"] == "2026-08-24T01:30:00"
+    assert _intent_payload(intent)["expires_at"] == "2026-08-24T07:00:00"
+    if recover_after_expiry:
+        assert recovered["expired"] == 1
+        assert intent.status == "EXPIRED"
+        assert db.scalar(select(ShadowFill.id).where(ShadowFill.order_intent_id == intent.id)) is None
+        return
+
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    entry = db.scalar(select(ShadowLedgerEntry).where(ShadowLedgerEntry.fill_id == fill.id))
+    assert recovered["filled"] == 1
+    assert fill.quote_observation_id == quote.id
+    assert entry.sellable_at is None
+    assert entry.payload_json["settlement_calendar_pending"] is True
+    assert rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 24, 2))["positions"]["600001"]["sellable_quantity"] == 0
+    frozen_fill = (fill.fill_at, fill.price, fill.quantity, fill.execution_key)
+
+    _calendar(db, [tuesday])
+    assert rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 25, 1, 31))["positions"]["600001"]["sellable_quantity"] == 100
+    assert process_pending_shadow_intents(db, now=datetime(2026, 8, 25, 2), account_id=account.id)["checked"] == 0
+    assert (fill.fill_at, fill.price, fill.quantity, fill.execution_key) == frozen_fill
+    assert entry.sellable_at is None
+
+
+def test_shadow_quote_without_open_calendar_day_cannot_fill(db: Session) -> None:
+    _calendar(db, [date(2026, 8, 21), date(2026, 8, 24)])
+    user, portfolio, snapshot = _portfolio(db)
+    account = create_shadow_account(db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=datetime(2026, 8, 21, 5))
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 21, 6), actions=[_action()])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 22, 1, 31))
+
+    assert process_pending_shadow_intents(db, now=datetime(2026, 8, 22, 2), account_id=account.id)["fills"] == []
+    assert intent.status == "PENDING"
+    assert "SHADOW_CALENDAR_DATA_GAP" in intent.reason_codes_json
+    db.add(TradingCalendar(market="CN", trade_date=date(2026, 8, 22), is_open=False))
+    db.flush()
+    assert process_pending_shadow_intents(db, now=datetime(2026, 8, 22, 2), account_id=account.id)["fills"] == []
+    assert "QUOTE_OUTSIDE_TRADING_DAY" in intent.reason_codes_json
+
+
+@pytest.mark.parametrize("operation", ["create", "rebase"])
+@pytest.mark.parametrize("case", ["unverified", "mismatched_confirmation", "future_fact", "late_ingestion"])
+def test_shadow_initialization_requires_trusted_visible_snapshot(
+    db: Session, operation: str, case: str,
+) -> None:
+    user, portfolio, snapshot = _portfolio(db)
+    moment = datetime(2026, 8, 20, 2)
+    account = None
+    if operation == "rebase":
+        account = create_shadow_account(
+            db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+        )
+        account.execution_contract_version = "shadow-execution-v1"
+        before = (
+            account.shadow_generation, account.version, account.initialized_from_snapshot_id,
+            account.initialized_at, account.current_cash, account.config_json, account.execution_contract_version,
+        )
+        snapshot = _snapshot(
+            db, user=user, portfolio=portfolio, cash=20_000,
+            snapshot_time=datetime(2026, 8, 20, 1, 10),
+        )
+    if case in {"unverified", "mismatched_confirmation"}:
+        snapshot.source = "screenshot"
+        if case == "mismatched_confirmation":
+            snapshot.raw_json = {
+                "observed_at": "2026-08-20T09:20:00+08:00",
+                "observation_time_status": "USER_CONFIRMED",
+            }
+    elif case == "future_fact":
+        snapshot.snapshot_time = moment + timedelta(seconds=1)
+    else:
+        snapshot.created_at = moment + timedelta(seconds=1)
+    db.flush()
+    ledger_ids = list(db.scalars(select(ShadowLedgerEntry.id)))
+
+    with pytest.raises(ValueError):
+        if account is None:
+            create_shadow_account(
+                db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+            )
+        else:
+            rebase_shadow_account(db, account, snapshot_id=snapshot.id, now=moment)
+    assert list(db.scalars(select(ShadowLedgerEntry.id))) == ledger_ids
+    if account is None:
+        assert db.scalar(select(ShadowAccount.id)) is None
+    else:
+        assert (
+            account.shadow_generation, account.version, account.initialized_from_snapshot_id,
+            account.initialized_at, account.current_cash, account.config_json, account.execution_contract_version,
+        ) == before
+
+
+@pytest.mark.parametrize("operation", ["create", "rebase"])
+@pytest.mark.parametrize("source", ["manual", "confirmed_screenshot"])
+def test_shadow_snapshot_cutoffs_are_inclusive_and_confirmation_is_verified(
+    db: Session, operation: str, source: str,
+) -> None:
+    user, portfolio, snapshot = _portfolio(db)
+    moment = datetime(2026, 8, 20, 2)
+    account = None
+    if operation == "rebase":
+        account = create_shadow_account(
+            db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+        )
+        snapshot = _snapshot(db, user=user, portfolio=portfolio, cash=20_000, snapshot_time=moment)
+    snapshot.snapshot_time = moment
+    snapshot.created_at = moment
+    if source == "confirmed_screenshot":
+        snapshot.source = "screenshot"
+        snapshot.raw_json = {
+            "observed_at": moment.replace(tzinfo=UTC).isoformat(),
+            "observation_time_status": "USER_CONFIRMED",
+        }
+    db.flush()
+
+    if account is None:
+        account = create_shadow_account(
+            db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+        )
+    else:
+        rebase_shadow_account(db, account, snapshot_id=snapshot.id, now=moment)
+    assert account.initialized_from_snapshot_id == snapshot.id
+    assert account.current_cash == snapshot.broker_available_cash
+    assert account.execution_contract_version == "shadow-execution-v2"
+
+
+@pytest.mark.parametrize("operation", ["create", "rebase"])
+def test_shadow_automatic_snapshot_selection_skips_untrusted_and_invisible_latest(
+    db: Session, operation: str,
+) -> None:
+    user, portfolio, trusted = _portfolio(db)
+    moment = datetime(2026, 8, 20, 2)
+    account = None
+    if operation == "rebase":
+        account = create_shadow_account(
+            db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=trusted.id, now=moment,
+        )
+    untrusted = _snapshot(
+        db, user=user, portfolio=portfolio, cash=20_000,
+        snapshot_time=datetime(2026, 8, 20, 1, 10),
+    )
+    untrusted.source = "screenshot"
+    late = _snapshot(
+        db, user=user, portfolio=portfolio, cash=30_000,
+        snapshot_time=datetime(2026, 8, 20, 1, 20),
+    )
+    late.created_at = moment + timedelta(seconds=1)
+    _snapshot(db, user=user, portfolio=portfolio, cash=40_000, snapshot_time=moment + timedelta(seconds=1))
+    db.flush()
+
+    if account is None:
+        account = create_shadow_account(db, user_id=user.id, portfolio_id=portfolio.id, now=moment)
+    else:
+        rebase_shadow_account(db, account, now=moment)
+    assert account.initialized_from_snapshot_id == trusted.id
+    assert account.current_cash == 10_000
+
+
+@pytest.mark.parametrize("operation", ["create", "rebase"])
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [("cash", None), ("cash", -1), ("cash", float("inf")), ("quantity", None), ("quantity", -1), ("quantity", float("inf"))],
+)
+def test_shadow_unknown_or_invalid_base_facts_do_not_mutate_account(
+    db: Session, operation: str, field: str, invalid: float | None,
+) -> None:
+    user, portfolio, snapshot = _portfolio(db, holdings=[{"code": "600001", "qty": 100, "price": 10}])
+    moment = datetime(2026, 8, 20, 2)
+    account = None
+    if operation == "rebase":
+        account = create_shadow_account(
+            db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+        )
+        account.execution_contract_version = "shadow-execution-v1"
+        before = (
+            account.shadow_generation, account.version, account.initialized_from_snapshot_id,
+            account.initialized_at, account.current_cash, account.config_json, account.execution_contract_version,
+        )
+        snapshot = _snapshot(
+            db, user=user, portfolio=portfolio, cash=20_000,
+            snapshot_time=datetime(2026, 8, 20, 1, 10),
+            holdings=[{"code": "600001", "qty": 100, "price": 10}],
+        )
+    if field == "cash":
+        snapshot.broker_available_cash = invalid
+    else:
+        snapshot.holdings[0].qty = invalid
+    db.flush()
+    ledger_ids = list(db.scalars(select(ShadowLedgerEntry.id)))
+
+    with pytest.raises(ValueError, match=f"shadow_base_{field}_unknown_or_invalid"):
+        if account is None:
+            create_shadow_account(
+                db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+            )
+        else:
+            rebase_shadow_account(db, account, snapshot_id=snapshot.id, now=moment)
+    assert list(db.scalars(select(ShadowLedgerEntry.id))) == ledger_ids
+    if account is None:
+        assert db.scalar(select(ShadowAccount.id)) is None
+    else:
+        assert (
+            account.shadow_generation, account.version, account.initialized_from_snapshot_id,
+            account.initialized_at, account.current_cash, account.config_json, account.execution_contract_version,
+        ) == before
+
+
+@pytest.mark.parametrize("operation", ["create", "rebase"])
+def test_shadow_excess_initial_availability_cannot_authorize_sell(db: Session, operation: str) -> None:
+    from app.routers.shadow_v3 import _position_payload
+
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, baseline = _portfolio(db)
+    invalid = _snapshot(
+        db, user=user, portfolio=portfolio, cash=10_000, snapshot_time=datetime(2026, 8, 20, 1, 10),
+        holdings=[{"code": "600001", "qty": 100, "available_qty": 200, "price": 10}],
+    )
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id,
+        snapshot_id=invalid.id if operation == "create" else baseline.id,
+        now=datetime(2026, 8, 20, 1, 30),
+    )
+    if operation == "rebase":
+        rebase_shadow_account(db, account, snapshot_id=invalid.id, now=datetime(2026, 8, 20, 1, 30))
+    initial_state = rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 20, 2))["positions"]["600001"]
+    seed_facts = [(entry.id, entry.payload_json) for entry in db.scalars(select(ShadowLedgerEntry))]
+    run = _run(
+        db, user=user, portfolio=portfolio, snapshot=invalid,
+        finished_at=datetime(2026, 8, 20, 2), actions=[_action(side="SELL")],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 1))
+
+    result = process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 2))
+    assert result["filled"] == 0
+    assert intent.status == "PENDING"
+    assert "SHADOW_BASE_FACTS_DATA_GAP" in intent.reason_codes_json
+    assert initial_state["sellable_quantity"] == 0
+    assert initial_state["sellable_quantity_known"] is False
+    materialized = db.scalar(select(ShadowPosition).where(
+        ShadowPosition.shadow_account_id == account.id,
+        ShadowPosition.shadow_generation == account.shadow_generation,
+    ))
+    payload = _position_payload(materialized)
+    assert payload["sellable_quantity"] is None
+    assert payload["sellable_quantity_minimum"] == 0
+    assert invalid.holdings[0].available_qty == 200
+    assert invalid.holdings[0].qty == 100
+    assert [(db.get(ShadowLedgerEntry, entry_id).id, db.get(ShadowLedgerEntry, entry_id).payload_json) for entry_id, _ in seed_facts] == seed_facts
+
+
+@pytest.mark.parametrize("operation", ["create", "rebase"])
+@pytest.mark.parametrize("available", [0, 50, 100])
+def test_shadow_initial_sellable_accepts_only_the_proven_in_range_quantity(
+    db: Session, operation: str, available: float,
+) -> None:
+    from app.routers.shadow_v3 import _position_payload
+
+    user, portfolio, baseline = _portfolio(db)
+    snapshot = _snapshot(
+        db, user=user, portfolio=portfolio, cash=10_000, snapshot_time=datetime(2026, 8, 20, 1, 10),
+        holdings=[{"code": "600001", "qty": 100, "available_qty": available, "price": 10}],
+    )
+    moment = datetime(2026, 8, 20, 2)
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id,
+        snapshot_id=snapshot.id if operation == "create" else baseline.id,
+        now=moment,
+    )
+    if operation == "rebase":
+        rebase_shadow_account(db, account, snapshot_id=snapshot.id, now=moment)
+    position = rebuild_shadow_state(db, account, as_of=moment)["positions"]["600001"]
+    assert position["quantity"] == 100
+    assert position["sellable_quantity"] == available
+    assert position["sellable_quantity_known"] is True
+    materialized = db.scalar(select(ShadowPosition).where(
+        ShadowPosition.shadow_account_id == account.id,
+        ShadowPosition.shadow_generation == account.shadow_generation,
+    ))
+    assert _position_payload(materialized)["sellable_quantity"] == available
+    assert snapshot.holdings[0].available_qty == available
+
+
+@pytest.mark.parametrize("available", [None, -1, 200, float("inf")])
+def test_shadow_unknown_sellable_is_not_a_known_zero_and_requires_new_base_facts(
+    db: Session, available: float | None,
+) -> None:
+    from app.routers.shadow_v3 import _position_payload
+
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(
+        db, holdings=[{"code": "600001", "qty": 100, "available_qty": available, "price": 10}],
+    )
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 30),
+    )
+    position = rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 20, 2))["positions"]["600001"]
+    assert position["sellable_quantity"] == 0
+    assert position["sellable_quantity_known"] is False
+    materialized = db.scalar(select(ShadowPosition).where(ShadowPosition.shadow_account_id == account.id))
+    payload = _position_payload(materialized)
+    assert payload["sellable_quantity"] is None
+    assert payload["sellable_quantity_minimum"] == 0
+    assert payload["metadata"]["sellable_quantity_known"] is False
+    run = _run(
+        db, user=user, portfolio=portfolio, snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 2), actions=[_action(side="SELL")],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 1))
+
+    result = process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 2))
+    assert result["fills"] == []
+    assert intent.status == "PENDING"
+    assert "SHADOW_BASE_FACTS_DATA_GAP" in intent.reason_codes_json
+    initial_entries = [(entry.id, entry.payload_json) for entry in db.scalars(select(ShadowLedgerEntry))]
+
+    complete = _snapshot(
+        db, user=user, portfolio=portfolio, cash=10_000, snapshot_time=datetime(2026, 8, 20, 2, 3),
+        holdings=[{"code": "600001", "qty": 100, "available_qty": 100, "price": 10}],
+    )
+    rebase_shadow_account(db, account, snapshot_id=complete.id, now=datetime(2026, 8, 20, 2, 3))
+    new_run = _run(
+        db, user=user, portfolio=portfolio, snapshot=complete,
+        finished_at=datetime(2026, 8, 20, 2, 4), actions=[_action(side="SELL")],
+    )
+    new_observation = capture_live_decision_observation(db, new_run, create_outcomes=False)
+    new_intent = ensure_shadow_order_intents(db, new_observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 5))
+    recovered = process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 6))
+    assert recovered["filled"] == 1
+    assert new_intent.status == "FILLED"
+    assert intent.status == "SUPERSEDED"
+    assert [(db.get(ShadowLedgerEntry, entry_id).id, db.get(ShadowLedgerEntry, entry_id).payload_json) for entry_id, _ in initial_entries] == initial_entries
+
+
+def test_shadow_known_zero_cash_and_quantity_are_not_unknown(db: Session) -> None:
+    user, portfolio, snapshot = _portfolio(db, cash=0, holdings=[{"code": "600001", "qty": 0, "available_qty": 0}])
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 2),
+    )
+    state = rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 20, 2))
+    assert state["cash"] == 0
+    assert state["positions"] == {}
+
+
+@pytest.mark.parametrize("sellable", [None, -1, 200, float("inf")])
+@pytest.mark.parametrize("known_marker", [None, True, False])
+def test_shadow_rebuild_does_not_invent_invalid_initial_sellable_fact(
+    db: Session, sellable: float | None, known_marker: bool | None,
+) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db)
+    moment = datetime(2026, 8, 20, 2)
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+    )
+    payload = {"security_type": "STOCK"}
+    if sellable is not None:
+        payload["sellable_quantity"] = sellable
+    if known_marker is not None:
+        payload["sellable_quantity_known"] = known_marker
+    entry = ShadowLedgerEntry(
+        entry_key="invalid-initial-availability",
+        shadow_account_id=account.id,
+        shadow_generation=account.shadow_generation,
+        entry_type="INITIAL_POSITION",
+        code="600001",
+        quantity=100,
+        price=10,
+        occurred_at=moment,
+        payload_json=payload,
+    )
+    db.add(entry)
+    db.flush()
+    position = rebuild_shadow_state(db, account, as_of=moment)["positions"]["600001"]
+    assert position["quantity"] == 100
+    assert position["sellable_quantity"] == 0
+    assert position["sellable_quantity_known"] is False
+    run = _run(
+        db, user=user, portfolio=portfolio, snapshot=snapshot,
+        finished_at=moment, actions=[_action(side="SELL")],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=moment + timedelta(minutes=1))
+    assert process_pending_shadow_intents(db, account_id=account.id, now=moment + timedelta(minutes=2))["filled"] == 0
+    assert intent.status == "PENDING"
+    assert "SHADOW_BASE_FACTS_DATA_GAP" in intent.reason_codes_json
+    refresh_shadow_materialized_state(db, account, as_of=moment + timedelta(minutes=2))
+    materialized = db.scalar(select(ShadowPosition).where(ShadowPosition.shadow_account_id == account.id))
+    assert materialized.sellable_quantity == 0
+    assert materialized.metadata_json["sellable_quantity_known"] is False
+    db.expire(entry)
+    assert entry.quantity == 100
+    assert entry.payload_json == payload
+
+
+def test_shadow_rebuild_preserves_valid_unknown_lower_bound_and_settled_buy(db: Session) -> None:
+    from app.routers.shadow_v3 import _position_payload
+
+    user, portfolio, snapshot = _portfolio(db)
+    moment = datetime(2026, 8, 20, 2)
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id, now=moment,
+    )
+    initial_payload = {"sellable_quantity": 50, "sellable_quantity_known": False}
+    initial = ShadowLedgerEntry(
+        entry_key="valid-initial-lower-bound",
+        shadow_account_id=account.id,
+        shadow_generation=account.shadow_generation,
+        entry_type="INITIAL_POSITION",
+        code="600001",
+        quantity=100,
+        price=10,
+        occurred_at=moment,
+        payload_json=initial_payload,
+    )
+    db.add_all([initial, ShadowLedgerEntry(
+        entry_key="settled-buy-after-lower-bound",
+        shadow_account_id=account.id,
+        shadow_generation=account.shadow_generation,
+        entry_type="BUY_FILL",
+        code="600001",
+        quantity=100,
+        price=10,
+        cash_delta=-1_000,
+        occurred_at=moment + timedelta(seconds=1),
+        sellable_at=moment + timedelta(minutes=1),
+    )])
+    db.flush()
+    before = rebuild_shadow_state(db, account, as_of=moment)["positions"]["600001"]
+    assert before["sellable_quantity"] == 50
+    assert before["sellable_quantity_known"] is False
+    after = refresh_shadow_materialized_state(db, account, as_of=moment + timedelta(minutes=2))["positions"]["600001"]
+    assert after["quantity"] == 200
+    assert after["sellable_quantity"] == 150
+    assert after["sellable_quantity_known"] is False
+    materialized = db.scalar(select(ShadowPosition).where(ShadowPosition.shadow_account_id == account.id))
+    payload = _position_payload(materialized)
+    assert payload["sellable_quantity"] is None
+    assert payload["sellable_quantity_minimum"] == 150
+    db.expire(initial)
+    assert initial.payload_json == initial_payload
+
+
+def test_shadow_unknown_initial_sellable_allows_buy_and_only_proven_new_quantity_to_sell(db: Session) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21), date(2026, 8, 24)])
+    user, portfolio, snapshot = _portfolio(
+        db, holdings=[{"code": "600001", "qty": 100, "available_qty": None, "price": 10}],
+    )
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 30),
+    )
+    buy_run = _run(
+        db, user=user, portfolio=portfolio, snapshot=snapshot,
+        finished_at=datetime(2026, 8, 20, 2), actions=[_action()],
+    )
+    buy_observation = capture_live_decision_observation(db, buy_run, create_outcomes=False)
+    buy_intent = ensure_shadow_order_intents(db, buy_observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 1))
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 2))["filled"] == 1
+    assert buy_intent.status == "FILLED"
+    next_state = rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 21, 2))["positions"]["600001"]
+    assert next_state["quantity"] == 200
+    assert next_state["sellable_quantity"] == 100
+    assert next_state["sellable_quantity_known"] is False
+    sell_run = _run(
+        db, user=user, portfolio=portfolio, snapshot=snapshot,
+        finished_at=datetime(2026, 8, 21, 2), actions=[_action(side="SELL")],
+    )
+    sell_observation = capture_live_decision_observation(db, sell_run, create_outcomes=False)
+    sell_intent = ensure_shadow_order_intents(db, sell_observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 21, 2, 1))
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 21, 2, 2))["filled"] == 1
+    assert sell_intent.status == "FILLED"
+    final_state = rebuild_shadow_state(db, account, as_of=datetime(2026, 8, 21, 2, 2))["positions"]["600001"]
+    assert final_state["quantity"] == 100
+    assert final_state["sellable_quantity"] == 0
+    assert final_state["sellable_quantity_known"] is False
+
+
+@pytest.mark.parametrize("bad_quote_at", [
+    datetime(2026, 8, 20, 1, 10),
+    datetime(2026, 8, 20, 1, 26),
+    datetime(2026, 8, 20, 4),
+    datetime(2026, 8, 20, 7),
+    datetime(2026, 8, 20, 7, 5),
+])
+def test_shadow_closed_intraday_quotes_wait_for_next_open_session(db: Session, bad_quote_at: datetime) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db)
+    finalized = bad_quote_at - timedelta(minutes=1)
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 1),
+    )
+    # Keep post-close candidates inside this intraday intent's original window.
+    if finalized.hour >= 7:
+        finalized = datetime(2026, 8, 20, 6, 59)
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=finalized, actions=[_action()])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=bad_quote_at)
+    waiting = process_pending_shadow_intents(db, account_id=account.id, now=bad_quote_at + timedelta(seconds=1))
+    assert waiting["fills"] == []
+    assert intent.status == "PENDING"
+    assert "QUOTE_OUTSIDE_TRADING_SESSION" in intent.reason_codes_json
+    if bad_quote_at.hour < 2:
+        recovery_at = datetime(2026, 8, 20, 1, 31)
+    elif bad_quote_at.hour < 7:
+        recovery_at = datetime(2026, 8, 20, 5)
+    else:
+        recovery_at = datetime(2026, 8, 21, 1, 31)
+    valid = _quote(db, code="600001", captured_at=recovery_at)
+    assert process_pending_shadow_intents(db, account_id=account.id, now=recovery_at + timedelta(seconds=1))["filled"] == 1
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    assert fill.quote_observation_id == valid.id
+
+
+@pytest.mark.parametrize("captured_at", [
+    datetime(2026, 8, 20, 1, 16),
+    datetime(2026, 8, 20, 1, 30),
+    datetime(2026, 8, 20, 3, 29, 59),
+    datetime(2026, 8, 20, 5),
+    datetime(2026, 8, 20, 6, 59, 59),
+])
+def test_shadow_canonical_open_sessions_can_fill(db: Session, captured_at: datetime) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db)
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 1),
+    )
+    run = _run(
+        db, user=user, portfolio=portfolio, snapshot=snapshot,
+        finished_at=captured_at - timedelta(seconds=1), actions=[_action()],
+    )
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    valid = _quote(db, code="600001", captured_at=captured_at)
+    assert process_pending_shadow_intents(db, account_id=account.id, now=captured_at)["filled"] == 1
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    assert fill.quote_observation_id == valid.id
+
+
+@pytest.mark.parametrize("sizing_mode", ["quantity", "weight"])
+def test_shadow_inexact_mark_cannot_complete_execution_time_equity(db: Session, sizing_mode: str) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(
+        db, cash=1_000, holdings=[{"code": "600009", "qty": 1_000, "price": 100}],
+    )
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 30),
+    )
+    action = _action(price=1)
+    if sizing_mode == "weight":
+        action.pop("target_qty")
+        action["target_weight"] = 0.005
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 20, 2), actions=[action])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    intent = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600009", captured_at=datetime(2026, 8, 20, 2, 1), price=100, precision="MINUTE")
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 1), price=1)
+    equity, evidence = _shadow_equity_at(db, account, generation=1, as_of=datetime(2026, 8, 20, 2, 1))
+    assert equity is None
+    assert evidence["status"] == "SHADOW_MARK_DATA_GAP"
+    waiting = process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 2))
+    assert waiting["fills"] == []
+    assert intent.status == "PENDING"
+    assert "SHADOW_MARK_DATA_GAP" in intent.reason_codes_json
+
+    # An exact future mark cannot repair the earlier candidate's cutoff.
+    _quote(db, code="600009", captured_at=datetime(2026, 8, 20, 2, 2), price=100)
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 2))["fills"] == []
+    later = _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 3), price=1)
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 4))["filled"] == 1
+    fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == intent.id))
+    assert fill.quote_observation_id == later.id
+    assert fill.quantity == (500 if sizing_mode == "weight" else 100)
+
+
+def test_shadow_v1_requires_explicit_rebase_and_preserves_completed_facts(db: Session) -> None:
+    _calendar(db, [date(2026, 8, 20), date(2026, 8, 21)])
+    user, portfolio, snapshot = _portfolio(db)
+    account = create_shadow_account(
+        db, user_id=user.id, portfolio_id=portfolio.id, snapshot_id=snapshot.id,
+        now=datetime(2026, 8, 20, 1, 30),
+    )
+    run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 20, 2), actions=[_action(price=1)])
+    observation = capture_live_decision_observation(db, run, create_outcomes=False)
+    completed = ensure_shadow_order_intents(db, observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 1), price=1)
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 2))["filled"] == 1
+    old_fill = db.scalar(select(ShadowFill).where(ShadowFill.order_intent_id == completed.id))
+    old_entry = db.scalar(select(ShadowLedgerEntry).where(ShadowLedgerEntry.fill_id == old_fill.id))
+    frozen_fill = (old_fill.fill_at, old_fill.price, old_fill.quantity, old_fill.execution_key)
+    frozen_entry = (old_entry.quantity, old_entry.cash_delta, old_entry.sellable_at, old_entry.payload_json)
+    account.execution_contract_version = "shadow-execution-v1"
+    pending_run = _run(db, user=user, portfolio=portfolio, snapshot=snapshot, finished_at=datetime(2026, 8, 20, 2, 3), actions=[_action(price=1)])
+    pending_observation = capture_live_decision_observation(db, pending_run, create_outcomes=False)
+    pending = ensure_shadow_order_intents(db, pending_observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 4), price=1)
+
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 5))["fills"] == []
+    assert pending.status == "PENDING"
+    assert "SHADOW_REBASE_REQUIRED" in pending.reason_codes_json
+    assert completed.status == "FILLED"
+    assert (old_fill.fill_at, old_fill.price, old_fill.quantity, old_fill.execution_key) == frozen_fill
+    assert (old_entry.quantity, old_entry.cash_delta, old_entry.sellable_at, old_entry.payload_json) == frozen_entry
+
+    fresh = _snapshot(db, user=user, portfolio=portfolio, cash=10_000, snapshot_time=datetime(2026, 8, 20, 2, 6))
+    rebase_shadow_account(db, account, snapshot_id=fresh.id, now=datetime(2026, 8, 20, 2, 6))
+    assert account.execution_contract_version == "shadow-execution-v2"
+    assert account.shadow_generation == 2
+    assert rebuild_shadow_state(db, account, generation=2)["positions"] == {}
+    new_run = _run(db, user=user, portfolio=portfolio, snapshot=fresh, finished_at=datetime(2026, 8, 20, 2, 7), actions=[_action(price=1)])
+    new_observation = capture_live_decision_observation(db, new_run, create_outcomes=False)
+    new_intent = ensure_shadow_order_intents(db, new_observation, account=account)[0]
+    _quote(db, code="600001", captured_at=datetime(2026, 8, 20, 2, 8), price=1)
+    assert process_pending_shadow_intents(db, account_id=account.id, now=datetime(2026, 8, 20, 2, 9))["filled"] == 1
+    assert new_intent.status == "FILLED"
+    assert pending.status == "SUPERSEDED"
+    assert (old_fill.fill_at, old_fill.price, old_fill.quantity, old_fill.execution_key) == frozen_fill
+    assert (old_entry.quantity, old_entry.cash_delta, old_entry.sellable_at, old_entry.payload_json) == frozen_entry

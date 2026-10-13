@@ -80,7 +80,11 @@ def latest_confirmed_snapshot(
         PortfolioSnapshot.status == "confirmed",
     )
     if as_of is not None:
-        query = query.filter(PortfolioSnapshot.snapshot_time <= _utc_naive(as_of))
+        cutoff = _utc_naive(as_of)
+        query = query.filter(
+            PortfolioSnapshot.snapshot_time <= cutoff,
+            PortfolioSnapshot.created_at <= cutoff,
+        )
     return query.order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc()).first()
 
 
@@ -194,7 +198,12 @@ def build_portfolio_state(
             "screenshot_price": item.screenshot_price if item is not None else None,
             "snapshot_market_value": item.market_value if item is not None else None,
             "market_value": market_value,
-            "cost": item.cost if item is not None else derived.get("cost"),
+            "cost": derived.get("current_cost"),
+            "current_cost": derived.get("current_cost"),
+            "cost_status": derived.get("cost_status"),
+            "position_version": derived.get("position_version"),
+            "position_changed": derived.get("position_changed"),
+            "position_entry_ids": derived.get("position_entry_ids") or [],
             "hard_cap": hard_cap,
             "flags": flags,
         })
@@ -208,7 +217,7 @@ def build_portfolio_state(
         if cash is not None
         else snapshot_reserve_assets(snapshot)
     )
-    if any(flag.startswith("LEDGER_CURRENCY_UNSUPPORTED:") for flag in account["flags"]):
+    if any(flag.startswith(("LEDGER_CURRENCY_UNSUPPORTED:", "LEDGER_AMOUNT_MISSING:")) for flag in account["flags"]):
         reserve_assets = None
     valued_positions = [float(row["market_value"]) for row in positions if row.get("market_value") is not None]
     complete_valuation = len(valued_positions) == len(positions)
@@ -239,7 +248,24 @@ def build_portfolio_state(
     reserve_ratio = reserve_assets / total_assets if reserve_assets is not None and total_assets and total_assets > 0 else None
     gross_exposure = sum(float(row["weight"] or 0.0) for row in positions if row.get("weight") is not None) if total_assets else None
     missing_quotes = len(codes) - accepted_quotes
-    if reserve_assets is None or (codes and accepted_quotes == 0 and not historical_snapshot_valuation):
+    data_quality_blocked = (
+        "SNAPSHOT_OBSERVATION_TIME_UNVERIFIED" in flags
+        or any(flag.startswith("POSITION_QUANTITY_UNKNOWN:") for flag in flags)
+        or reserve_assets is None
+        or (codes and accepted_quotes == 0 and not historical_snapshot_valuation)
+    )
+    account_reconciliation_required = any(flag.startswith((
+        "LEDGER_NEGATIVE_POSITION:", "LEDGER_SELL_EXCEEDS_AVAILABLE:",
+        "LEDGER_TRADE_DATE_MISMATCH:", "POSITION_QUANTITY_NEGATIVE:",
+        "POSITION_AVAILABLE_NEGATIVE:", "POSITION_AVAILABLE_EXCEEDS_QTY:",
+    )) for flag in flags)
+    # Only this recognized account contradiction may preserve reductions.
+    # Missing account/time/identity evidence remains a global fail-closed case.
+    reconciliation_reduction_allowed = (
+        account_reconciliation_required and not data_quality_blocked
+        and "SECURITY_CODE_MISSING" not in flags
+    )
+    if data_quality_blocked or account_reconciliation_required:
         quality = "BLOCKED"
     elif missing_quotes or not complete_valuation or "VALUATION_DRIFT" in flags or historical_snapshot_valuation:
         quality = "DEGRADED"
@@ -269,6 +295,7 @@ def build_portfolio_state(
         "classification_coverage": classification_count / len(positions) if positions else 1.0,
         "risk_flags": list(dict.fromkeys(flags)),
         "quality_status": quality,
+        "reconciliation_reduction_allowed": reconciliation_reduction_allowed,
         "account_version": account["account_version"],
         "account_derivation": {
             "version": account["version"],

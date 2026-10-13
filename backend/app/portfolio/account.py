@@ -15,14 +15,19 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from ..market.codes import normalize_security_code
+from ..market.trading_rules import settlement_policy
+from ..market_models import SecurityMaster
 from ..portfolio_models import TradeLedgerEntry
 from ..v2_models import PortfolioSnapshot
 from .facts import ledger_facts_at
+from .costs import average_cost_after_buy, purchase_amount
 from .ledger import MATERIALIZED_FIELDS
+from .snapshot_time import observation_time_status
 
-ACCOUNT_STATE_VERSION = "portfolio-account-v2"
+ACCOUNT_STATE_VERSION = "portfolio-account-v4"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 AccountEntry = TradeLedgerEntry | SimpleNamespace
 
@@ -89,18 +94,31 @@ def _base_position(item: Any) -> dict[str, Any]:
         "open_buy_qty": 0.0,
         "flags": [],
         "snapshot_item": True,
+        "position_entry_ids": [],
     }
 
 
 def _cash_effect(entry: AccountEntry) -> tuple[float | None, list[str]]:
     flags: list[str] = []
     amount = _number(entry.net_amount)
-    if amount is None:
-        amount = _number(entry.gross_amount)
-    if amount is None:
+    if entry.net_amount is None:
+        if entry.entry_type == "TRADE":
+            # Legacy gross-only rows still need fee-inclusive broker cash.
+            fees, taxes = _number(entry.fees), _number(entry.taxes)
+            if entry.side == "BUY":
+                amount = purchase_amount(entry)
+            elif entry.side == "SELL" and fees is not None and taxes is not None:
+                gross = _number(entry.gross_amount)
+                if gross is None:
+                    quantity, price = _number(entry.quantity), _number(entry.price)
+                    gross = _number(quantity * price) if quantity is not None and price is not None else None
+                amount = _number(gross - fees - taxes) if gross is not None else None
+        else:
+            amount = _number(entry.gross_amount)
+    if amount is None or amount < 0:
         return None, [f"LEDGER_AMOUNT_MISSING:{entry.id}"]
     if entry.net_amount is None:
-        flags.append(f"LEDGER_NET_AMOUNT_FROM_GROSS:{entry.id}")
+        flags.append(f"LEDGER_NET_AMOUNT_RECONSTRUCTED:{entry.id}")
     if entry.fees is None and entry.taxes is None:
         flags.append(f"LEDGER_COST_COMPONENTS_UNKNOWN:{entry.id}")
     return amount, flags
@@ -111,6 +129,7 @@ def derive_account_state(
     entries: list[AccountEntry],
     *,
     as_of: datetime,
+    settlement_policies: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Pure derivation so the result can be replayed and unit-tested without IO."""
 
@@ -122,6 +141,8 @@ def derive_account_state(
         key = row["code"] or f"name:{row['name']}"
         positions[key] = row
     flags: list[str] = []
+    if observation_time_status(snapshot) == "UNVERIFIED":
+        flags.append("SNAPSHOT_OBSERVATION_TIME_UNVERIFIED")
     applied: list[int] = []
     unapplied: list[dict[str, Any]] = []
     cash = _number(snapshot.broker_available_cash)
@@ -139,8 +160,15 @@ def derive_account_state(
         entry_type = str(entry.entry_type or "").upper()
         code = normalize_security_code(entry.security_code) or None
         quantity = _number(entry.quantity)
-        trade_date = entry.trade_date if isinstance(entry.trade_date, date) else _shanghai_date(entry.executed_at)
-        settled = trade_date < local_date
+        execution_date = _shanghai_date(entry.executed_at)
+        trade_date = entry.trade_date if isinstance(entry.trade_date, date) else execution_date
+        date_mismatch = trade_date != execution_date
+        if date_mismatch:
+            flags.append(f"LEDGER_TRADE_DATE_MISMATCH:{entry.id}")
+        # Preserve legacy facts for audit, but never settle from a hand-filled
+        # trade date that contradicts the actual execution timestamp.
+        settled = execution_date < local_date
+        policy = (settlement_policies or {}).get(code, "T_PLUS_1_CONSERVATIVE")
         if entry_type == "TRADE" and entry.side in {"BUY", "SELL"} and code and quantity:
             key = code
             row = positions.get(key)
@@ -151,6 +179,7 @@ def derive_account_state(
                     "cost": None, "base_qty": 0.0, "base_available_qty": 0.0,
                     "qty_delta": 0.0, "available_delta": 0.0, "open_buy_qty": 0.0,
                     "flags": [], "snapshot_item": False,
+                    "position_entry_ids": [],
                 }
                 positions[key] = row
             elif row is None:
@@ -159,17 +188,24 @@ def derive_account_state(
                     "cost": _number(entry.price), "base_qty": 0.0, "base_available_qty": 0.0,
                     "qty_delta": 0.0, "available_delta": 0.0, "open_buy_qty": 0.0,
                     "flags": [], "snapshot_item": False,
+                    "position_entry_ids": [],
                 }
                 positions[key] = row
+            row["position_entry_ids"].append(entry.id)
+            if date_mismatch:
+                row["flags"].append("TRADE_DATE_MISMATCH")
             if entry.side == "BUY":
-                row["qty"] = (row["qty"] or 0.0) + quantity
+                row["cost"] = average_cost_after_buy(row["qty"], row["cost"], quantity, purchase_amount(entry))
+                row["qty"] = row["qty"] + quantity if row["qty"] is not None else None
                 row["qty_delta"] += quantity
-                if settled:
-                    row["available_qty"] = (row["available_qty"] or 0.0) + quantity
+                if settled or policy == "T_PLUS_0":
+                    row["available_qty"] = row["available_qty"] + quantity if row["available_qty"] is not None else None
                     row["available_delta"] += quantity
                 else:
                     row["open_buy_qty"] += quantity
                     row["flags"].append("T1_BUY_SETTLEMENT_PENDING")
+                    if policy == "T_PLUS_1_CONSERVATIVE":
+                        row["flags"].append("SETTLEMENT_RULE_UNKNOWN_CONSERVATIVE_T1")
                 amount, amount_flags = _cash_effect(entry)
                 flags.extend(amount_flags)
                 if amount is not None and cash_known:
@@ -177,9 +213,13 @@ def derive_account_state(
                     cash_delta -= amount
                 elif amount is not None:
                     flags.append(f"LEDGER_CASH_EFFECT_WITHOUT_BASE_CASH:{entry.id}")
+                else:
+                    cash_known = False
             else:
-                row["qty"] = (row["qty"] or 0.0) - quantity
+                row["qty"] = row["qty"] - quantity if row["qty"] is not None else None
                 row["qty_delta"] -= quantity
+                if row["qty"] is not None and row["qty"] <= 0:
+                    row["cost"] = 0.0 if row["qty"] == 0 else None
                 if row["available_qty"] is None:
                     flags.append(f"LEDGER_AVAILABLE_UNKNOWN_FOR_SELL:{code}")
                     row["flags"].append("AVAILABLE_UNKNOWN")
@@ -198,6 +238,8 @@ def derive_account_state(
                     else:
                         pending_sell_proceeds += amount
                         row["flags"].append("T1_SELL_PROCEEDS_PENDING")
+                else:
+                    cash_known = False
             if row["qty"] is not None and row["qty"] < -1e-9:
                 flags.append(f"LEDGER_NEGATIVE_POSITION:{code}")
                 row["flags"].append("NEGATIVE_POSITION")
@@ -213,22 +255,34 @@ def derive_account_state(
                     "cost": None, "base_qty": 0.0, "base_available_qty": 0.0,
                     "qty_delta": 0.0, "available_delta": 0.0, "open_buy_qty": 0.0,
                     "flags": [], "snapshot_item": False,
+                    "position_entry_ids": [],
                 }
                 positions[code] = row
+            row["position_entry_ids"].append(entry.id)
+            if date_mismatch:
+                row["flags"].append("TRADE_DATE_MISMATCH")
+            # Transfers and corporate actions need their own authoritative cost
+            # allocation; neither the old screenshot nor a market price supplies it.
+            row["cost"] = None
             direction = -1.0 if entry_type == "TRANSFER_OUT" else 1.0
             delta = direction * quantity
-            row["qty"] = (row["qty"] or 0.0) + delta
+            row["qty"] = row["qty"] + delta if row["qty"] is not None else None
             row["qty_delta"] += delta
-            row["available_qty"] = (row["available_qty"] or 0.0) + delta
+            row["available_qty"] = row["available_qty"] + delta if row["available_qty"] is not None else None
             row["available_delta"] += delta
             if row["qty"] is not None and row["qty"] < -1e-9:
                 flags.append(f"LEDGER_NEGATIVE_POSITION:{code}")
                 row["flags"].append("NEGATIVE_POSITION")
             continue
         if entry_type in _CASH_IN_TYPES or entry_type in _CASH_OUT_TYPES:
+            if code in positions:
+                positions[code]["position_entry_ids"].append(entry.id)
+                if date_mismatch:
+                    positions[code]["flags"].append("TRADE_DATE_MISMATCH")
             amount, amount_flags = _cash_effect(entry)
             flags.extend(amount_flags)
             if amount is None:
+                cash_known = False
                 continue
             sign = 1.0 if entry_type in _CASH_IN_TYPES else -1.0
             if cash_known:
@@ -245,17 +299,33 @@ def derive_account_state(
             })
             flags.append(f"LEDGER_EFFECT_UNCLASSIFIED:{entry.id}")
     for row in positions.values():
-        base_qty = row.get("base_qty")
-        base_available = row.get("base_available_qty")
-        if row.get("qty") is not None and base_qty is not None and abs(row["qty"] - base_qty) < 1e-9 and not row["flags"]:
+        # A known event delta cannot establish a missing baseline quantity.
+        if row["qty"] is None:
+            row["flags"].append("POSITION_QUANTITY_UNKNOWN")
+            flags.append(f"POSITION_QUANTITY_UNKNOWN:{row['code'] or row['name']}")
+        elif row["qty"] < 0:
+            row["flags"].append("NEGATIVE_POSITION")
+            flags.append(f"POSITION_QUANTITY_NEGATIVE:{row['code'] or row['name']}")
+        available = row.get("available_qty")
+        if available is not None and available < 0:
+            row["flags"].append("NEGATIVE_AVAILABLE")
+            flags.append(f"POSITION_AVAILABLE_NEGATIVE:{row['code'] or row['name']}")
+        if available is not None and row["qty"] is not None and available > row["qty"]:
+            # Do not clamp away an inconsistent fact and make it look usable.
+            row["flags"].append("AVAILABLE_EXCEEDS_QTY")
+            flags.append(f"POSITION_AVAILABLE_EXCEEDS_QTY:{row['code'] or row['name']}")
+        row["flags"] = list(dict.fromkeys(row["flags"]))
+        row["position_changed"] = bool(row["position_entry_ids"])
+        row["current_cost"] = row["cost"]
+        row["cost_status"] = "KNOWN" if row["qty"] is not None and row["cost"] is not None else "UNKNOWN"
+        related = [entry for entry in entries if entry.id in row["position_entry_ids"]]
+        row["position_version"] = f"{row['code'] or row['name']}:{account_version_for(snapshot.id, related)}"
+        if not row["position_changed"]:
             row["source"] = "snapshot"
         elif row.get("snapshot_item"):
             row["source"] = "snapshot+ledger"
         else:
             row["source"] = "ledger"
-        if base_available is not None and row.get("available_qty") is not None and row["available_qty"] > row["qty"] + 1e-9:
-            row["available_qty"] = row["qty"]
-            row["flags"].append("AVAILABLE_CLAMPED_TO_QTY")
     cash_state = {
         "available": cash if cash_known else None,
         "base_broker_available_cash": _number(snapshot.broker_available_cash),
@@ -291,10 +361,18 @@ def build_account_state(
     snapshot: PortfolioSnapshot,
     as_of: datetime,
 ) -> dict[str, Any]:
+    cutoff = _utc_naive(as_of)
+    if _utc_naive(snapshot.created_at) > cutoff or _utc_naive(snapshot.snapshot_time) > cutoff:
+        raise ValueError("snapshot_not_available_at_as_of")
     entries = confirmed_ledger_entries_after_snapshot(
         db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=as_of
     )
-    return derive_account_state(snapshot, entries, as_of=as_of)
+    codes = {normalize_security_code(entry.security_code) for entry in entries if entry.security_code}
+    masters = db.scalars(select(SecurityMaster).where(
+        SecurityMaster.market == "CN", SecurityMaster.code.in_(codes)
+    )).all() if codes else []
+    policies = {row.code: settlement_policy(row, row.security_type) for row in masters}
+    return derive_account_state(snapshot, entries, as_of=as_of, settlement_policies=policies)
 
 
 __all__ = [

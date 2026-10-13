@@ -8,8 +8,8 @@ from enum import StrEnum
 from typing import Any
 
 BACKTEST_ENGINE_VERSION = "historical-replay-v1"
-METRICS_ENGINE_VERSION = "backtest-metrics-v1"
-CALIBRATION_ENGINE_VERSION = "calibration-v1"
+METRICS_ENGINE_VERSION = "backtest-metrics-v2"
+CALIBRATION_ENGINE_VERSION = "calibration-v3"
 RESEARCH_SCHEMA_VERSION = "phase-i-research-v1"
 
 REPLAY_MODES = (

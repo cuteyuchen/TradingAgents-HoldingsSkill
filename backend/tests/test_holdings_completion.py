@@ -67,6 +67,9 @@ def test_supplied_learning_requires_an_explicit_public_usage_declaration():
 
 
 def test_unheld_candidate_replay_uses_archived_tradeability_and_historical_quote_clock(db, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "PORTFOLIO_BROKER_COMMISSION_BPS", 0.0)
+    monkeypatch.setattr(settings, "PORTFOLIO_MINIMUM_COMMISSION", 0.0)
     user, _, _, run = _seed_analysis(db)
     stamp = run.created_at
     quote = {"code": "159915", "price": 10, "quality_status": "VALID", "fetched_at": stamp.isoformat(),

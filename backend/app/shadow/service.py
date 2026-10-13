@@ -29,12 +29,15 @@ from ..candidates.models import CandidateRun
 from ..config import settings
 from ..decision_contract import CONTRACT_VERSION
 from ..market.codes import normalize_security_code
+from ..market.session import MarketSessionService
+from ..market.trading_rules import settlement_policy as _settlement_policy
 from ..market_engine_models import AllAMedianIndexDaily, DailyBarCache
 from ..market.models import NormalizedQuote
 from ..market_models import SecurityMaster, TradingCalendar
 from ..memory.models import DecisionMemory
 from ..portfolio.constraints import hard_cap_for_security
 from ..portfolio.ledger import transaction_cost_estimate
+from ..portfolio.snapshot_time import observation_time_status
 from ..portfolio_models import TradeLedgerEntry
 from ..trigger_models import TriggerEvent
 from ..v2_models import AnalysisJob, AnalysisRun, ModelProfile, ModelProvider, Portfolio, PortfolioSnapshot
@@ -53,7 +56,7 @@ from .models import (  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
-SHADOW_EXECUTION_VERSION = "shadow-execution-v1"
+SHADOW_EXECUTION_VERSION = "shadow-execution-v2"
 OBSERVATION_VERSION = "live-decision-observation-v1"
 OUTCOME_VERSION = "live-shadow-outcome-v1"
 OUTCOME_HORIZONS = (1, 5, 10, 20, 60)
@@ -64,6 +67,9 @@ VALID_QUOTE_QUALITY = frozenset({"VALID", "DEGRADED"})
 FINAL_ACTIONS = frozenset({"ACTION", "NO_ACTION", "DECISION_BLOCKED"})
 CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED = "CONDITIONAL_ACTION_EXECUTION_UNSUPPORTED"
 SHADOW_MARK_DATA_GAP = "SHADOW_MARK_DATA_GAP"
+SHADOW_CALENDAR_DATA_GAP = "SHADOW_CALENDAR_DATA_GAP"
+SHADOW_BASE_FACTS_DATA_GAP = "SHADOW_BASE_FACTS_DATA_GAP"
+SHADOW_REBASE_REQUIRED = "SHADOW_REBASE_REQUIRED"
 
 
 def _utc_naive(value: datetime | None) -> datetime | None:
@@ -700,18 +706,37 @@ def _snapshot_for_account(
     user_id: int,
     portfolio_id: int,
     snapshot_id: int | None,
+    as_of: datetime,
 ) -> PortfolioSnapshot:
+    cutoff = _utc_naive(as_of) or _now()
     query = select(PortfolioSnapshot).where(
         PortfolioSnapshot.user_id == user_id,
         PortfolioSnapshot.portfolio_id == portfolio_id,
         PortfolioSnapshot.status == "confirmed",
+        PortfolioSnapshot.snapshot_time <= cutoff,
+        PortfolioSnapshot.created_at <= cutoff,
     )
     if snapshot_id is not None:
         query = query.where(PortfolioSnapshot.id == snapshot_id)
-    row = db.execute(query.order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())).scalars().first()
-    if row is None:
-        raise ValueError("confirmed_snapshot_not_found")
-    return row
+    rows = db.execute(query.order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc())).scalars()
+    for row in rows:
+        if observation_time_status(row) != "UNVERIFIED":
+            return row
+        if snapshot_id is not None:
+            raise ValueError("shadow_snapshot_time_unverified")
+    raise ValueError("trusted_visible_confirmed_snapshot_not_found")
+
+
+def _validate_shadow_base_facts(snapshot: PortfolioSnapshot) -> None:
+    """Reject unknown base facts before changing any account generation."""
+
+    cash = _number(snapshot.broker_available_cash)
+    if cash is None or cash < 0:
+        raise ValueError("shadow_base_cash_unknown_or_invalid")
+    for holding in snapshot.holdings:
+        quantity = _number(holding.qty)
+        if quantity is None or quantity < 0:
+            raise ValueError("shadow_base_quantity_unknown_or_invalid")
 
 
 def _security_metadata(db: Session, code: str) -> SecurityMaster | None:
@@ -781,7 +806,7 @@ def _append_ledger(
 
 
 def _seed_shadow_generation(db: Session, account: ShadowAccount, snapshot: PortfolioSnapshot, *, now: datetime) -> None:
-    account.current_cash = _number(snapshot.broker_available_cash) or 0.0
+    account.current_cash = float(snapshot.broker_available_cash)
     account.starting_cash = account.current_cash
     config = dict(account.config_json or {})
     generations = dict(config.get("generations") or {})
@@ -814,7 +839,7 @@ def _seed_shadow_generation(db: Session, account: ShadowAccount, snapshot: Portf
     )
     for holding in snapshot.holdings:
         code = normalize_security_code(holding.code)
-        qty = _positive(holding.qty) or 0.0
+        qty = float(holding.qty)
         if not code or qty <= 0:
             continue
         security = _security_metadata(db, code)
@@ -822,8 +847,11 @@ def _seed_shadow_generation(db: Session, account: ShadowAccount, snapshot: Portf
             holding.extra_json.get("security_type") if isinstance(holding.extra_json, Mapping) else ""
         ).upper() or (str(security.security_type).upper() if security else None)
         etf_category = security.etf_category if security else None
-        sellable = min(qty, _number(holding.available_qty) if holding.available_qty is not None else qty)
-        sellable = max(0.0, sellable)
+        available = _number(holding.available_qty)
+        sellable_known = available is not None and 0 <= available <= qty
+        # Missing or contradictory availability proves no initial sellable
+        # quantity; do not turn an out-of-range fact into a known quantity.
+        sellable = available if sellable_known else 0.0
         cost = _number(holding.cost) or 0.0
         _append_ledger(
             db,
@@ -841,6 +869,7 @@ def _seed_shadow_generation(db: Session, account: ShadowAccount, snapshot: Portf
                 "security_type": security_type,
                 "etf_category": etf_category,
                 "sellable_quantity": sellable,
+                "sellable_quantity_known": sellable_known,
                 "source_snapshot_id": snapshot.id,
             },
         )
@@ -874,8 +903,11 @@ def create_shadow_account(
     )).scalar_one_or_none()
     if active is not None:
         raise ValueError("active_shadow_account_exists")
-    snapshot = _snapshot_for_account(db, user_id=user_id, portfolio_id=owner_portfolio_id, snapshot_id=snapshot_id)
     moment = _utc_naive(now) or _now()
+    snapshot = _snapshot_for_account(
+        db, user_id=user_id, portfolio_id=owner_portfolio_id, snapshot_id=snapshot_id, as_of=moment,
+    )
+    _validate_shadow_base_facts(snapshot)
     account = ShadowAccount(
         user_id=user_id,
         source_portfolio_id=owner_portfolio_id,
@@ -886,8 +918,8 @@ def create_shadow_account(
         paper_only=True,
         initialized_from_snapshot_id=snapshot.id,
         initialized_at=moment,
-        starting_cash=_number(snapshot.broker_available_cash) or 0.0,
-        current_cash=_number(snapshot.broker_available_cash) or 0.0,
+        starting_cash=float(snapshot.broker_available_cash),
+        current_cash=float(snapshot.broker_available_cash),
         reserved_cash=0.0,
         shadow_generation=1,
         execution_contract_version=SHADOW_EXECUTION_VERSION,
@@ -932,13 +964,15 @@ def rebase_shadow_account(
 
     if account.status == "CLOSED":
         raise ValueError("shadow_account_closed")
+    moment = _utc_naive(now) or _now()
     snapshot = _snapshot_for_account(
         db,
         user_id=account.user_id,
         portfolio_id=account.source_portfolio_id,
         snapshot_id=snapshot_id,
+        as_of=moment,
     )
-    moment = _utc_naive(now) or _now()
+    _validate_shadow_base_facts(snapshot)
     old_generation = account.shadow_generation
     account.shadow_generation = old_generation + 1
     account.initialized_from_snapshot_id = snapshot.id
@@ -946,6 +980,7 @@ def rebase_shadow_account(
     account.status = "ACTIVE"
     account.paused_at = None
     account.version = int(account.version or 0) + 1
+    account.execution_contract_version = SHADOW_EXECUTION_VERSION
     _seed_shadow_generation(db, account, snapshot, now=moment)
     refresh_shadow_materialized_state(db, account, as_of=moment)
     logger.info(
@@ -966,21 +1001,23 @@ def _trading_days_after(db: Session, day: date, horizon: int) -> list[date]:
     ).order_by(TradingCalendar.trade_date.asc()).limit(horizon)).scalars())
 
 
-def _next_trading_open(db: Session, day: date) -> datetime:
+def _next_trading_open(db: Session, day: date) -> datetime | None:
     dates = _trading_days_after(db, day, 1)
-    target = dates[0] if dates else day + timedelta(days=1)
+    if not dates:
+        return None
     # 09:30 Shanghai is 01:30 UTC; internal datetimes are UTC-naive.
-    return datetime.combine(target, time(1, 30))
+    return datetime.combine(dates[0], time(1, 30))
 
 
-def _next_trading_close(db: Session, day: date) -> datetime:
+def _next_trading_close(db: Session, day: date) -> datetime | None:
     dates = _trading_days_after(db, day, 1)
-    target = dates[0] if dates else day + timedelta(days=1)
+    if not dates:
+        return None
     # DateTime columns in this project are UTC-naive.  15:00 Shanghai is 07:00 UTC.
-    return datetime.combine(target, time(7, 0))
+    return datetime.combine(dates[0], time(7, 0))
 
 
-def _earliest_executable_at(db: Session, finalized_at: datetime, trade_date: date) -> datetime:
+def _earliest_executable_at(db: Session, finalized_at: datetime, trade_date: date) -> datetime | None:
     """Move an EOD decision to the next session; intraday stays immediately eligible."""
 
     local = (_utc_naive(finalized_at) or _now()).replace(tzinfo=UTC).astimezone(ZoneInfo("Asia/Shanghai"))
@@ -1009,6 +1046,7 @@ def ensure_shadow_order_intents(
     finalized = _utc_naive(observation.decision_finalized_at) or _now()
     earliest_executable_at = _earliest_executable_at(db, finalized, observation.trade_date)
     expires_at = _next_trading_close(db, observation.trade_date)
+    calendar_missing = earliest_executable_at is None or expires_at is None
     rows: list[ShadowOrderIntent] = []
     for index, raw in enumerate(observation.selected_actions_json or []):
         if not isinstance(raw, Mapping):
@@ -1042,10 +1080,12 @@ def ensure_shadow_order_intents(
             decision_reference_price=_positive(raw.get("reference_price")),
             decision_reference_basis=str(raw.get("reference_price_basis") or "UNKNOWN"),
             decision_finalized_at=finalized,
-            earliest_executable_at=earliest_executable_at,
+            # Non-null legacy columns use the decision time only as a closed
+            # placeholder; the calendar gap guard must resolve both bounds.
+            earliest_executable_at=earliest_executable_at or finalized,
             status="PENDING",
-            reason_codes_json=["PAPER_ONLY", "WAIT_FOR_FUTURE_QUOTE"],
-            expires_at=expires_at,
+            reason_codes_json=["PAPER_ONLY", "WAIT_FOR_FUTURE_QUOTE"] + ([SHADOW_CALENDAR_DATA_GAP] if calendar_missing else []),
+            expires_at=expires_at or finalized,
             idempotency_key=key,
         )
         db.add(row)
@@ -1158,27 +1198,6 @@ def _security_for_intent(db: Session, intent: ShadowOrderIntent) -> tuple[str, s
     return security_type, category, row
 
 
-def _settlement_policy(security: SecurityMaster | None, security_type: str) -> str:
-    """Resolve settlement conservatively when metadata does not say T+0."""
-
-    kind = str(security_type or "UNKNOWN").upper()
-    if kind == "STOCK":
-        return "T_PLUS_1"
-    if kind != "ETF":
-        return "T_PLUS_1_CONSERVATIVE"
-    metadata = security.raw_metadata_json if security and isinstance(security.raw_metadata_json, Mapping) else {}
-    for key in ("settlement", "settlement_policy", "trading_rule", "etf_settlement"):
-        value = metadata.get(key)
-        normalized = str(value or "").upper().replace("+", "_PLUS_").replace("-", "_")
-        if normalized in {"T_0", "T_PLUS_0", "T0", "TPLUS0"}:
-            return "T_PLUS_0"
-        if normalized in {"T_1", "T_PLUS_1", "T1", "TPLUS1"}:
-            return "T_PLUS_1"
-    # SecurityMaster has no authoritative settlement column today, so an ETF
-    # without an explicit rule must use the required conservative default.
-    return "T_PLUS_1_CONSERVATIVE"
-
-
 def _state_from_entries(db: Session, account: ShadowAccount, *, generation: int, as_of: datetime | None = None) -> dict[str, Any]:
     cutoff = _utc_naive(as_of) or _now()
     state: dict[str, Any] = {"cash": 0.0, "positions": {}, "ledger_entry_count": 0, "as_of": cutoff}
@@ -1200,6 +1219,7 @@ def _state_from_entries(db: Session, account: ShadowAccount, *, generation: int,
             "etf_category": None,
             "quantity": 0.0,
             "sellable_quantity": 0.0,
+            "sellable_quantity_known": True,
             "average_cost": 0.0,
             "acquired_decision_ids": [],
         })
@@ -1211,13 +1231,22 @@ def _state_from_entries(db: Session, account: ShadowAccount, *, generation: int,
             position["security_type"] = payload.get("security_type")
             position["etf_category"] = payload.get("etf_category")
             position["quantity"] += quantity
-            position["sellable_quantity"] += min(quantity, _number(payload.get("sellable_quantity")) if payload.get("sellable_quantity") is not None else quantity)
+            sellable = _number(payload.get("sellable_quantity"))
+            sellable_valid = sellable is not None and 0 <= sellable <= quantity
+            sellable_known = payload.get("sellable_quantity_known") is not False and sellable_valid
+            position["sellable_quantity_known"] = position["sellable_quantity_known"] and sellable_known
+            # Fail closed in derived state without rewriting legacy seed facts.
+            position["sellable_quantity"] += sellable if sellable_valid else 0.0
             position["average_cost"] = price
         elif entry.entry_type == "BUY_FILL":
             before = position["quantity"]
             position["quantity"] += quantity
             position["average_cost"] = ((before * position["average_cost"]) + (quantity * price)) / position["quantity"] if position["quantity"] > 0 else 0.0
             sellable_at = _utc_naive(entry.sellable_at)
+            if sellable_at is None and (entry.payload_json or {}).get("settlement_calendar_pending"):
+                # Resolve a previously unknown settlement date in the derived
+                # state, without rewriting the immutable fill or ledger fact.
+                sellable_at = _next_trading_open(db, _china_date(entry.occurred_at))
             if sellable_at is not None and sellable_at <= cutoff:
                 position["sellable_quantity"] += quantity
             if entry.decision_observation_id is not None:
@@ -1250,6 +1279,7 @@ def _latest_mark(db: Session, code: str, *, as_of: datetime) -> tuple[float | No
     quote = db.execute(select(LiveQuoteObservation).where(
         LiveQuoteObservation.code == code,
         LiveQuoteObservation.captured_at <= as_of,
+        LiveQuoteObservation.captured_at_precision == "EXACT",
         LiveQuoteObservation.price > 0,
         LiveQuoteObservation.quality_status.in_(tuple(VALID_QUOTE_QUALITY)),
     ).order_by(LiveQuoteObservation.captured_at.desc(), LiveQuoteObservation.id.desc()).limit(1)).scalar_one_or_none()
@@ -1290,6 +1320,11 @@ def refresh_shadow_materialized_state(
         mark, _, _ = _latest_mark(db, code, as_of=cutoff)
         row.quantity = item["quantity"]
         row.sellable_quantity = item["sellable_quantity"]
+        row.metadata_json = {
+            **(row.metadata_json or {}),
+            "sellable_quantity_known": item["sellable_quantity_known"],
+            "sellable_quantity_basis": "EXACT" if item["sellable_quantity_known"] else "KNOWN_LOWER_BOUND",
+        }
         row.average_cost = item["average_cost"]
         row.current_mark = mark if mark is not None else row.current_mark
         row.market_value = row.current_mark * row.quantity if row.current_mark is not None else None
@@ -1351,6 +1386,8 @@ def _set_intent_reason(intent: ShadowOrderIntent, reason: str) -> None:
 
 
 def _eligible_quotes(db: Session, intent: ShadowOrderIntent, *, now: datetime) -> list[LiveQuoteObservation]:
+    if SHADOW_CALENDAR_DATA_GAP in (intent.reason_codes_json or []):
+        return []
     return db.execute(select(LiveQuoteObservation).where(
         LiveQuoteObservation.code == intent.code,
         LiveQuoteObservation.captured_at > intent.decision_finalized_at,
@@ -1372,6 +1409,7 @@ def process_pending_shadow_intents(
     """Consume only the first eligible future persisted quote for each intent."""
 
     moment = _utc_naive(now) or _now()
+    sessions = MarketSessionService(db)
     query = select(ShadowOrderIntent).where(ShadowOrderIntent.status == "PENDING")
     if user_id is not None or portfolio_id is not None:
         query = query.join(ShadowAccount, ShadowOrderIntent.shadow_account_id == ShadowAccount.id)
@@ -1397,6 +1435,25 @@ def process_pending_shadow_intents(
             _set_intent_reason(intent, "SHADOW_GENERATION_INACTIVE")
             summary["blocked"] += 1
             continue
+        if account.execution_contract_version != SHADOW_EXECUTION_VERSION:
+            # v1 seed facts cannot be made trustworthy by changing a version
+            # label. An explicit rebase must append a new validated generation.
+            _set_intent_reason(intent, SHADOW_REBASE_REQUIRED)
+            summary["pending"] += 1
+            continue
+        observation = db.get(LiveDecisionObservation, intent.decision_observation_id)
+        trade_date = observation.trade_date if observation else _china_date(intent.decision_finalized_at)
+        earliest = _earliest_executable_at(db, intent.decision_finalized_at, trade_date)
+        expires = _next_trading_close(db, trade_date)
+        if earliest is None or expires is None:
+            _set_intent_reason(intent, SHADOW_CALENDAR_DATA_GAP)
+            summary["pending"] += 1
+            continue
+        # Only pending intents are rescheduled. Completed fills keep their
+        # original execution times even if the calendar is later corrected.
+        intent.earliest_executable_at = earliest
+        intent.expires_at = expires
+        intent.reason_codes_json = [reason for reason in (intent.reason_codes_json or []) if reason != SHADOW_CALENDAR_DATA_GAP]
         if moment > _utc_naive(intent.expires_at):
             intent.status = "EXPIRED"
             _set_intent_reason(intent, "ORDER_EXPIRED")
@@ -1405,6 +1462,14 @@ def process_pending_shadow_intents(
         quotes = _eligible_quotes(db, intent, now=moment)
         quote: LiveQuoteObservation | None = None
         blocked_reason: str | None = None
+        security_type, etf_category, security = _security_for_intent(db, intent)
+        cap, _ = hard_cap_for_security(security_type, etf_category) if intent.side == "BUY" else (None, [])
+        weight_sizing = (
+            not _positive(intent.target_qty)
+            and not _positive(intent.target_notional)
+            and intent.target_weight is not None
+            and intent.target_weight >= 0
+        )
         for candidate in quotes:
             quality = str(candidate.quality_status or "").upper()
             if candidate.captured_at_precision != "EXACT":
@@ -1415,6 +1480,15 @@ def process_pending_shadow_intents(
                 continue
             if candidate.price is None or candidate.price <= 0:
                 blocked_reason = "QUOTE_PRICE_INVALID"
+                continue
+            # Session resolution treats naive inputs as Shanghai local time;
+            # persisted quote timestamps must therefore be made UTC-aware.
+            session = sessions.resolve_session(candidate.captured_at.replace(tzinfo=UTC))
+            if session.is_trading_day is not True:
+                blocked_reason = SHADOW_CALENDAR_DATA_GAP if session.is_trading_day is None else "QUOTE_OUTSIDE_TRADING_DAY"
+                continue
+            if not session.is_market_open:
+                blocked_reason = "QUOTE_OUTSIDE_TRADING_SESSION"
                 continue
             if not candidate.instrument_active:
                 blocked_reason = "INSTRUMENT_INACTIVE"
@@ -1430,6 +1504,25 @@ def process_pending_shadow_intents(
             if intent.side == "SELL" and candidate.limit_down:
                 blocked_reason = "BLOCKED_BY_LIMIT_DOWN"
                 break
+            state = rebuild_shadow_state(db, account, as_of=candidate.captured_at)
+            equity = float(state["cash"])
+            if weight_sizing or cap is not None:
+                # Each candidate needs its own complete mark. Later prices
+                # must not repair an earlier candidate's execution-time gap.
+                for held_code, item in state["positions"].items():
+                    if held_code == intent.code:
+                        mark = float(candidate.price)
+                    else:
+                        mark, basis, _ = _latest_mark(db, held_code, as_of=candidate.captured_at)
+                        if not _basis_compatible(candidate.price_basis, basis):
+                            mark = None
+                    if mark is None:
+                        equity = None
+                        break
+                    equity += float(item["quantity"]) * mark
+                if equity is None:
+                    blocked_reason = SHADOW_MARK_DATA_GAP
+                    continue
             quote = candidate
             break
         if blocked_reason and quote is None:
@@ -1444,22 +1537,18 @@ def process_pending_shadow_intents(
             _set_intent_reason(intent, "WAITING_FOR_FUTURE_QUOTE")
             summary["pending"] += 1
             continue
-        state = rebuild_shadow_state(db, account, as_of=quote.captured_at)
         position = state["positions"].get(intent.code) or {
             "quantity": 0.0,
             "sellable_quantity": 0.0,
+            "sellable_quantity_known": True,
             "average_cost": 0.0,
             "security_type": intent.security_type,
             "etf_category": None,
         }
-        security_type, etf_category, security = _security_for_intent(db, intent)
         quantity = _intent_target_quantity(
             intent,
             price=float(quote.price),
-            equity=float(state["cash"] + sum(
-                (_number(item.get("current_mark")) or 0.0) * float(item.get("quantity") or 0.0)
-                for item in state["positions"].values()
-            )),
+            equity=equity,
             current_value=float(position.get("quantity") or 0.0) * float(quote.price),
         )
         if quantity is None or quantity <= 0:
@@ -1476,12 +1565,11 @@ def process_pending_shadow_intents(
                 continue
         else:
             sellable = float(position.get("sellable_quantity") or 0.0)
-            if sellable <= 0:
-                intent.status = "BLOCKED"
-                _set_intent_reason(intent, "BLOCKED_BY_SHADOW_SELLABLE_QTY")
-                summary["blocked"] += 1
-                continue
-            if quantity > sellable:
+            if sellable <= 0 or quantity > sellable:
+                if not position["sellable_quantity_known"]:
+                    _set_intent_reason(intent, SHADOW_BASE_FACTS_DATA_GAP)
+                    summary["pending"] += 1
+                    continue
                 intent.status = "BLOCKED"
                 _set_intent_reason(intent, "BLOCKED_BY_SHADOW_SELLABLE_QTY")
                 summary["blocked"] += 1
@@ -1500,24 +1588,7 @@ def process_pending_shadow_intents(
                 _set_intent_reason(intent, "SHADOW_CASH_BLOCKED")
                 summary["blocked"] += 1
                 continue
-            cap, cap_flags = hard_cap_for_security(security_type, etf_category)
             if cap is not None:
-                market_value = 0.0
-                for held_code, item in state["positions"].items():
-                    if held_code == intent.code:
-                        mark = float(quote.price)
-                    else:
-                        materialized = db.execute(select(ShadowPosition).where(
-                            ShadowPosition.shadow_account_id == account.id,
-                            ShadowPosition.shadow_generation == account.shadow_generation,
-                            ShadowPosition.code == held_code,
-                        )).scalar_one_or_none()
-                        mark = _number(materialized.current_mark) if materialized else None
-                        if mark is None:
-                            mark, _, _ = _latest_mark(db, held_code, as_of=quote.captured_at)
-                        mark = float(mark or 0.0)
-                    market_value += float(item.get("quantity") or 0.0) * mark
-                equity = float(state["cash"]) + market_value
                 current_value = float(position.get("quantity") or 0.0) * float(quote.price)
                 if equity <= 0 or (current_value + gross) / equity > cap + 1e-9:
                     intent.status = "BLOCKED"
@@ -1585,6 +1656,7 @@ def process_pending_shadow_intents(
                 "paper_only": True,
                 "cost_configured": cost_configured,
                 "settlement_policy": settlement_policy,
+                "settlement_calendar_pending": intent.side == "BUY" and sellable_at is None,
             },
         )
         intent.status = "FILLED"
@@ -2116,6 +2188,8 @@ def match_actual_trade_alignment(db: Session, observation: LiveDecisionObservati
     if observation.final_action != "ACTION":
         return []
     end = _next_trading_close(db, observation.trade_date)
+    if end is None:
+        return []
     rows: list[DecisionActualAlignment] = []
     for action in observation.selected_actions_json or []:
         if not isinstance(action, Mapping):

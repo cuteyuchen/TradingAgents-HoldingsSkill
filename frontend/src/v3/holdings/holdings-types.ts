@@ -37,6 +37,7 @@ export interface V3QuoteVM {
   changePct: number | null
   prevClose: number | null
   observedAt: string | null
+  tradingDate: string | null
   dataBasis: string | null
   quality: string
   qualityFlags: string[]
@@ -79,12 +80,17 @@ export interface V3HoldingRowVM {
   qty: number | null
   availableQty: number | null
   cost: number | null
+  costSource: 'account' | 'snapshot' | 'none'
+  positionVersion: string | null
   snapshotMarketValue: number | null
   snapshotWeight: number | null
   snapshotPnlRatio: number | null
   snapshotPnlAmount: number | null
 
   quote: V3QuoteVM | null
+  quoteDisplayable: boolean
+  quoteValuationEligible: boolean
+  quoteExecutionEligible: boolean
   liveMarketValueEstimate: number | null
   dayPnlEstimate: number | null
   markedPnlEstimate: number | null
@@ -107,6 +113,8 @@ export interface V3HoldingsSummaryVM {
   marketValue: number | null
   marketValueSource: 'snapshot' | 'quote_estimate' | 'none'
   quoteCoverage: number | null
+  identityCoverage: number | null
+  valuationCoverage: number | null
   spendableCash: number | null
   grossExposure: number | null
   dayPnlEstimate: number | null
@@ -172,9 +180,10 @@ export interface BuildHoldingsInput {
   dashboard: DailyDashboard | null
   quotes: Map<string, V3QuoteVM>
   quotesAsOf: string | null
-  quoteCoverage: number | null
+  quoteCoverage?: number | null
   session: MarketSessionKind | null
   sessionLabel: string
+  sessionTradingDate?: string | null
   filter: V3HoldingFilter
   sort: V3HoldingSort
 }

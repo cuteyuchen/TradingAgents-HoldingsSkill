@@ -14,12 +14,13 @@ import type {
   PortfolioSnapshot,
 } from '../../api/types'
 import { usePortfolioContext } from '../../composables/portfolio'
+import { observationTimeToIso } from '../../utils/observation-time'
 
 const TERMINAL_UPLOAD = new Set(['waiting_confirmation', 'failed', 'needs_model', 'confirmed'])
 const TERMINAL_JOB = new Set(['succeeded', 'failed', 'cancelled'])
 
 function emptyParsed(): ParsedHoldings {
-  return { holdings: [], excluded_items: [], notes: [] }
+  return { holdings: [], excluded_items: [], notes: [], observed_at: null }
 }
 
 export function useV3HoldingsUpdate(options: {
@@ -32,6 +33,7 @@ export function useV3HoldingsUpdate(options: {
   const previewUrl = ref('')
   const upload = ref<HoldingUpload | null>(null)
   const parsed = ref<ParsedHoldings | null>(null)
+  const observedAtInput = ref('')
   const snapshot = ref<PortfolioSnapshot | null>(null)
   const job = ref<AnalysisJob | null>(null)
   const loading = ref(false)
@@ -53,12 +55,14 @@ export function useV3HoldingsUpdate(options: {
 
   const activePortfolioId = computed(() => targetPortfolioId.value || selectedPortfolioId.value)
   const canUpload = computed(() => Boolean(selectedFile.value))
+  const observedAt = computed(() => observationTimeToIso(observedAtInput.value))
   const identityIssueCount = computed(() => parsed.value?.holdings.filter(
     (holding) => holding.resolution_status !== 'RESOLVED' || !holding.canonical_code || !holding.security_id,
   ).length || 0)
   const canConfirm = computed(() => Boolean(
     upload.value
     && parsed.value?.holdings.length
+    && observedAt.value
     && !upload.value.validation_errors.length
     && identityIssueCount.value === 0,
   ))
@@ -95,6 +99,7 @@ export function useV3HoldingsUpdate(options: {
     clearPreview()
     upload.value = null
     parsed.value = null
+    observedAtInput.value = ''
     job.value = null
     error.value = null
   }
@@ -105,6 +110,7 @@ export function useV3HoldingsUpdate(options: {
     previewUrl.value = file ? URL.createObjectURL(file) : ''
     upload.value = null
     parsed.value = null
+    observedAtInput.value = ''
     snapshot.value = null
     job.value = null
     error.value = null
@@ -246,6 +252,7 @@ export function useV3HoldingsUpdate(options: {
     if (!upload.value || !parsed.value) return false
     saving.value = true
     try {
+      parsed.value.observed_at = observedAt.value
       upload.value = await api.updateParsedHoldings(upload.value.id, parsed.value)
       parsed.value = upload.value.parsed || parsed.value
       return true
@@ -272,6 +279,10 @@ export function useV3HoldingsUpdate(options: {
 
   async function confirmHoldings(startAnalysis = false): Promise<void> {
     if (!upload.value || confirming.value) return
+    if (!observedAt.value) {
+      error.value = '请填写有效的截图事实时间（北京时间）'
+      return
+    }
     confirming.value = true
     error.value = null
     try {
@@ -371,6 +382,7 @@ export function useV3HoldingsUpdate(options: {
     previewUrl,
     upload,
     parsed,
+    observedAtInput,
     snapshot,
     job,
     loading,

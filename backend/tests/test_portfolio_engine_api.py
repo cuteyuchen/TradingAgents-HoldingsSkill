@@ -102,9 +102,10 @@ def test_ledger_confirm_is_audited_and_analysis_run_must_belong_to_portfolio():
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.email == email).one()
+        snapshot_time = datetime.now(UTC).replace(tzinfo=None)
         snapshot = PortfolioSnapshot(
-            user_id=user.id, portfolio_id=portfolio_b_id, snapshot_time=datetime.now(UTC).replace(tzinfo=None),
-            status="confirmed", total_assets=1_000, broker_available_cash=1_000,
+            user_id=user.id, portfolio_id=portfolio_b_id, snapshot_time=snapshot_time,
+            created_at=snapshot_time, source="manual", status="confirmed", total_assets=1_000, broker_available_cash=1_000,
         )
         db.add(snapshot)
         db.flush()

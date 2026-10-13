@@ -37,19 +37,20 @@ def _percentile(values: list[float], probability: float) -> float | None:
 
 
 def score_bucket(score: float | None, *, width: int = 20) -> str | None:
+    """Use continuous [lower, upper) bins; include 100 in the final bin."""
+
     if score is None:
         return None
     value = float(score)
     if not math.isfinite(value):
         return None
-    if width == 10:
-        lower = max(0, min(90, int(value // 10) * 10))
-        return f"{lower}-{min(100, lower + 10)}"
-    boundaries = ((0, 20), (21, 40), (41, 60), (61, 80), (81, 100))
-    for lower, upper in boundaries:
-        if lower <= value <= upper:
-            return f"{lower}-{upper}"
-    return "<0" if value < 0 else ">100"
+    if value < 0:
+        return "<0"
+    if value > 100:
+        return ">100"
+    bucket_width = 10 if width == 10 else 20
+    lower = min(100 - bucket_width, int(value // bucket_width) * bucket_width)
+    return f"{lower}-{lower + bucket_width}"
 
 
 def _trade_dates(rows: Iterable[dict[str, Any]]) -> set[str]:

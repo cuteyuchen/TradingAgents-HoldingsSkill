@@ -8,6 +8,7 @@ import V3DetailDrawer from '../components/V3DetailDrawer.vue'
 import V3HoldingsIdentityTable from './V3HoldingsIdentityTable.vue'
 import { useV3HoldingsUpdate } from './useV3HoldingsUpdate'
 
+/***********************更新抽屉输入与事件*********************/
 const props = defineProps<{
   modelValue: boolean
   portfolioId: number | null
@@ -18,6 +19,7 @@ const emit = defineEmits<{
   confirmed: [snapshotId: number]
 }>()
 
+/***********************截图与分析更新工作流*********************/
 const router = useRouter()
 const {
   show,
@@ -27,6 +29,7 @@ const {
   previewUrl,
   upload,
   parsed,
+  observedAtInput,
   snapshot,
   job,
   loading,
@@ -62,6 +65,7 @@ const {
   },
 })
 
+/***********************抽屉展示与生命周期*********************/
 const open = computed({
   get: () => props.modelValue,
   set: (value: boolean) => {
@@ -193,6 +197,7 @@ watch(() => props.modelValue, async (value) => {
           </div>
         </header>
         <div class="fund-grid">
+          <label>截图事实时间（北京时间） <input v-model="observedAtInput" type="datetime-local" step="1" required data-testid="v3-update-observed-at" /></label>
           <label>总资产 <input v-model="parsed.total_assets" type="number" /></label>
           <label>持仓总市值 <input v-model="parsed.total_market_value" type="number" /></label>
           <label>券商可用资金 <input v-model="parsed.broker_available_cash" type="number" /></label>

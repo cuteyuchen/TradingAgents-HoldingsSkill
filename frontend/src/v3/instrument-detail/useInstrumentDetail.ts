@@ -10,7 +10,7 @@
  * - Secondary loaders use resolved canonical identity, never raw route param equality.
  */
 import { computed, onBeforeUnmount, ref, shallowRef, watch, type Ref } from 'vue'
-import { ApiError, api } from '@/api'
+import { ApiError, api, isCancelledRequest } from '@/api'
 import type {
   BarAdjustment,
   BarInterval,
@@ -31,14 +31,7 @@ export interface ModuleError {
 }
 
 export function isAbortError(error: unknown): boolean {
-  if (!error) return false
-  if (error instanceof DOMException && error.name === 'AbortError') return true
-  if (error instanceof ApiError) {
-    const cause = error.cause
-    if (cause instanceof DOMException && cause.name === 'AbortError') return true
-    if (cause instanceof Error && cause.name === 'AbortError') return true
-  }
-  return false
+  return isCancelledRequest(error)
 }
 
 function mapApiError(error: unknown): ModuleError {

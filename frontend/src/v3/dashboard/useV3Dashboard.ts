@@ -7,7 +7,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, ApiError } from '../../api'
+import { api, isCancelledRequest } from '../../api'
 import type {
   DailyDashboard,
   MajorIndexQuote,
@@ -22,13 +22,7 @@ import { buildViewModel, dashboardPollIntervals } from './dashboard-formatters'
 export { buildViewModel, dashboardPollIntervals }
 
 export function isAbortError(error: unknown): boolean {
-  if (!error) return false
-  if (error instanceof DOMException && error.name === 'AbortError') return true
-  if (error instanceof ApiError) {
-    const cause = error.cause as { name?: string } | undefined
-    if (cause && (cause.name === 'AbortError' || (cause as Error).name === 'AbortError')) return true
-  }
-  return false
+  return isCancelledRequest(error)
 }
 
 interface RequestSlot {
@@ -160,7 +154,7 @@ export function useV3Dashboard() {
       if (isAbortError(error) || !isCurrent(slotSession, ctx.seq)) return
       sessionError.value = error
     } finally {
-      if (isCurrent(slotSession, ctx.seq) && !silent) sessionLoading.value = false
+      if (isCurrent(slotSession, ctx.seq)) sessionLoading.value = false
     }
   }
 
@@ -177,7 +171,7 @@ export function useV3Dashboard() {
       if (isAbortError(error) || !isCurrent(slotIndices, ctx.seq)) return
       indicesError.value = error
     } finally {
-      if (isCurrent(slotIndices, ctx.seq) && !silent) indicesLoading.value = false
+      if (isCurrent(slotIndices, ctx.seq)) indicesLoading.value = false
     }
   }
 
@@ -194,7 +188,7 @@ export function useV3Dashboard() {
       if (isAbortError(error) || !isCurrent(slotRisk, ctx.seq)) return
       riskError.value = error
     } finally {
-      if (isCurrent(slotRisk, ctx.seq) && !silent) riskLoading.value = false
+      if (isCurrent(slotRisk, ctx.seq)) riskLoading.value = false
     }
   }
 
@@ -217,7 +211,7 @@ export function useV3Dashboard() {
       if (isAbortError(error) || !isCurrent(slotOverview, ctx.seq)) return
       overviewError.value = error
     } finally {
-      if (isCurrent(slotOverview, ctx.seq) && !silent) overviewLoading.value = false
+      if (isCurrent(slotOverview, ctx.seq)) overviewLoading.value = false
     }
   }
 
@@ -249,7 +243,7 @@ export function useV3Dashboard() {
       portfolioError.value = error
       portfolioErrorOwnerId.value = portfolioId
     } finally {
-      if (isCurrent(slotPortfolio, ctx.seq) && !silent) portfolioLoading.value = false
+      if (isCurrent(slotPortfolio, ctx.seq)) portfolioLoading.value = false
     }
   }
 

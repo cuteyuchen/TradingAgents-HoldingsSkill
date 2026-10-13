@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal
 from typing import Any
 
 from ..clock import utc_now
@@ -18,6 +18,7 @@ from ..market.engine.metrics import is_price_limit
 from ..market.codes import normalize_security_code
 from ..market.models import _coerce_datetime
 from .config import PORTFOLIO_GATE_VERSION
+from .sizing import affordable_buy_quantity
 
 
 def _weight(value: Any) -> float | None:
@@ -121,7 +122,8 @@ def apply_portfolio_decision_gate(
     market_frozen = bool(portfolio_context.get("market_state_frozen"))
     market_available = bool(portfolio_context.get("market_state_available", True))
     market_quality = str(portfolio_context.get("market_quality_status") or "VALID").upper()
-    market_unavailable = not market_available or market_quality in {"MISSING", "INVALID"}
+    market_unavailable = (not market_available or market_quality not in {"VALID", "DEGRADED"}
+                          or portfolio_context.get("market_state_freshness") == "STALE")
     quality = str(portfolio_context.get("portfolio_quality") or "DEGRADED").upper()
     analysis_quality = result.get("quality_gate") or {}
     analysis_blocked = analysis_quality.get("status") == "blocked" or analysis_quality.get("grade") in {"D", "F"}
@@ -132,7 +134,8 @@ def apply_portfolio_decision_gate(
     target_exposure = _weight(portfolio_context.get("target_exposure"))
     gross_exposure = _weight(portfolio_context.get("gross_exposure"))
     if assets is not None and assets > 0 and target_exposure is not None and gross_exposure is not None and remaining_cash is not None:
-        remaining_cash = min(remaining_cash, max(0.0, target_exposure - gross_exposure) * assets)
+        exposure_budget = float(max(Decimal(0), Decimal(str(target_exposure)) - Decimal(str(gross_exposure))) * Decimal(str(assets)))
+        remaining_cash = min(remaining_cash, exposure_budget)
     action_results: list[dict[str, Any]] = []
     statuses: list[str] = []
     blocked_reasons: list[str] = []
@@ -192,7 +195,7 @@ def apply_portfolio_decision_gate(
             else:
                 current_weight = _weight(constraint.get("weight")) if constraint else None
                 maximum_additional = _weight(constraint.get("max_additional_weight")) if constraint else None
-                maximum_target = current_weight + maximum_additional if current_weight is not None and maximum_additional is not None else None
+                maximum_target = float(Decimal(str(current_weight)) + Decimal(str(maximum_additional))) if current_weight is not None and maximum_additional is not None else None
                 if maximum_target is None:
                     _watch(row, "POSITION_CONSTRAINT_UNAVAILABLE")
                     statuses.append("BLOCKED")
@@ -221,7 +224,9 @@ def apply_portfolio_decision_gate(
                     _watch(row, f"QUOTE_{quote_quality}")
                     statuses.append("BLOCKED")
                     blocked_reasons.append(f"QUOTE_{quote_quality}")
-                elif quality in {"BLOCKED", "FROZEN"}:
+                elif quality in {"BLOCKED", "FROZEN"} and not (
+                    quality == "BLOCKED" and constraint.get("reconciliation_reduce_allowed") is True
+                ):
                     _watch(row, "PORTFOLIO_DATA_QUALITY")
                     statuses.append("BLOCKED")
                     blocked_reasons.append("PORTFOLIO_DATA_QUALITY")
@@ -281,14 +286,16 @@ def apply_portfolio_decision_gate(
                 if current is None or target is None or price is None or price <= 0 or remaining_cash is None:
                     reason = "EXECUTION_INPUT_MISSING"
                 else:
-                    requested_cost = max(0.0, target - current) * assets
+                    # Decimal subtraction preserves an exact whole-lot boundary.
+                    requested_cost = float(max(Decimal(0), Decimal(str(target)) - Decimal(str(current))) * Decimal(str(assets)))
                     if quantity is not None:
                         requested_cost = min(requested_cost, quantity * price)
                     allowed_cost = min(requested_cost, max(0.0, remaining_cash))
-                    allowed_qty = allowed_cost / price
-                    if lot is not None and lot > 0:
-                        allowed_qty = math.floor((allowed_qty + 1e-9) / lot) * lot
-                    if allowed_qty <= 0:
+                    allowed_qty, estimated_fee = affordable_buy_quantity(
+                        price=price, lot=int(lot), gross_limit=allowed_cost, cash=max(0.0, remaining_cash))
+                    if estimated_fee is None:
+                        reason = "TRANSACTION_COST_UNAVAILABLE"
+                    elif allowed_qty <= 0:
                         reason = "CASH_OR_LOT_SIZE_LIMIT"
                     else:
                         if allowed_cost < requested_cost:
@@ -301,10 +308,12 @@ def apply_portfolio_decision_gate(
                             quantity=str(allowed_qty), proposed_qty=allowed_qty,
                             target_weight=current + allowed_qty * price / assets,
                             adjustment_weight=allowed_qty * price / assets,
+                            estimated_fees=estimated_fee,
+                            estimated_cash_required=allowed_qty * price + estimated_fee,
                         )
                         if row.get("portfolio_gate_reasons"):
                             row["portfolio_gate"] = "ADJUSTED"
-                        remaining_cash -= allowed_qty * price
+                        remaining_cash -= allowed_qty * price + estimated_fee
             elif reason is None and buy:
                 reason = "EXECUTION_INPUT_MISSING"
             if reason:
@@ -368,7 +377,7 @@ def apply_portfolio_decision_gate(
             if candidate.get("funding_mode") != "CASH_FUNDED":
                 reasons.append("REPLACEMENT_REVIEW_REQUIRED" if candidate.get("funding_mode") == "REPLACEMENT_REVIEW" else "UNFUNDED")
             weight = parse_target_weight(candidate.get("probe_weight"))
-            cost = weight * assets if weight is not None and assets is not None else None
+            cost = float(Decimal(str(weight)) * Decimal(str(assets))) if weight is not None and assets is not None else None
             if cost is None or remaining_cash is None or assets is None or assets <= 0:
                 reasons.append("EXECUTION_INPUT_MISSING")
             elif cost <= 0 or remaining_cash <= 0 or not execution_quotes_required and cost > remaining_cash:
@@ -387,27 +396,30 @@ def apply_portfolio_decision_gate(
                     requested_probe_weight=weight,
                 )
                 if not reasons:
-                    price_decimal = Decimal(str(_quantity(quote["price"])))
+                    price = _quantity(quote["price"])
                     lot = int(parse_share_quantity(quote["lot_size"]))
-                    budget = Decimal(str(min(cost, remaining_cash)))
-                    quantity = int((budget / (price_decimal * lot)).to_integral_value(rounding=ROUND_FLOOR)) * lot
-                    if quantity <= 0:
+                    quantity, estimated_fee = affordable_buy_quantity(
+                        price=price, lot=lot, gross_limit=min(cost, remaining_cash), cash=remaining_cash)
+                    if estimated_fee is None:
+                        reasons.append("TRANSACTION_COST_UNAVAILABLE")
+                    elif quantity <= 0:
                         reasons.append("CASH_OR_LOT_SIZE_LIMIT")
                     elif parse_share_quantity(quantity) is None:
                         reasons.append("QUANTITY_INVALID")
                     else:
-                        actual_cost = float(Decimal(quantity) * price_decimal)
-                        if actual_cost > min(cost, remaining_cash):
+                        actual_cost = quantity * price
+                        if actual_cost + estimated_fee > remaining_cash + 1e-9:
                             reasons.append("CASH_LIMIT")
                         else:
                             if cost > remaining_cash:
                                 adjustments.append("CASH_LIMIT")
                             if actual_cost < min(cost, remaining_cash):
                                 adjustments.append("LOT_SIZE")
-                            cost = actual_cost
+                            cost = actual_cost + estimated_fee
                             candidate.update(
                                 quantity=str(quantity), proposed_qty=quantity,
                                 target_weight=actual_cost / assets, adjustment_weight=actual_cost / assets,
+                                estimated_fees=estimated_fee, estimated_cash_required=cost,
                             )
             if reasons:
                 candidate["buyable"] = False

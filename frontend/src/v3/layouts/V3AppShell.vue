@@ -6,11 +6,11 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, clearSession, hasSession } from '@/api'
-import { clearPortfolioContext } from '@/composables/portfolio'
 import { useV3ThemeLifecycle } from '../composables/useV3Theme'
 import V3Sidebar from './V3Sidebar.vue'
 import V3Topbar from './V3Topbar.vue'
 
+/***********************导航与响应式布局*********************/
 const router = useRouter()
 useV3ThemeLifecycle()
 
@@ -40,23 +40,20 @@ function navigate(name: string): void {
   void router.push({ name })
 }
 
+/***********************本地会话即时退出*********************/
 async function logout(): Promise<void> {
-  if (hasSession()) {
-    try {
-      await api.logout()
-    } catch {
-      // 后端不可用时仍允许本地登出
-    }
-  }
+  // 先捕获旧凭证发起撤销，再即时清空本地会话，避免等网络期间旧刷新写回。
+  const revoke = hasSession() ? api.logout().catch(() => undefined) : Promise.resolve()
   clearSession()
-  clearPortfolioContext()
   await router.replace({ name: 'login' })
+  await revoke
 }
 
 function openSettings(): void {
   void router.push({ name: 'settings' })
 }
 
+/***********************布局生命周期*********************/
 onMounted(() => {
   onResize()
   mediaQuery = window.matchMedia('(max-width: 1023px)')

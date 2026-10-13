@@ -346,6 +346,8 @@ def evaluate_daily_actions(
                 action["decision_status"] = "WAITING" if cash_block else "DATA_GAP"
             else:
                 action["executable_quantity"] = normalize_action_sizing(gated_row).quantity or 0.0
+                action["estimated_fees"] = gated_row.get("estimated_fees")
+                action["estimated_cash_required"] = gated_row.get("estimated_cash_required")
                 if action["executable_quantity"] <= 0:
                     action["decision_status"] = "INCOMPLETE"
                     action["reason_codes"].append("EXECUTABLE_QUANTITY_MISSING")

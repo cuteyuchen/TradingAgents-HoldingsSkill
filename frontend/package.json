@@ -1,6 +1,6 @@
 {
   "name": "advisor-frontend",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
+    "test": "node --test tests/review-regressions.test.cjs",
     "e2e": "playwright test",
     "e2e:acceptance": "python ../scripts/run_acceptance.py"
   },

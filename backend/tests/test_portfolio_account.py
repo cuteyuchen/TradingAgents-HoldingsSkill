@@ -46,7 +46,9 @@ def _snapshot(
     row = PortfolioSnapshot(
         user_id=user.id,
         portfolio_id=portfolio.id,
+        source="manual",
         snapshot_time=snapshot_time.replace(tzinfo=None),
+        created_at=snapshot_time.replace(tzinfo=None),
         status="confirmed",
         total_assets=100_000,
         total_market_value=80_000,
@@ -283,7 +285,7 @@ def test_portfolio_state_exposes_derived_quantities_and_account_version():
         assert position["qty"] == 700
         assert position["available_qty"] == 700
         assert position["account_source"] == "snapshot+ledger"
-        assert state["account_version"].startswith("portfolio-account-v2:")
+        assert state["account_version"].startswith("portfolio-account-v4:")
         assert state["account_derivation"]["applied_entry_ids"]
         assert state["cash"] == 20_000
         assert state["pending_sell_proceeds"] == pytest.approx(2_995)

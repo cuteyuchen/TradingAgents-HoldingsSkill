@@ -52,18 +52,22 @@ _CASE_FIELD_ALIASES = {
 def _number(value: Any) -> float | None:
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return result if math.isfinite(result) else None
 
 
-def _normalise_parameter(target_parameter: str) -> str:
+def normalise_parameter(target_parameter: str) -> str:
+    """Use the same canonical path for evaluation and experiment identity."""
     value = str(target_parameter or "").strip()
+    # Ablation selects only the final factor name, regardless of path prefix.
+    if value.startswith("factor_ablation.") or ".factor_ablation." in value:
+        return f"factor_ablation.{value.rsplit('.', 1)[-1]}"
     return _PARAMETER_ALIASES.get(value, value)
 
 
 def _parameter_kind(target_parameter: str) -> str:
-    path = _normalise_parameter(target_parameter)
+    path = normalise_parameter(target_parameter)
     if path.startswith("market.regime_lower_bounds."):
         return "MARKET_REGIME_THRESHOLD"
     if ".factor_ablation." in path or path.startswith("factor_ablation."):
@@ -74,7 +78,7 @@ def _parameter_kind(target_parameter: str) -> str:
 
 
 def parameter_field(target_parameter: str) -> str:
-    path = _normalise_parameter(target_parameter)
+    path = normalise_parameter(target_parameter)
     if path in _CASE_FIELD_ALIASES:
         return _CASE_FIELD_ALIASES[path]
     if path.startswith("market."):
@@ -86,7 +90,7 @@ def parameter_field(target_parameter: str) -> str:
 
 def current_parameter_value(target_parameter: str, config: Mapping[str, Any] | None = None) -> Any:
     config = config or current_production_config()
-    path = _normalise_parameter(target_parameter)
+    path = normalise_parameter(target_parameter)
     if _parameter_kind(path) == "FACTOR_ABLATION":
         return 1.0
     value: Any = config
@@ -138,10 +142,11 @@ def build_parameter_grid(
         raise ValueError("calibration_grid_too_large")
     if any(isinstance(value, (dict, list, tuple, set)) for value in values):
         raise ValueError("calibration_grid_values_must_be_scalars")
-    try:
-        return sorted(set(values), key=lambda value: float(value))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("calibration_grid_values_must_be_orderable") from exc
+    numeric_values = [_number(value) for value in values]
+    if any(value is None for value in numeric_values):
+        raise ValueError("calibration_grid_values_must_be_finite")
+    # Numeric aliases, including signed zero, identify the same experiment.
+    return sorted({0.0 if value == 0 else value for value in numeric_values})
 
 
 def renormalize_available_weights(weights: Mapping[str, float], available: Iterable[str]) -> dict[str, float]:
@@ -238,7 +243,7 @@ def _is_weight_or_ablation(target_parameter: str) -> bool:
 
 
 def _is_opportunity_calibration(target_parameter: str) -> bool:
-    return "opportunity" in _normalise_parameter(target_parameter).lower()
+    return "opportunity" in normalise_parameter(target_parameter).lower()
 
 
 def recommend_calibration(
@@ -328,7 +333,7 @@ def _set_path(value: dict[str, Any], path: str, replacement: Any) -> None:
 
 def _variant_config(base_config: Mapping[str, Any], target_parameter: str, variant: Any) -> dict[str, Any]:
     config = copy.deepcopy(dict(base_config))
-    path = _normalise_parameter(target_parameter)
+    path = normalise_parameter(target_parameter)
     kind = _parameter_kind(path)
     if kind == "FACTOR_ABLATION":
         factor = path.rsplit(".", 1)[-1]
@@ -547,7 +552,7 @@ def production_gate_predicate(
 ) -> bool:
     """Re-run the complete production eligibility predicate for one variant."""
 
-    path = _normalise_parameter(target_parameter)
+    path = normalise_parameter(target_parameter)
     config = _variant_config(production_config or current_production_config(), path, variant)
     if _parameter_kind(path) == "MARKET_REGIME_THRESHOLD":
         lower_bounds = (config.get("market") if isinstance(config.get("market"), Mapping) else {}).get("regime_lower_bounds") or {}
@@ -737,7 +742,7 @@ def build_calibration_evidence(
 
     rows = [dict(row) for row in cases]
     config = production_config or current_production_config()
-    path = _normalise_parameter(target_parameter)
+    path = normalise_parameter(target_parameter)
     field = parameter_field(path)
     current = current_parameter_value(path, config)
     grid = build_parameter_grid(path, current_value=current, requested=parameter_grid)
@@ -1071,6 +1076,7 @@ def build_calibration_evidence(
 
 
 __all__ = [
+    "normalise_parameter",
     "parameter_field",
     "current_parameter_value",
     "build_parameter_grid",

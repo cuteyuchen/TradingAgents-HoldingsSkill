@@ -459,6 +459,87 @@ def test_history_metrics_expose_20d_trend_and_250d_percentiles() -> None:
         assert MarketOverviewResponse.model_validate(payload).quote_as_of == captured_at
 
 
+def test_250d_percentiles_exclude_older_extreme_samples() -> None:
+    from app.market.foundation import MarketFoundationService, SYSTEMIC_MARKET_VERSION
+    from app.market_engine_models import AllAMedianIndexDaily, MarketMetricSnapshot
+
+    SessionLocal = _session_factory()
+    current_date = date(2026, 9, 7)
+    with SessionLocal() as db:
+        for offset in range(300, 0, -1):
+            captured_at = datetime.combine(current_date - timedelta(days=offset), datetime.min.time())
+            older = offset >= 250
+            db.add(AllAMedianIndexDaily(
+                market="CN",
+                trade_date=captured_at.date(),
+                median_return=0.0,
+                index_value=100.0 if older else 2000.0,
+                quality_status="VALID",
+                calculation_version=SYSTEMIC_MARKET_VERSION,
+                available_at=captured_at,
+            ))
+            db.add(MarketMetricSnapshot(
+                snapshot_id=f"rolling-{offset}",
+                market="CN",
+                trade_date=captured_at.date(),
+                captured_at=captured_at,
+                calculation_version=SYSTEMIC_MARKET_VERSION,
+                metrics_json={"foundation": {
+                    "turnover_concentration": {"ratio": 0.1 if older else 0.9},
+                    "total_turnover": {"value": 1_000_000.0},
+                }},
+            ))
+        db.commit()
+
+        comparisons = MarketFoundationService(db)._historical_comparisons(
+            trading_date=current_date, median_value=1000.0, concentration_ratio=0.5, total_turnover=1_000_000.0,
+        )
+
+        assert comparisons["median_percentile_250d"] == 1 / 250
+        assert comparisons["concentration_percentile_250d"] == 1 / 250
+
+
+@pytest.mark.parametrize("quality,expected_grade", [("VALID", "A"), ("STALE", "C")])
+def test_cache_hit_is_diagnostic_only_and_preserves_real_quality(quality, expected_grade) -> None:
+    from app.market.foundation import MarketFoundationService
+    from app.market_engine_models import MarketScoreSnapshot
+
+    SessionLocal = _session_factory()
+    captured_at = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)
+    with SessionLocal() as db:
+        _calendar(db, (date(2026, 9, 7), True, date(2026, 9, 4), date(2026, 9, 8)))
+        _stock(db, "600001")
+        db.add(MarketScoreSnapshot(
+            snapshot_id="valid-score",
+            market="CN",
+            trade_date=date(2026, 9, 7),
+            captured_at=captured_at,
+            display_score=50.0,
+            regime="NEUTRAL",
+            quality_status="VALID",
+        ))
+        db.commit()
+        snapshot = _snapshot([
+            {"code": "600001", "price": 10.0, "prev_close": 10.0, "amount": 100.0, "quality_status": "VALID"},
+        ], captured_at=captured_at)
+        snapshot["quality_status"] = quality
+        service = MarketFoundationService(db)
+
+        first = service.build_from_snapshot(
+            snapshot, now=captured_at, major_index_rows=_indices(captured_at),
+        )
+        snapshot["metadata"] = {"market_foundation_cache_hit": True}
+        cached = service.build_from_snapshot(
+            snapshot, now=captured_at, major_index_rows=_indices(captured_at),
+        )
+
+        assert cached == first
+        assert cached["systemic_risk"]["data_quality"] == expected_grade
+        assert "CACHE_HIT" not in cached["systemic_risk"]["quality_flags"]
+        assert ("DATA_DEGRADED" in cached["systemic_risk"]["risk_factors"]) == (quality == "STALE")
+        assert snapshot["metadata"]["market_foundation_cache_hit"] is True
+
+
 def test_daily_persistence_keeps_its_capture_distinct_from_other_metric_versions() -> None:
     from app.market.foundation import MarketFoundationService, SYSTEMIC_MARKET_VERSION
     from app.market_engine_models import MarketMetricSnapshot

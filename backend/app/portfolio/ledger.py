@@ -151,6 +151,10 @@ def _entry_values(
     if executed_at > _as_datetime(ingested_at or utc_now()):
         raise ValueError("ledger_executed_at_in_future")
     trade_date = _as_date(payload.get("trade_date"), executed_at)
+    # Every ingestion/revision path must use the execution's local fact date;
+    # a user-supplied earlier date cannot advance settlement.
+    if trade_date != _as_date(None, executed_at):
+        raise ValueError("ledger_trade_date_execution_date_mismatch")
     available_at = payload.get("available_at")
     available_at = _as_datetime(available_at) if available_at is not None else _as_datetime(ingested_at or utc_now())
     code = normalize_security_code(payload.get("security_code")) or None

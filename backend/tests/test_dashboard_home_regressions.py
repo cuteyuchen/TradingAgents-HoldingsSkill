@@ -299,6 +299,12 @@ def test_portfolio_section_with_real_snapshot_cost_and_pnl(home_db):
         ("588170", 21000, 1.102, 0.909, -4057.12),
     ]
     snapshot.snapshot_time = _utc_naive(_local(date(2026, 10, 8), 15))
+    snapshot.created_at = snapshot.snapshot_time
+    snapshot.source = "screenshot"
+    snapshot.raw_json = {
+        "observed_at": snapshot.snapshot_time.replace(tzinfo=UTC).isoformat(),
+        "observation_time_status": "USER_CONFIRMED",
+    }
     snapshot.total_assets = snapshot.total_market_value = 180289.50
     snapshot.broker_available_cash = 0
     for code, qty, cost, price, pnl_amount in rows:
@@ -402,6 +408,12 @@ def test_performance_timestamps_are_explicit_utc_including_nested_learning(home_
     local = _local(day, 9)
     cutoff = local if aware else _utc_naive(local)
     snapshot.created_at = snapshot.snapshot_time
+    # Timestamp coverage must use a trusted screenshot, not inferred ingestion time.
+    snapshot.source = "screenshot"
+    snapshot.raw_json = {
+        "observed_at": snapshot.snapshot_time.replace(tzinfo=UTC).isoformat(),
+        "observation_time_status": "USER_CONFIRMED",
+    }
     db.add(LearningHypothesis(user_id=user.id, portfolio_id=portfolio.id, hypothesis_key="utc-test",
         revision=1, status="reference", statement="test", scope_json={}, weight=0.4, reason="TEST",
         extraction_cutoff=snapshot.snapshot_time, available_at=snapshot.snapshot_time))

@@ -8,6 +8,13 @@ import pytest
 from app.portfolio.decision_gate import apply_portfolio_decision_gate
 
 
+@pytest.fixture(autouse=True)
+def configured_zero_fee_broker(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "PORTFOLIO_BROKER_COMMISSION_BPS", 0.0)
+    monkeypatch.setattr(settings, "PORTFOLIO_MINIMUM_COMMISSION", 0.0)
+
+
 def _context(**overrides):
     position = {
         "code": "600519", "current_price": 10.0, "weight": 0.18, "hard_cap": 0.20,

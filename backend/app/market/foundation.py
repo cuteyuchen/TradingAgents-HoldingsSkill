@@ -142,6 +142,8 @@ def _percentile(current: float | None, values: Iterable[float | None], *, minimu
     samples = [float(value) for value in values if value is not None and math.isfinite(float(value))]
     if len(samples) < minimum:
         return None
+    # Values arrive in chronological order; older samples are outside 250d.
+    samples = samples[-minimum:]
     return sum(value <= current for value in samples) / len(samples)
 
 
@@ -504,9 +506,6 @@ class MarketFoundationService:
             quality_flags.append(f"SNAPSHOT_{snapshot_quality}")
         if fallback_used:
             quality_flags.append("PROVIDER_FALLBACK")
-        if bool(_value(_value(snapshot, "metadata", default={}), "market_foundation_cache_hit", default=False)):
-            quality_flags.append("CACHE_HIT")
-
         universe = self._all_a_universe()
         universe_total = len(universe)
         excluded_counts: dict[str, int] = {}

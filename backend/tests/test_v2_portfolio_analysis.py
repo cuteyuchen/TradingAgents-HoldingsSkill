@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import uuid
+from datetime import UTC, datetime
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEST_DB_DIR = os.path.join(BACKEND_DIR, "data")
@@ -82,6 +83,7 @@ def test_v2_portfolio_flow(monkeypatch):
     assert profile.status_code == 201, profile.text
 
     holdings = {
+        "observed_at": datetime.now(UTC).isoformat(),
         "holdings": [
             {
                 "code": "600519",

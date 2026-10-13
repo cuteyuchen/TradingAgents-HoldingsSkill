@@ -13,12 +13,14 @@ from ..clock import utc_now_naive as utc_now
 from ..history.time import CHINA_TZ, to_utc_naive
 from ..market_engine_models import DailyBarCache
 from ..market_models import TradingCalendar
+from ..portfolio.costs import average_cost_after_buy, purchase_amount
+from ..portfolio.snapshot_time import observation_time_status
 from ..v2_models import PortfolioSnapshot
 from .facts import ledger_facts_at
 from .models import DecisionMemory, DecisionOutcome
 from .outcomes import calculate_decision_outcome
 
-PERFORMANCE_VERSION = "account-review-p4-v1"
+PERFORMANCE_VERSION = "account-review-p4-v3"
 
 
 def _number(value: Any) -> float | None:
@@ -56,12 +58,23 @@ def account_performance(db: Session, *, user_id: int, portfolio_id: int, trade_d
         PortfolioSnapshot.snapshot_time <= cutoff,
     ).order_by(PortfolioSnapshot.snapshot_time, PortfolioSnapshot.id)).all())
     snapshots = [row for row in snapshots if _day(row.snapshot_time) <= trade_date]
+    unverified = [row for row in snapshots if observation_time_status(row) == "UNVERIFIED"]
+    snapshots = [row for row in snapshots if observation_time_status(row) != "UNVERIFIED"]
     opening = next((row for row in reversed(snapshots) if previous_day and
                     _day(row.snapshot_time) == previous_day and row.snapshot_time >= _close(previous_day)), None)
     closing = next((row for row in reversed(snapshots) if _day(row.snapshot_time) == trade_date
                     and row.snapshot_time >= _close(trade_date)), None)
     anchor = snapshots[0] if snapshots else None
     reasons: list[str] = []
+    # An unused old screenshot cannot invalidate independent, trusted evidence.
+    if unverified and (anchor is None or
+            (opening is None and previous_day and any(
+                _day(row.snapshot_time) == previous_day and row.snapshot_time >= _close(previous_day)
+                for row in unverified)) or
+            (closing is None and any(
+                _day(row.snapshot_time) == trade_date and row.snapshot_time >= _close(trade_date)
+                for row in unverified))):
+        reasons.append("SNAPSHOT_OBSERVATION_TIME_UNVERIFIED")
     result: dict[str, Any] = {
         "as_of": cutoff.replace(tzinfo=UTC).isoformat(),
         "status": "INCOMPLETE", "net_pnl": None, "return_rate": None,
@@ -102,45 +115,80 @@ def account_performance(db: Session, *, user_id: int, portfolio_id: int, trade_d
                if anchor.snapshot_time < entry.executed_at <= end_time]
     result["source_refs"]["ledger_entry_ids"] = [entry.id for entry in entries]
     flows = []
+    daily_flow_unknown = False
     for entry in entries:
+        in_daily_window = opening and closing and opening.snapshot_time < entry.executed_at <= closing.snapshot_time
         amount = _number(entry.net_amount)
         if amount is None:
             amount = _number(entry.gross_amount)
         if entry.currency != "CNY":
             reasons.append(f"CURRENCY_CONVERSION_MISSING:{entry.id}")
+            daily_flow_unknown = daily_flow_unknown or bool(in_daily_window)
             continue
         if entry.entry_type == "TRADE":
             qty, price = _number(entry.quantity), _number(entry.price)
             fees, taxes = _number(entry.fees), _number(entry.taxes)
-            if fees is None or taxes is None:
+            costs_known = fees is not None and taxes is not None
+            if not costs_known:
                 reasons.append(f"TRADE_COSTS_MISSING:{entry.id}")
             fees, taxes = fees or 0.0, taxes or 0.0
             result["fees"] += fees
             result["taxes"] += taxes
-            if not entry.security_code or qty is None or qty <= 0 or price is None or price <= 0:
+            if not entry.security_code or qty is None or qty <= 0 or entry.side not in {"BUY", "SELL"}:
                 reasons.append(f"TRADE_FACT_MISSING:{entry.id}")
                 continue
+            if price is None or price <= 0:
+                reasons.append(f"TRADE_FACT_MISSING:{entry.id}")
             row = positions.setdefault(entry.security_code, {"code": entry.security_code, "quantity": 0.0,
                 "average_cost": 0.0, "realized_pnl": 0.0, "unrealized_pnl": None, "reason_codes": []})
             old_qty, old_cost = row["quantity"], row["average_cost"]
-            if old_qty is None or old_cost is None:
+            # A known trade changes known quantity even when its cost is unknown.
+            if old_qty is None or old_qty < 0:
+                row["average_cost"] = row["realized_pnl"] = None
                 row["reason_codes"].append("COST_BASIS_UNKNOWN")
                 continue
             if entry.side == "BUY":
                 row["quantity"] = old_qty + qty
-                row["average_cost"] = (old_qty * old_cost + qty * price + fees + taxes) / (old_qty + qty)
+                row["average_cost"] = average_cost_after_buy(old_qty, old_cost, qty, purchase_amount(entry))
+                if row["average_cost"] is None:
+                    row["reason_codes"].append("COST_BASIS_UNKNOWN")
             elif entry.side == "SELL" and qty <= old_qty + 1e-9:
-                row["quantity"] = old_qty - qty
-                row["realized_pnl"] += qty * (price - old_cost) - fees - taxes
+                row["quantity"] = max(0.0, old_qty - qty)
+                if old_cost is None or old_cost < 0:
+                    row["reason_codes"].append("COST_BASIS_UNKNOWN")
+                if (old_cost is not None and old_cost >= 0 and price is not None and price > 0
+                        and costs_known
+                        and row["realized_pnl"] is not None):
+                    row["realized_pnl"] += qty * (price - old_cost) - fees - taxes
+                else:
+                    row["realized_pnl"] = None
+                if row["quantity"] == 0:
+                    # New purchases can establish a new basis, not past realized profit.
+                    row["average_cost"] = 0.0
             else:
                 row["reason_codes"].append("SELL_EXCEEDS_RECORDED_HOLDINGS")
                 reasons.append(f"TRADE_QUANTITY_UNRECONCILED:{entry.id}")
         elif entry.entry_type in {"CASH_IN", "CASH_OUT", "TRANSFER_IN", "TRANSFER_OUT"}:
-            if entry.security_code and _number(entry.quantity):
+            if entry.security_code and entry.quantity is not None:
                 reasons.append(f"SECURITY_TRANSFER_COST_MISSING:{entry.id}")
+                daily_flow_unknown = daily_flow_unknown or bool(in_daily_window)
+                if entry.entry_type not in {"TRANSFER_IN", "TRANSFER_OUT"}:
+                    continue
+                qty = _number(entry.quantity)
+                if qty is None or qty <= 0:
+                    reasons.append(f"SECURITY_TRANSFER_QUANTITY_UNRECONCILED:{entry.id}")
+                    continue
+                row = positions.setdefault(entry.security_code, {"code": entry.security_code, "quantity": 0.0,
+                    "average_cost": 0.0, "realized_pnl": 0.0, "unrealized_pnl": None, "reason_codes": []})
+                direction = 1 if entry.entry_type in {"CASH_IN", "TRANSFER_IN"} else -1
+                row["quantity"] = row["quantity"] + direction * qty if row["quantity"] is not None else None
+                row["average_cost"] = None
+                if row["quantity"] is not None and row["quantity"] < 0:
+                    reasons.append(f"SECURITY_TRANSFER_QUANTITY_UNRECONCILED:{entry.id}")
                 continue
             if amount is None:
                 reasons.append(f"EXTERNAL_FLOW_AMOUNT_MISSING:{entry.id}")
+                daily_flow_unknown = daily_flow_unknown or bool(in_daily_window)
                 continue
             direction = 1 if entry.entry_type in {"CASH_IN", "TRANSFER_IN"} else -1
             result["cash_in" if direction == 1 else "cash_out"] += abs(amount)
@@ -155,10 +203,11 @@ def account_performance(db: Session, *, user_id: int, portfolio_id: int, trade_d
     daily_flows = [(stamp, value) for stamp, value in flows if opening and closing
                    and opening.snapshot_time < stamp <= closing.snapshot_time]
     if opening and closing:
-        result["external_flow"] = sum(value for _, value in daily_flows)
+        # Missing old evidence affects cost P&L, not independent close-to-close equity.
+        result["external_flow"] = None if daily_flow_unknown else sum(value for _, value in daily_flows)
         if result["opening_equity"] is None or result["closing_equity"] is None:
             reasons.append("ACCOUNT_EQUITY_MISSING")
-        elif not any(code.startswith(("EXTERNAL_FLOW", "CURRENCY", "SECURITY_TRANSFER")) for code in reasons):
+        elif not daily_flow_unknown:
             result["net_pnl"] = result["closing_equity"] - result["opening_equity"] - result["external_flow"]
             duration = (closing.snapshot_time - opening.snapshot_time).total_seconds()
             capital = result["opening_equity"] + sum(value * (closing.snapshot_time - stamp).total_seconds() / duration
@@ -181,7 +230,7 @@ def account_performance(db: Session, *, user_id: int, portfolio_id: int, trade_d
         mark, qty, cost = marks.get(code), row["quantity"], row["average_cost"]
         row["mark_price"] = mark
         # New confirmed snapshots are independent reconciliation evidence.
-        if latest.snapshot_time == end_time and abs((latest_qty.get(code) or 0) - (qty or 0)) > 1e-8:
+        if latest.snapshot_time == end_time and qty is not None and abs((latest_qty.get(code) or 0) - qty) > 1e-8:
             row["reason_codes"].append("SNAPSHOT_LEDGER_QUANTITY_MISMATCH")
         row["unrealized_pnl"] = 0.0 if qty == 0 else (qty * (mark - cost)
             if qty is not None and cost is not None and mark is not None and mark > 0 else None)

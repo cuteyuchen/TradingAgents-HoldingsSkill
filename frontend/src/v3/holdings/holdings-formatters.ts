@@ -335,6 +335,7 @@ export function mapQuoteItem(item: {
   change_pct?: number | null
   prev_close?: number | null
   observed_at?: string | null
+  trading_date?: string | null
   data_basis?: string | null
   quality?: string | null
   quality_flags?: string[] | null
@@ -345,13 +346,18 @@ export function mapQuoteItem(item: {
   const last = numOrNull(item.last)
   const change = numOrNull(item.change)
   const changePct = numOrNull(item.change_pct)
-  const quality = String(item.quality || '').toUpperCase()
-  const status = String(item.status || '').toUpperCase()
-  const flags = Array.isArray(item.quality_flags) ? item.quality_flags.map(String) : []
+  const quality = String(item.quality || '').trim().toUpperCase()
+  const status = String(item.status || '').trim().toUpperCase()
+  const flags = Array.isArray(item.quality_flags) ? item.quality_flags.map(flag => String(flag).trim().toUpperCase()) : []
+  // 数字存在不等于质量可信；缺失、未知或冲突标识不能默认升级为有效行情。
+  const trustedStatus = ['AVAILABLE', 'VALID', 'DEGRADED', 'STALE'].includes(status)
+  const trustedQuality = ['A', 'B', 'C', 'D', 'VALID', 'DEGRADED', 'STALE'].includes(quality)
+  const invalidFlag = flags.some(flag => /(^|_)(INVALID|CONFLICT)(_|$)/.test(flag)
+    || ['FUTURE_OBSERVED_TIME', 'OBSERVED_DATE_MISMATCH', 'QUOTE_UNAVAILABLE', 'INSTRUMENT_SUSPENDED', 'INSTRUMENT_NOT_FOUND'].includes(flag))
+  const staleFlag = flags.some(flag => /(^|_)STALE(_|$)/.test(flag) || flag === 'CLOSE_NOT_CONFIRMED')
   let quoteStatus: V3QuoteStatus = 'MISSING'
-  if (last !== null) {
-    if (status === 'UNAVAILABLE' || quality === 'MISSING' || quality === 'F') quoteStatus = 'MISSING'
-    else if (status === 'STALE' || quality === 'STALE' || flags.includes('STALE')) quoteStatus = 'STALE'
+  if (last !== null && last > 0 && trustedStatus && trustedQuality && !invalidFlag) {
+    if (status === 'STALE' || quality === 'STALE' || staleFlag) quoteStatus = 'STALE'
     else if (status === 'DEGRADED' || quality === 'DEGRADED' || quality === 'C' || quality === 'D') quoteStatus = 'DEGRADED'
     else quoteStatus = 'VALID'
   }
@@ -362,6 +368,7 @@ export function mapQuoteItem(item: {
     changePct,
     prevClose: numOrNull(item.prev_close),
     observedAt: strOrNull(item.observed_at),
+    tradingDate: strOrNull(item.trading_date),
     dataBasis: strOrNull(item.data_basis),
     quality: quality || 'MISSING',
     qualityFlags: flags,
@@ -370,7 +377,21 @@ export function mapQuoteItem(item: {
   }
 }
 
-function buildExecution(qty: number | null, availableQty: number | null, judgmentStatus: V3HoldingStatus): {
+/** 展示、当期估值和执行行情资格分开，历史数字不能冒充今日变化。 */
+export function quoteEligibility(quote: V3QuoteVM | null, session: BuildHoldingsInput['session'], tradingDate: string | null): {
+  displayable: boolean; valuation: boolean; execution: boolean
+} {
+  const displayable = Boolean(quote && quote.last !== null && quote.last > 0 && quote.status !== 'MISSING')
+  const valuation = Boolean(displayable && quote && ['VALID', 'DEGRADED'].includes(quote.status)
+    && tradingDate && quote.tradingDate === tradingDate
+    && ['live', 'session_close'].includes(quote.dataBasis || '')
+    && session && !['PRE_OPEN', 'NON_TRADING_DAY', 'DATA_ABNORMAL'].includes(session))
+  const execution = Boolean(valuation && quote?.status === 'VALID' && quote.dataBasis === 'live'
+    && session && ['OPEN_AUCTION', 'MORNING', 'AFTERNOON', 'CLOSE_AUCTION'].includes(session))
+  return { displayable, valuation, execution }
+}
+
+function buildExecution(qty: number | null, availableQty: number | null, judgmentStatus: V3HoldingStatus, quoteExecutable: boolean): {
   availableQty: number | null
   unavailableQty: number | null
   text: string | null
@@ -381,42 +402,52 @@ function buildExecution(qty: number | null, availableQty: number | null, judgmen
   if (qty !== null && available !== null && qty > available) unavailable = qty - available
   let text: string | null = null
   let blocking = false
-  if (available !== null && available <= 0 && isActionableStatus(judgmentStatus)) {
+  const selling = judgmentStatus === 'REDUCE' || judgmentStatus === 'EXIT'
+  if (available !== null && available <= 0 && selling) {
     text = `执行约束：当前可用 ${available}`
     blocking = true
   } else if (unavailable !== null && unavailable > 0) {
     text = `当前不可用 ${unavailable} · 由快照数量差计算`
   }
+  if (isActionableStatus(judgmentStatus) && !quoteExecutable) {
+    text = [text, '执行前需核对当前有效行情'].filter(Boolean).join('；')
+    blocking = true
+  }
   return { availableQty: available, unavailableQty: unavailable, text, blocking }
 }
 
 function buildSummary(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3HoldingsSummaryVM | null {
-  const { snapshot, dashboard, quoteCoverage } = input
+  const { snapshot, dashboard } = input
   if (!snapshot) return null
   const portfolio = dashboard?.portfolio
   const totalAssets = numOrNull(snapshot.total_assets) ?? numOrNull(portfolio?.total_assets)
   const cash = input.accountState ? numOrNull(input.accountState.cash) : numOrNull(snapshot.broker_available_cash) ?? numOrNull(portfolio?.spendable_cash)
   const snapshotMv = numOrNull(snapshot.total_market_value)
-  const resolvedRows = rows.filter((row) => !row.unresolved)
-  const quotedRows = resolvedRows.filter((row) => row.quote && row.quote.status !== 'MISSING')
+  // 已清仓不再参与账户合计；缺数量或身份的行仍占覆盖分母，不能伪装成完整估值。
+  const activeRows = rows.filter((row) => row.qty !== 0)
+  const ratio = (covered: number) => activeRows.length ? covered / activeRows.length : null
+  const identityCoverage = ratio(activeRows.filter(row => !row.unresolved).length)
+  const quoteCoverage = ratio(activeRows.filter(row => row.quoteDisplayable).length)
+  const valuationRows = activeRows.filter(row => row.liveMarketValueEstimate !== null)
+  const valuationCoverage = ratio(valuationRows.length)
   let marketValue: number | null = null
   let marketValueSource: V3HoldingsSummaryVM['marketValueSource'] = 'none'
-  if (quotedRows.length && resolvedRows.length && quotedRows.length === resolvedRows.length) {
-    marketValue = quotedRows.reduce((sum, row) => sum + (row.liveMarketValueEstimate || 0), 0)
+  if (activeRows.length && valuationRows.length === activeRows.length) {
+    marketValue = valuationRows.reduce((sum, row) => sum + row.liveMarketValueEstimate!, 0)
     marketValueSource = 'quote_estimate'
   } else if (snapshotMv !== null) {
     marketValue = snapshotMv
     marketValueSource = 'snapshot'
   }
 
-  const snapshotPnlComplete = resolvedRows.length > 0
-    && resolvedRows.every((row) => row.snapshotPnlAmount !== null)
+  const snapshotPnlComplete = activeRows.length > 0
+    && activeRows.every((row) => row.snapshotPnlAmount !== null)
   const floatingPnlSnapshot = snapshotPnlComplete
-    ? resolvedRows.reduce((sum, row) => sum + (row.snapshotPnlAmount || 0), 0)
+    ? activeRows.reduce((sum, row) => sum + row.snapshotPnlAmount!, 0)
     : null
 
-  const dayCovered = resolvedRows.filter((row) => row.dayPnlEstimate !== null)
-  const dayPnlAvailable = resolvedRows.length > 0 && dayCovered.length === resolvedRows.length
+  const dayCovered = activeRows.filter((row) => row.dayPnlEstimate !== null)
+  const dayPnlAvailable = activeRows.length > 0 && dayCovered.length === activeRows.length
   const dayPnlEstimate = dayPnlAvailable
     ? dayCovered.reduce((sum, row) => sum + (row.dayPnlEstimate || 0), 0)
     : null
@@ -438,13 +469,15 @@ function buildSummary(input: BuildHoldingsInput, rows: V3HoldingRowVM[]): V3Hold
     marketValue,
     marketValueSource,
     quoteCoverage,
+    identityCoverage,
+    valuationCoverage,
     spendableCash: cash,
     grossExposure: numOrNull(portfolio?.gross_exposure),
     dayPnlEstimate,
     dayPnlAvailable,
     floatingPnlSnapshot,
     floatingPnlAvailable: floatingPnlSnapshot !== null,
-    positionCount: numOrNull(portfolio?.position_count) ?? rows.length,
+    positionCount: activeRows.length,
     riskFlags,
     hardCapBreaches,
     qualityStatus: strOrNull(portfolio?.quality_status) || 'UNKNOWN',
@@ -618,7 +651,9 @@ function sortRows(rows: V3HoldingRowVM[], sort: V3HoldingSort): V3HoldingRowVM[]
   const copy = [...rows]
   if (sort === 'weight') return copy.sort((a, b) => (b.weight ?? -1) - (a.weight ?? -1))
   if (sort === 'pnl') return copy.sort((a, b) => (b.snapshotPnlRatio ?? -999) - (a.snapshotPnlRatio ?? -999))
-  if (sort === 'change') return copy.sort((a, b) => (b.quote?.changePct ?? -999) - (a.quote?.changePct ?? -999))
+  if (sort === 'change') return copy.sort((a, b) =>
+    (b.quoteValuationEligible ? b.quote?.changePct ?? -999 : -999)
+    - (a.quoteValuationEligible ? a.quote?.changePct ?? -999 : -999))
   if (sort === 'judgment') {
     return copy.sort((a, b) => judgmentRank(a.judgment.status) - judgmentRank(b.judgment.status)
       || (b.weight ?? 0) - (a.weight ?? 0))
@@ -654,24 +689,36 @@ export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsVie
     const unresolved = holding.resolution_status !== 'RESOLVED' || !canonicalCode
     const qty = numOrNull(holding.qty)
     const availableQty = numOrNull(holding.available_qty)
-    const changed = Boolean(state && Number(state.positions.find(item => key(item.code) === key(code))?.qty_delta || 0) !== 0)
-    const cost = changed ? null : numOrNull(holding.cost)
+    const position = state?.positions.find(item => key(item.code) === key(code))
+    // 净数量不变也可能已卖出再买回；旧服务缺少事件证明时保守撤下快照成本。
+    const changed = Boolean(state && (position?.position_changed === true || Number(position?.qty_delta || 0) !== 0
+      || position?.position_changed !== false && (numOrNull(state.account_derivation?.entry_count) ?? 1) > 0))
+    const cost = position?.cost_status
+      ? position.cost_status === 'KNOWN' ? numOrNull(position.current_cost) : null
+      : changed ? null : numOrNull(holding.cost)
+    const costSource: V3HoldingRowVM['costSource'] = cost === null ? 'none' : position?.cost_status === 'KNOWN' ? 'account' : 'snapshot'
     const snapshotMarketValue = changed ? null : numOrNull(holding.market_value)
     const snapshotWeight = changed ? null : numOrNull(holding.weight)
     const snapshotPnlRatio = changed ? null : numOrNull(holding.pnl)
     const snapshotPnlAmount = changed ? null : numOrNull(holding.pnl_amount)
     const quote = joinQuote(holding, input.quotes, portfolioCanonicals)
-    const usableQuote = Boolean(quote && quote.last !== null && !unresolved)
-    const liveMarketValueEstimate = usableQuote && qty !== null ? (quote!.last as number) * qty : null
-    const dayPnlEstimate = !changed && usableQuote && qty !== null && quote!.prevClose !== null && quote!.last !== null
-      ? (quote!.last - quote!.prevClose) * qty
+    const eligibility = quoteEligibility(quote, input.session,
+      input.sessionTradingDate ?? input.dashboard?.market_session?.trading_date ?? input.dashboard?.trade_date ?? null)
+    const usableQuote = !unresolved && eligibility.valuation && qty !== null && qty >= 0
+    const liveMarketValueEstimate = usableQuote ? (quote!.last as number) * qty! : null
+    const dayPnlEstimate = !changed && usableQuote && quote!.prevClose !== null && quote!.prevClose > 0 && quote!.last !== null
+      ? (quote!.last - quote!.prevClose) * qty!
       : null
     const markedPnlEstimate = usableQuote && qty !== null && cost !== null && quote!.last !== null
-      ? (quote!.last - cost) * qty
+      ? (quote!.last - cost) * qty!
       : null
     const judgment = resolveRowJudgment({ holding, dashboard: input.dashboard, snapshotId: input.snapshot?.id ?? null })
-    const execution = buildExecution(qty, availableQty, judgment.status)
-    const marketValueSource: V3HoldingRowVM['marketValueSource'] = usableQuote
+    const execution = buildExecution(qty, availableQty, judgment.status, !unresolved && eligibility.execution)
+    if (judgment.strategyStatus === 'BLOCKED' && isActionableStatus(judgment.status)) {
+      execution.blocking = true
+      execution.text = [execution.text, '策略暂不可执行'].filter(Boolean).join('；')
+    }
+    const marketValueSource: V3HoldingRowVM['marketValueSource'] = liveMarketValueEstimate !== null
       ? 'quote_estimate'
       : snapshotMarketValue !== null
         ? 'snapshot'
@@ -693,11 +740,16 @@ export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsVie
       qty,
       availableQty,
       cost,
+      costSource,
+      positionVersion: strOrNull(position?.position_version),
       snapshotMarketValue,
       snapshotWeight,
       snapshotPnlRatio,
       snapshotPnlAmount,
       quote: unresolved ? null : quote,
+      quoteDisplayable: !unresolved && eligibility.displayable,
+      quoteValuationEligible: !unresolved && eligibility.valuation,
+      quoteExecutionEligible: !unresolved && eligibility.execution,
       liveMarketValueEstimate: unresolved ? null : liveMarketValueEstimate,
       dayPnlEstimate: unresolved ? null : dayPnlEstimate,
       markedPnlEstimate: unresolved ? null : markedPnlEstimate,
@@ -716,7 +768,8 @@ export function buildHoldingsViewModel(input: BuildHoldingsInput): V3HoldingsVie
 
   const sorted = sortRows(rows, input.sort)
   const filtered = filterRows(sorted, input.filter)
-  const identityIncomplete = Boolean(snapshot?.identity_status && snapshot.identity_status !== 'RESOLVED')
+  const identityIncomplete = rows.some(row => row.unresolved && row.qty !== 0)
+    || Boolean(snapshot?.identity_status && snapshot.identity_status !== 'RESOLVED')
   const decision = buildDecisionBar(input, rows)
   const decisionState = dashboardDecisionState(input.dashboard)
   if (decision.kind !== 'NO_PORTFOLIO' && decision.kind !== 'STALE_SNAPSHOT' && decision.kind !== 'MISSING'

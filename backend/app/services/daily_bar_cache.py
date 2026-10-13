@@ -111,6 +111,14 @@ def upsert_daily_bars(
                 DailyBarCache.adjustment == bar.adjustment,
             )
         ).scalar_one_or_none()
+        if row is not None:
+            # This cache retains one version. A bounded historical sync must
+            # not replace a newer known observation with an older one.
+            known_at = row.available_at or bar.available_at or row.fetched_at
+            known_at = known_at if known_at.tzinfo else known_at.replace(tzinfo=UTC)
+            fetched_at = row.fetched_at if row.fetched_at.tzinfo else row.fetched_at.replace(tzinfo=UTC)
+            if (bar.available_at or bar.fetched_at, bar.fetched_at) < (known_at, fetched_at):
+                continue
         values = {
             "market": bar.market,
             "exchange": bar.exchange,
@@ -168,25 +176,42 @@ def sync_daily_bar_cache(
 
     requested = list(dict.fromkeys(str(code) for code in codes if code))
     fetched_codes = skipped_codes = failed_codes = persisted_rows = 0
+    incomplete_codes = missing_open_days = 0
     cutoff = available_at or datetime.now(UTC)
+    cutoff = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=UTC)
+    window_limit = max(1, int(bootstrap_limit))
+    adjustment = adjustment.upper()
+    # A still-forming session is not a missing finalized daily bar.
+    finalized_through = cutoff.astimezone(UTC).date()
+    if cutoff.astimezone(UTC).hour < 7:
+        finalized_through -= timedelta(days=1)
+    expected_dates = list(
+        db.scalars(
+            select(TradingCalendar.trade_date)
+            .where(
+                TradingCalendar.market == "CN",
+                TradingCalendar.is_open.is_(True),
+                TradingCalendar.trade_date <= min(as_of, finalized_through),
+            )
+            .order_by(TradingCalendar.trade_date.desc())
+            .limit(window_limit)
+        )
+    )
     for code in requested:
-        latest = cache_latest_trade_date(db, code=code, adjustment=adjustment)
-        missing_open_days = 0
-        if latest is not None and latest >= as_of:
-            skipped_codes += 1
-            continue
-        if latest is None:
-            request_limit = bootstrap_limit
-        else:
-            missing_open_days = db.scalar(
-                select(func.count()).select_from(TradingCalendar).where(
-                    TradingCalendar.market == "CN",
-                    TradingCalendar.is_open.is_(True),
-                    TradingCalendar.trade_date > latest,
-                    TradingCalendar.trade_date <= as_of,
-                )
-            ) or 0
-            request_limit = max(1, min(bootstrap_limit, int(missing_open_days) + 2))
+        cached = load_daily_bars(
+            db, [code], trade_date=min(as_of, finalized_through), available_at=cutoff,
+            limit=window_limit + 1, adjustment=adjustment,
+        )
+        cached = [bar for bar in cached if bar["close"] is not None and bar["close"] > 0]
+        cached_dates = {bar["trade_date"] for bar in cached}
+        missing_positions = [index for index, day in enumerate(expected_dates) if day not in cached_dates]
+        # Repair the oldest gap and refresh two overlapping bars for revisions.
+        # An incomplete calendar cannot prove a short cache is a full window.
+        request_limit = (
+            window_limit
+            if len(expected_dates) < window_limit
+            else min(window_limit, max(missing_positions, default=-1) + 3)
+        )
         try:
             rows = provider.get_kline(code, limit=request_limit) or []
         except Exception:
@@ -197,7 +222,6 @@ def sync_daily_bar_cache(
             continue
         fetched_codes += 1
         normalized: list[NormalizedDailyBar] = []
-        previous_close: float | None = None
         for raw in rows:
             if not isinstance(raw, dict):
                 continue
@@ -205,31 +229,62 @@ def sync_daily_bar_cache(
                 raw,
                 code=code,
                 provider=getattr(provider, "name", ""),
-                adjustment=adjustment,
+                # The legacy get_kline contract is QFQ. Unlabelled data must
+                # not become RAW merely because a caller requested RAW.
+                adjustment="QFQ",
             )
-            if bar.prev_close is None:
-                bar.prev_close = previous_close
-            previous_close = bar.close
-            if bar.trade_date > as_of or (bar.available_at and bar.available_at > cutoff):
+            if (
+                bar.adjustment != adjustment or bar.code != code or bar.trade_date == date.min
+                or bar.close is None or bar.close <= 0
+            ):
                 continue
-            if latest is not None and bar.trade_date <= latest:
+            if bar.trade_date > as_of or (bar.available_at and bar.available_at > cutoff):
                 continue
             if bar.quality_status not in {"VALID", "DEGRADED"}:
                 continue
             normalized.append(bar)
-        if not normalized and (latest is None or missing_open_days > 0):
+        if not normalized:
             failed_codes += 1
             continue
+        normalized.sort(key=lambda bar: bar.trade_date)
+        # A two-bar revision must not erase the first bar's previous close.
+        # Only use an earlier usable bar from this same adjustment and cutoff.
+        previous_close = next(
+            (bar["close"] for bar in reversed(cached) if bar["trade_date"] < normalized[0].trade_date),
+            None,
+        )
+        for bar in normalized:
+            if bar.prev_close is None:
+                bar.prev_close = previous_close
+            previous_close = bar.close
         persisted_rows += upsert_daily_bars(db, normalized, source=getattr(provider, "name", None))
+        # Re-read actual visible coverage: an older provider observation may
+        # have been rejected to preserve a later known cached revision.
+        cached_dates = {
+            bar["trade_date"]
+            for bar in load_daily_bars(
+                db, [code], trade_date=min(as_of, finalized_through), available_at=cutoff,
+                limit=window_limit, adjustment=adjustment,
+            )
+            if bar["close"] is not None and bar["close"] > 0
+        }
+        remaining = len(set(expected_dates) - cached_dates)
+        missing_open_days += remaining
+        if remaining or len(expected_dates) < window_limit:
+            # Calendar gaps may be listing/suspension gaps: report uncertainty,
+            # never synthesize bars or claim that the entire window is ready.
+            incomplete_codes += 1
         # Keep a multi-hour bootstrap restartable instead of holding one giant
         # SQLite write transaction across thousands of network calls.
         db.commit()
     return {
-        "status": "ready" if failed_codes == 0 else "degraded",
+        "status": "ready" if failed_codes == incomplete_codes == 0 else "degraded",
         "requested_codes": len(requested),
         "fetched_codes": fetched_codes,
         "skipped_codes": skipped_codes,
         "failed_codes": failed_codes,
+        "incomplete_codes": incomplete_codes,
+        "missing_open_days": missing_open_days,
         "persisted_rows": persisted_rows,
         "as_of": as_of.isoformat(),
         "provider": getattr(provider, "name", provider.__class__.__name__),

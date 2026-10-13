@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { businessLabel } from '../utils/businessLocale'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Camera, CheckCircle2, ClipboardPaste, FileImage, Play, Plus, RefreshCw, Save } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
@@ -8,9 +8,11 @@ import { useMessage } from 'naive-ui'
 import { api } from '../api'
 import { usePortfolioContext } from '../composables/portfolio'
 import { fmtDateTime } from '../utils/ui'
+import { observationTimeToIso } from '../utils/observation-time'
 import type { AnalysisJob, AnalysisMode, HoldingUpload, ParsedHoldings, PortfolioSnapshot } from '../api/types'
 import HoldingsIdentityTable from '../components/HoldingsIdentityTable.vue'
 
+/***********************截图与分析上下文*********************/
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
@@ -18,6 +20,7 @@ const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const upload = ref<HoldingUpload | null>(null)
 const parsed = ref<ParsedHoldings | null>(null)
+const observedAtInput = ref('')
 const snapshot = ref<PortfolioSnapshot | null>(null)
 const job = ref<AnalysisJob | null>(null)
 const loading = ref(false)
@@ -31,7 +34,7 @@ const pollingError = ref('')
 const analysisMode = ref<AnalysisMode>('deep')
 const checkpoint = ref('10:30')
 const notify = ref(true)
-const analysisPanel = ref<HTMLElement | null>(null)
+const analysisPanel = useTemplateRef<HTMLElement>('analysisPanel')
 let initialized = false
 let pollTimer: number | null = null
 let pollBusy = false
@@ -44,9 +47,11 @@ const {
   setSelectedPortfolio,
 } = usePortfolioContext()
 
+/***********************核对与确认条件*********************/
 const canUpload = computed(() => Boolean(selectedFile.value))
+const observedAt = computed(() => observationTimeToIso(observedAtInput.value))
 const identityIssueCount = computed(() => parsed.value?.holdings.filter((holding) => holding.resolution_status !== 'RESOLVED' || !holding.canonical_code || !holding.security_id).length || 0)
-const canConfirm = computed(() => Boolean(upload.value && parsed.value?.holdings.length && !upload.value.validation_errors.length && identityIssueCount.value === 0))
+const canConfirm = computed(() => Boolean(upload.value && parsed.value?.holdings.length && observedAt.value && !upload.value.validation_errors.length && identityIssueCount.value === 0))
 const snapshotIdentityBlocked = computed(() => Boolean(snapshot.value && snapshot.value.identity_status && snapshot.value.identity_status !== 'RESOLVED'))
 const terminalJob = computed(() => ['succeeded', 'failed', 'cancelled'].includes(job.value?.status || ''))
 const stageLabels: Record<string, string> = {
@@ -86,8 +91,9 @@ function uploadStatusText(status?: string | null) {
   }[String(status || '').toLowerCase()] || businessLabel(status || 'UNKNOWN'))
 }
 
+/***********************截图草稿与上传轮询*********************/
 function emptyParsed(): ParsedHoldings {
-  return { holdings: [], excluded_items: [], notes: [] }
+  return { holdings: [], excluded_items: [], notes: [], observed_at: null }
 }
 
 function stopPolling() {
@@ -105,6 +111,7 @@ function clearDraft() {
   previewUrl.value = ''
   upload.value = null
   parsed.value = null
+  observedAtInput.value = ''
   job.value = null
 }
 
@@ -114,6 +121,7 @@ function setSelectedFile(file: File | null) {
   previewUrl.value = file ? URL.createObjectURL(file) : ''
   upload.value = null
   parsed.value = null
+  observedAtInput.value = ''
   snapshot.value = null
   job.value = null
 }
@@ -237,6 +245,7 @@ async function saveParsed(): Promise<boolean> {
   if (!upload.value || !parsed.value) return false
   saving.value = true
   try {
+    parsed.value.observed_at = observedAt.value
     upload.value = await api.updateParsedHoldings(upload.value.id, parsed.value)
     parsed.value = upload.value.parsed || parsed.value
     message.success('持仓修正已保存')
@@ -265,6 +274,10 @@ async function retryVision() {
 
 async function confirmHoldings(startAnalysis = false) {
   if (!upload.value) return
+  if (!observedAt.value) {
+    message.error('请填写有效的截图事实时间（北京时间）')
+    return
+  }
   confirming.value = true
   try {
     const saved = await saveParsed()
@@ -285,6 +298,7 @@ async function confirmHoldings(startAnalysis = false) {
   }
 }
 
+/***********************分析任务与轮询*********************/
 async function runAnalysis() {
   if (!snapshot.value || snapshotIdentityBlocked.value || analysisStarting.value) return
   analysisStarting.value = true
@@ -361,6 +375,7 @@ async function openReport() {
   if (job.value?.run_id) await router.push({ name: 'reports', query: { run: job.value.run_id } })
 }
 
+/***********************上下文与事件生命周期*********************/
 watch(portfolioId, async (id, previous) => {
   if (!initialized || id === previous) return
   clearDraft()
@@ -459,6 +474,9 @@ onUnmounted(() => {
       </div>
 
       <div class="fund-grid">
+        <n-form-item label="截图事实时间（北京时间）" required>
+          <input v-model="observedAtInput" type="datetime-local" step="1" required data-testid="upload-observed-at" />
+        </n-form-item>
         <n-form-item label="总资产"><n-input-number v-model:value="parsed.total_assets" :show-button="false" /></n-form-item>
         <n-form-item label="持仓总市值"><n-input-number v-model:value="parsed.total_market_value" :show-button="false" /></n-form-item>
         <n-form-item label="券商可用资金"><n-input-number v-model:value="parsed.broker_available_cash" :show-button="false" /></n-form-item>

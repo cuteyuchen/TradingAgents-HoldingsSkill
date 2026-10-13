@@ -9,7 +9,7 @@
 import { businessLabel } from '../../utils/businessLocale'
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, ApiError } from '../../api'
+import { api, isCancelledRequest } from '../../api'
 import type {
   DailyDashboard,
   MarketSessionResponse,
@@ -32,13 +32,7 @@ import {
 export { buildHoldingsViewModel, holdingsPollIntervals, mapQuoteItem }
 
 export function isAbortError(error: unknown): boolean {
-  if (!error) return false
-  if (error instanceof DOMException && error.name === 'AbortError') return true
-  if (error instanceof ApiError) {
-    const cause = error.cause as { name?: string } | undefined
-    if (cause && (cause.name === 'AbortError' || (cause as Error).name === 'AbortError')) return true
-  }
-  return false
+  return isCancelledRequest(error)
 }
 
 interface RequestSlot {
@@ -136,19 +130,6 @@ export function useV3Holdings() {
 
   const hasPortfolio = computed(() => portfolios.value.length > 0 && Boolean(selectedPortfolioId.value))
 
-  const quoteCoverage = computed<number | null>(() => {
-    const snap = snapshotOwnerId.value === selectedPortfolioId.value ? snapshot.value : null
-    if (!snap) return null
-    const codes = resolvedQuoteCodes()
-    if (!codes.length) return null
-    const map = quotesOwnerId.value === selectedPortfolioId.value ? quotes.value : new Map<string, V3QuoteVM>()
-    const covered = codes.filter((key) => {
-      const quote = map.get(key) || map.get(String(key).split('.')[0])
-      return Boolean(quote && quote.last !== null && quote.status !== 'MISSING')
-    })
-    return covered.length / codes.length
-  })
-
   const currentSnapshot = computed<PortfolioSnapshot | null>(() => {
     if (snapshotOwnerId.value === null) return null
     if (snapshotOwnerId.value !== selectedPortfolioId.value) return null
@@ -186,9 +167,9 @@ export function useV3Holdings() {
       dashboard: currentDashboard.value,
       quotes: currentQuotes.value,
       quotesAsOf: quotesOwnerId.value === selectedPortfolioId.value ? quotesAsOf.value : null,
-      quoteCoverage: quoteCoverage.value,
       session: (session.value?.session ?? null) as V3HoldingsViewModel['timestamps']['session'],
       sessionLabel: businessLabel(session.value?.session || session.value?.display_label || 'UNKNOWN'),
+      sessionTradingDate: session.value?.trading_date ?? null,
       filter: filter.value,
       sort: sort.value,
     }),
@@ -230,7 +211,7 @@ export function useV3Holdings() {
       if (isAbortError(error) || !isCurrent(slotSession, ctx.seq)) return
       sessionError.value = error
     } finally {
-      if (isCurrent(slotSession, ctx.seq) && !silent) sessionLoading.value = false
+      if (isCurrent(slotSession, ctx.seq)) sessionLoading.value = false
     }
   }
 
@@ -275,7 +256,7 @@ export function useV3Holdings() {
       snapshotError.value = error
       snapshotErrorOwnerId.value = portfolioId
     } finally {
-      if (isCurrent(slotSnapshot, ctx.seq) && !silent) snapshotLoading.value = false
+      if (isCurrent(slotSnapshot, ctx.seq)) snapshotLoading.value = false
     }
   }
 
@@ -304,7 +285,7 @@ export function useV3Holdings() {
       dashboardError.value = error
       dashboardErrorOwnerId.value = portfolioId
     } finally {
-      if (isCurrent(slotDashboard, ctx.seq) && !silent) dashboardLoading.value = false
+      if (isCurrent(slotDashboard, ctx.seq)) dashboardLoading.value = false
     }
   }
 
@@ -378,7 +359,7 @@ export function useV3Holdings() {
       quotesError.value = error
       quotesErrorOwnerId.value = portfolioId
     } finally {
-      if (isCurrent(slotQuotes, ctx.seq) && !silent) quotesLoading.value = false
+      if (isCurrent(slotQuotes, ctx.seq)) quotesLoading.value = false
     }
   }
 

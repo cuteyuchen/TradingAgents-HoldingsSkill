@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Activity, LockKeyhole } from 'lucide-vue-next'
 import { useMessage } from 'naive-ui'
 
-import { api, saveSession } from '../api'
+import { api, getSessionGeneration, getSessionId, isCancelledRequest, saveSession } from '../api'
 import AppVersion from '../components/AppVersion.vue'
 
+/***********************登录表单与交互状态*********************/
 const router = useRouter()
 const route = useRoute()
 const message = useMessage()
@@ -17,10 +18,13 @@ const password = ref('')
 const confirmPassword = ref('')
 const loading = ref(false)
 const error = ref('')
+let active = true
 
 const title = computed(() => (mode.value === 'login' ? '进入投资驾驶舱' : '建立本地安全入口'))
 
+/***********************登录与注册提交*********************/
 async function submit() {
+  if (loading.value) return
   error.value = ''
   if (!email.value.trim() || !password.value) {
     error.value = '请填写邮箱和密码'
@@ -31,19 +35,23 @@ async function submit() {
     return
   }
   loading.value = true
+  const generation = getSessionGeneration()
+  const sessionId = getSessionId()
+  const submittedMode = mode.value
   try {
-    const tokens = mode.value === 'login'
+    const tokens = submittedMode === 'login'
       ? await api.login({ email: email.value.trim(), password: password.value, device_info: navigator.userAgent })
       : await api.register({ email: email.value.trim(), username: username.value.trim() || undefined, password: password.value })
+    // 跨标签页的存储事件可能尚未送达，提交前还必须核对持久会话归属。
+    if (!active || generation !== getSessionGeneration() || sessionId !== getSessionId()) return
     saveSession(tokens)
-    window.dispatchEvent(new CustomEvent('advisor-session-changed'))
-    message.success(mode.value === 'login' ? '登录成功' : '账户创建成功')
+    message.success(submittedMode === 'login' ? '登录成功' : '账户创建成功')
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/dashboard'
     await router.replace(redirect)
   } catch (e) {
-    error.value = (e as Error).message
+    if (active && generation === getSessionGeneration() && sessionId === getSessionId() && !isCancelledRequest(e)) error.value = (e as Error).message
   } finally {
-    loading.value = false
+    if (active) loading.value = false
   }
 }
 
@@ -51,6 +59,9 @@ function switchMode() {
   mode.value = mode.value === 'login' ? 'register' : 'login'
   error.value = ''
 }
+
+/***********************登录提交生命周期*********************/
+onBeforeUnmount(() => { active = false })
 </script>
 
 <template>

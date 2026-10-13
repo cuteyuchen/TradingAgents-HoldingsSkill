@@ -1,6 +1,7 @@
 """Pydantic schemas for the V2 product API."""
 from datetime import datetime
 from collections.abc import Mapping
+import math
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -175,6 +176,18 @@ class HoldingInput(BaseModel):
     weight: float | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("qty", "available_qty", "cost", "price", "market_value", "pnl", "pnl_amount", "weight", mode="before")
+    @classmethod
+    def reject_non_finite_numbers(cls, value: Any) -> Any:
+        if value is not None:
+            try:
+                finite = math.isfinite(float(value))
+            except (TypeError, ValueError, OverflowError):
+                finite = False
+            if isinstance(value, bool) or not finite:
+                raise ValueError("holding_number_must_be_finite")
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def preserve_raw_identity(cls, value: Any) -> Any:
@@ -242,6 +255,7 @@ class HoldingInput(BaseModel):
 
 class ParsedHoldingsPayload(BaseModel):
     holdings: list[HoldingInput] = Field(default_factory=list)
+    observed_at: datetime | None = None
     total_assets: float | None = None
     total_market_value: float | None = None
     broker_available_cash: float | None = None
@@ -249,6 +263,18 @@ class ParsedHoldingsPayload(BaseModel):
     repo_or_standard_bond_value: float | None = None
     excluded_items: list[dict[str, Any]] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+    @field_validator("total_assets", "total_market_value", "broker_available_cash", "corrected_unused_funds", "repo_or_standard_bond_value", mode="before")
+    @classmethod
+    def reject_non_finite_totals(cls, value: Any) -> Any:
+        if value is not None:
+            try:
+                finite = math.isfinite(float(value))
+            except (TypeError, ValueError, OverflowError):
+                finite = False
+            if isinstance(value, bool) or not finite:
+                raise ValueError("account_number_must_be_finite")
+        return value
 
 
 class UploadResponse(BaseModel):
@@ -276,6 +302,10 @@ class SnapshotResponse(BaseModel):
     upload_id: int | None
     source: str
     snapshot_time: datetime
+    observed_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    ingested_at: datetime | None = None
+    observation_time_status: str = "UNVERIFIED"
     status: str
     total_assets: float | None
     total_market_value: float | None

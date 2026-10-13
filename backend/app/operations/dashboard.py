@@ -292,6 +292,7 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         PortfolioSnapshot.portfolio_id == portfolio_id,
         PortfolioSnapshot.status == "confirmed",
         PortfolioSnapshot.snapshot_time <= cutoff,
+        PortfolioSnapshot.created_at <= cutoff,
     ).order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc()).limit(1)).scalar_one_or_none()
     if snapshot is None:
         return {"status": "MISSING", "snapshot_id": None, "holdings": [], "hard_cap_breaches": []}
@@ -309,15 +310,22 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
 
     def derived_value(code: Any, key: str, fallback: Any) -> Any:
         row = derived_by_code.get(str(code or ""))
-        value = row.get(key) if isinstance(row, dict) else None
-        return value if value is not None else fallback
+        return row.get(key) if isinstance(row, dict) and key in row else fallback
 
     risk_flags = list(risk.risk_flags_json or []) if risk else []
+    risk_flags = list(dict.fromkeys([*risk_flags, *account["flags"]]))
+    account_blocked = (
+        "SNAPSHOT_OBSERVATION_TIME_UNVERIFIED" in account["flags"]
+        or any(flag.startswith(("LEDGER_AMOUNT_MISSING:", "LEDGER_CURRENCY_UNSUPPORTED:", "POSITION_QUANTITY_UNKNOWN:"))
+               for flag in account["flags"])
+    )
+    quality_status = "BLOCKED" if account_blocked else str(risk.quality_status if risk else "DEGRADED").upper()
     total_assets = snapshot.total_assets
     market_value = snapshot.total_market_value
-    spendable_cash = account["cash"]["available"] if account["cash"]["available"] is not None else snapshot.broker_available_cash
+    # Unknown spendable cash cannot be restored from an older snapshot or risk row.
+    spendable_cash = account["cash"]["available"]
     can_compute_ratio = total_assets is not None and total_assets > 0
-    reserve_assets = snapshot_reserve_assets(snapshot)
+    reserve_assets = None if account_blocked else snapshot_reserve_assets(snapshot)
     position_count = len(holdings)
     imported_pnl_amount = (
         round(sum(item.pnl_amount for item in holdings), 2)
@@ -330,8 +338,8 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         else None
     )
     return {
-        "status": str(risk.quality_status if risk else "DEGRADED").upper(),
-        "quality_status": str(risk.quality_status if risk else "DEGRADED").upper(),
+        "status": quality_status,
+        "quality_status": quality_status,
         "freshness": _freshness(snapshot.snapshot_time, cutoff=cutoff, limit_seconds=FRESHNESS_LIMITS_SECONDS["portfolio"]),
         "snapshot_id": snapshot.id,
         "snapshot_time": snapshot.snapshot_time,
@@ -343,8 +351,8 @@ def _portfolio_section(db: Session, *, user_id: int, portfolio_id: int, cutoff: 
         "account_entry_count": account["entry_count"],
         "reserve_assets": reserve_assets,
         "reserve_ratio": reserve_assets / total_assets if reserve_assets is not None and total_assets else None,
-        "cash_ratio": risk.cash_ratio if risk and risk.cash_ratio is not None else spendable_cash / total_assets if can_compute_ratio and spendable_cash is not None else None,
-        "gross_exposure": risk.gross_exposure if risk and risk.gross_exposure is not None else market_value / total_assets if can_compute_ratio and market_value is not None else None,
+        "cash_ratio": None if account_blocked or spendable_cash is None else risk.cash_ratio if risk and risk.cash_ratio is not None else spendable_cash / total_assets if can_compute_ratio else None,
+        "gross_exposure": None if account_blocked else risk.gross_exposure if risk and risk.gross_exposure is not None else market_value / total_assets if can_compute_ratio and market_value is not None else None,
         "top1_weight": risk.top1_weight if risk else None,
         "top3_weight": risk.top3_weight if risk else None,
         "top5_weight": risk.top5_weight if risk else None,
@@ -487,6 +495,7 @@ def _decision_validity(
         PortfolioSnapshot.portfolio_id == portfolio_id,
         PortfolioSnapshot.status == "confirmed",
         PortfolioSnapshot.snapshot_time <= cutoff,
+        PortfolioSnapshot.created_at <= cutoff,
     ).order_by(PortfolioSnapshot.snapshot_time.desc(), PortfolioSnapshot.id.desc()).limit(1)).scalar_one_or_none()
     metadata = payload.get("decision_validity") if isinstance(payload.get("decision_validity"), dict) else {}
     try:
@@ -497,11 +506,14 @@ def _decision_validity(
     if reference_account_version is None and isinstance(payload.get("result"), dict):
         reference_account_version = payload["result"].get("account_version")
     current_account_version: str | None = None
+    current_account_flags: list[str] = []
     if snapshot is not None:
         try:
-            current_account_version = build_account_state(
+            account = build_account_state(
                 db, portfolio_id=portfolio_id, snapshot=snapshot, as_of=cutoff
-            )["account_version"]
+            )
+            current_account_version = account["account_version"]
+            current_account_flags = account["flags"]
         except Exception:  # noqa: BLE001
             logger.exception("Account version derivation failed for portfolio %s", portfolio_id)
     status, reason = "UNVERIFIED", "VALIDITY_WINDOW_UNAVAILABLE"
@@ -511,6 +523,12 @@ def _decision_validity(
         reason = "PORTFOLIO_LINEAGE_UNAVAILABLE"
     elif source_snapshot_id != snapshot.id:
         status, reason = "EXPIRED", "PORTFOLIO_SNAPSHOT_CHANGED"
+    elif (
+        "SNAPSHOT_OBSERVATION_TIME_UNVERIFIED" in current_account_flags
+        or any(flag.startswith(("LEDGER_AMOUNT_MISSING:", "LEDGER_CURRENCY_UNSUPPORTED:", "POSITION_QUANTITY_UNKNOWN:"))
+               for flag in current_account_flags)
+    ):
+        reason = "PORTFOLIO_ACCOUNT_FACTS_UNVERIFIED"
     elif (
         reference_account_version
         and current_account_version
